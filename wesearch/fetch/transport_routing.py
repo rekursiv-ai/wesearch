@@ -47,7 +47,11 @@ def zendriver_domains_path() -> Path:
 
 
 def _bundled_domains_path() -> Path:
-    """Return the read-only domain defaults shipped with Loop."""
+    """Return the read-only domain defaults shipped alongside this module.
+
+    Optional: ``_read_domains`` returns an empty set when the file is absent, so
+    a checkout without it simply starts with no bundled defaults.
+    """
     return Path(__file__).parent / "zendriver-domains.txt"
 
 

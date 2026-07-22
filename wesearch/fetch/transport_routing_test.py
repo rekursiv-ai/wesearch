@@ -24,12 +24,15 @@ def test_default_remember_does_not_modify_bundled_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundled = Path(__file__).parent / "zendriver-domains.txt"
-    before = bundled.read_bytes()
+    # The bundled default list is optional; read defensively so this asserts
+    # "the bundle is never mutated" whether it is present or absent.
+    before = bundled.read_bytes() if bundled.exists() else None
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     remember_zendriver_domain("learned.example")
 
-    assert bundled.read_bytes() == before
+    after = bundled.read_bytes() if bundled.exists() else None
+    assert after == before
     assert zendriver_domains_path().read_text() == "learned.example\n"
     assert "learned.example" in zendriver_domains()
 
