@@ -118,6 +118,24 @@ def test_web_fetch_extracts_and_truncates(monkeypatch: pytest.MonkeyPatch) -> No
     assert text.startswith("Hello")
 
 
+def test_dedupe_drops_fusion_duplicates() -> None:
+    first = PaperRecord(title="CogToM", arxiv_id="2601.15628")
+    by_title = PaperRecord(title="cogtom ")
+    by_id = PaperRecord(title="CogToM: a benchmark", arxiv_id="2601.15628")
+    distinct = PaperRecord(title="MuMA-ToM")
+    unique = mcp_server._dedupe([first, by_title, by_id, distinct])
+    assert unique == [first, distinct]
+
+
+def test_paper_search_dedupes_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = PaperSearchResult(records=[_RECORD, _RECORD], total=2, complete=True)
+    monkeypatch.setattr(mcp_server.paper_search_mod, "search", lambda *_a, **_k: fake)
+    out = mcp_server.paper_search("dupes")
+    records = out["records"]
+    assert isinstance(records, list)
+    assert len(records) == 1
+
+
 def test_all_tools_registered() -> None:
     tools = asyncio.run(mcp_server.mcp.list_tools())
     names = {tool.name for tool in tools}

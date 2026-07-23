@@ -76,6 +76,29 @@ def _lean_paper(
     return {k: v for k, v in fields.items() if v not in (None, [], "")}
 
 
+def _dedupe(records: list[PaperRecord]) -> list[PaperRecord]:
+    """Drop duplicate papers, keeping the first (highest-ranked) occurrence.
+
+    Fused search can emit the same paper several times when the backends
+    return it under records that share no identifier (observed live: 2-4
+    copies, ~30% token inflation). Two records are duplicates when they
+    share a DOI, an arXiv id, or a casefolded title.
+    """
+    seen: set[str] = set()
+    unique: list[PaperRecord] = []
+    for record in records:
+        keys = [
+            key
+            for key in (record.doi, record.arxiv_id, record.title.casefold().strip())
+            if key
+        ]
+        if any(key in seen for key in keys):
+            continue
+        seen.update(keys)
+        unique.append(record)
+    return unique
+
+
 def _lean_author(record: AuthorRecord) -> dict[str, object]:
     fields: dict[str, object] = {
         "author_id": record.author_id,
@@ -110,7 +133,7 @@ def paper_search(
         open_access_only=open_access_only,
     )
     return {
-        "records": [_lean_paper(r) for r in result.records],
+        "records": [_lean_paper(r) for r in _dedupe(result.records)],
         "total": result.total,
         "complete": result.complete,
     }
