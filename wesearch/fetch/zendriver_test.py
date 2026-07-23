@@ -2,7 +2,10 @@
 
 Hermetic: a fake async browser stands in for zendriver, so the transport logic
 (cookie-domain filtering, challenge detection, redirect callback, pool reuse)
-is exercised with no Chrome and no network.
+is exercised with no Chrome and no network. One exception:
+``test_launch_browser_uses_vanilla_zendriver_config`` builds a real
+``zendriver.Config``, which probes for an installed browser binary regardless
+of whether ``zendriver.start`` is mocked; it is skipped where none is found.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
+import shutil
 import subprocess
 import tempfile
 
@@ -26,6 +30,24 @@ import wesearch.fetch.zendriver as fz_mod
 # A fake profile dir; the browser is mocked in every test, so it is never
 # touched on disk.
 _PROFILE = Path("test-profile")
+
+# Names ``zendriver.core.config.find_executable`` probes for on PATH (chrome,
+# then brave). Kept in sync with upstream by name only, not by importing its
+# private candidate list.
+_BROWSER_BINARY_NAMES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "brave-browser",
+    "brave",
+)
+
+
+def _browser_binary_installed() -> bool:
+    """True if a Chrome/Chromium/Brave binary zendriver could launch is on PATH."""
+    return any(shutil.which(name) for name in _BROWSER_BINARY_NAMES)
 
 
 def test_direct_executable_reexecutes_as_module() -> None:
@@ -149,6 +171,11 @@ def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> _Stub
     return pool
 
 
+@pytest.mark.skipif(
+    not _browser_binary_installed(),
+    reason="zendriver.Config() probes for a real browser binary even when "
+    "zendriver.start is mocked; none is installed on this machine.",
+)
 def test_launch_browser_uses_vanilla_zendriver_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
