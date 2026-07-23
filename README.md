@@ -79,10 +79,26 @@ A persistent per-`(egress_ip, domain)` profile (cookies + User-Agent) is
 loaded and saved transparently, and cross-process rate limiting paces
 requests so concurrent workers stay under each site's threshold.
 
-## Roadmap
+## MCP server
 
-An MCP server exposing `search` / `fetch` / paper-lookup as tools for
-coding agents is planned, so an agent can call the toolkit directly.
+The toolkit is directly callable by coding agents over MCP:
+
+```bash
+pip install 'wesearch[mcp]'
+wesearch-mcp                  # serves stdio; register it with your MCP client
+```
+
+For Claude Code: `claude mcp add --scope user wesearch -- wesearch-mcp`.
+
+Tools exposed: `paper_search` (fused Semantic Scholar + OpenAlex),
+`paper_details`, `paper_references`, `paper_citations`, `paper_pdf`
+(downloads into the user cache and returns the path), `author_search`,
+`author_papers`, `web_search`, and `web_fetch` (extracted page text, with an
+opt-in headless-browser fallback for bot-walled sites). Outputs are
+deliberately compact for model consumption; abstracts are truncated and
+empty fields dropped. The server is synchronous and per-client — state that
+must be shared (rate limits, cookie/UA profiles) is already cross-process
+safe on disk, so no daemon is needed.
 
 ## License
 
