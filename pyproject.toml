@@ -59,6 +59,12 @@ dev = [
     {include-group = "typecheck"},
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.10"]
+
+[project.scripts]
+wesearch-mcp = "wesearch.mcp_server:main"
+
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
 Repository = "https://github.com/rekursiv-ai/wesearch"
