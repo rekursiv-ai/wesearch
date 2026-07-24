@@ -129,7 +129,7 @@ def batch_oa_urls(wire_ids: list[str]) -> list[str | None] | None:
     """
     try:
         papers = s2.batch(wire_ids, "openAccessPdf")
-    except Exception:  # noqa: BLE001 -- any backend failure -> fall back per-id
+    except Exception:
         return None
     return [oa_url_of(p) if p is not None else None for p in papers]
 
@@ -152,7 +152,7 @@ def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
         data = s2.get(
             f"/paper/{s2_wire_id(kind, canonical)}", {"fields": "openAccessPdf"}
         )
-    except Exception:  # noqa: BLE001 -- no OA copy discoverable on any failure
+    except Exception:
         return None
     return oa_url_of(data)
 

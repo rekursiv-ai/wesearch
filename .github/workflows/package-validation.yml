@@ -31,7 +31,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
         run: |
-          uv sync --frozen --all-groups
+          uv sync --frozen --all-groups --all-extras
           uv run ruff check --no-fix --no-cache .
           uv run ruff format --check --no-cache .
           uv run codespell .
