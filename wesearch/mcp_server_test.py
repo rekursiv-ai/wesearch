@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import importlib
@@ -16,13 +16,31 @@ import pytest
 pytest.importorskip("mcp.server.fastmcp")
 
 from wesearch import mcp_server
+from wesearch.paper import (
+    authors as paper_authors_mod,
+    details as paper_details_mod,
+    fetch as paper_fetch_mod,
+    search as paper_search_mod,
+)
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.search import SearchResult as PaperSearchResult
 from wesearch.search import SearchResult as WebSearchResult
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+
+def _returns[T](value: T) -> Callable[..., T]:
+    """Return a typed stub callable for monkeypatching.
+
+    A bare ``lambda *_a, **_k: value`` loses its signature to the type checker
+    (reportUnknownLambdaType). This preserves the return type so patched calls
+    stay fully typed.
+    """
+    return lambda *_args, **_kwargs: value
+
 
 _RECORD = PaperRecord(
     title="Microcanonical Sampling",
@@ -54,7 +72,7 @@ def test_clip_passes_short_text_through() -> None:
 
 def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = PaperSearchResult(records=[_RECORD], total=41, complete=False)
-    monkeypatch.setattr(mcp_server.paper_search_mod, "search", lambda *_a, **_k: fake)
+    monkeypatch.setattr(paper_search_mod, "search", _returns(fake))
     out = mcp_server.paper_search("mclmc")
     assert out["total"] == 41
     assert out["complete"] is False
@@ -70,7 +88,7 @@ def test_paper_details_normalizes_id(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["id"] = (kind, canonical)
         return _RECORD
 
-    monkeypatch.setattr(mcp_server.paper_details_mod, "metadata", fake_metadata)
+    monkeypatch.setattr(paper_details_mod, "metadata", fake_metadata)
     out = mcp_server.paper_details("https://arxiv.org/abs/2503.01234v2")
     assert seen["id"] == ("arxiv", "2503.01234v2")
     assert out["id"] == "arxiv:2503.01234v2"
@@ -80,11 +98,11 @@ def test_paper_pdf_writes_cache_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        mcp_server.paper_fetch_mod,
+        paper_fetch_mod,
         "download",
-        lambda *_a, **_k: (b"%PDF-fake", "arxiv"),
+        _returns((b"%PDF-fake", "arxiv")),
     )
-    monkeypatch.setattr(mcp_server, "cache_dir", lambda _app: tmp_path)
+    monkeypatch.setattr(mcp_server, "cache_dir", _returns(tmp_path))
     out = mcp_server.paper_pdf("arxiv:2503.01234")
     path = out["path"]
     assert isinstance(path, str)
@@ -96,17 +114,15 @@ def test_paper_pdf_writes_cache_file(
 
 def test_author_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     record = AuthorRecord(author_id="123", name="Ada", h_index=40)
-    fake = mcp_server.paper_authors_mod.AuthorSearchResult(records=[record], total=1)
-    monkeypatch.setattr(
-        mcp_server.paper_authors_mod, "search_authors", lambda *_a, **_k: fake
-    )
+    fake = paper_authors_mod.AuthorSearchResult(records=[record], total=1)
+    monkeypatch.setattr(paper_authors_mod, "search_authors", _returns(fake))
     out = mcp_server.author_search("ada")
     assert out["records"] == [{"author_id": "123", "name": "Ada", "h_index": 40}]
 
 
 def test_web_search_returns_lean_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [WebSearchResult(url="https://e.co", title="E", snippet="s")]
-    monkeypatch.setattr(mcp_server, "web_search_fn", lambda *_a, **_k: rows)
+    monkeypatch.setattr(mcp_server, "web_search_fn", _returns(rows))
     out = mcp_server.web_search("q")
     assert out == [{"url": "https://e.co", "title": "E", "snippet": "s"}]
 
@@ -116,7 +132,7 @@ def test_web_fetch_extracts_and_truncates(monkeypatch: pytest.MonkeyPatch) -> No
     # shadows the submodule of the same name.
     fetch_module = importlib.import_module("wesearch.fetch.fetch")
     html = b"<html><body><p>Hello</p><script>no</script><p>World</p></body></html>"
-    monkeypatch.setattr(fetch_module, "fetch", lambda *_a, **_k: (html, object()))
+    monkeypatch.setattr(fetch_module, "fetch", _returns((html, object())))
     out = mcp_server.web_fetch("https://e.co", max_chars=7)
     assert out["truncated"] is True
     text = out["text"]
@@ -135,11 +151,11 @@ def test_dedupe_drops_fusion_duplicates() -> None:
 
 def test_paper_search_dedupes_records(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = PaperSearchResult(records=[_RECORD, _RECORD], total=2, complete=True)
-    monkeypatch.setattr(mcp_server.paper_search_mod, "search", lambda *_a, **_k: fake)
+    monkeypatch.setattr(paper_search_mod, "search", _returns(fake))
     out = mcp_server.paper_search("dupes")
     records = out["records"]
     assert isinstance(records, list)
-    assert len(records) == 1
+    assert len(cast("list[object]", records)) == 1
 
 
 def test_all_tools_registered() -> None:
