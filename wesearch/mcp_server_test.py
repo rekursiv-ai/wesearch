@@ -7,6 +7,14 @@ from typing import TYPE_CHECKING
 import asyncio
 import importlib
 
+import pytest
+
+
+# The MCP server needs the optional [mcp] extra. Skip the whole module when it is
+# absent (e.g. a plain `uv run pytest` without --all-extras) instead of erroring
+# on collection; CI installs the extra and exercises these tests.
+pytest.importorskip("mcp.server.fastmcp")
+
 from wesearch import mcp_server
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.search import SearchResult as PaperSearchResult
@@ -15,8 +23,6 @@ from wesearch.search import SearchResult as WebSearchResult
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 _RECORD = PaperRecord(
     title="Microcanonical Sampling",

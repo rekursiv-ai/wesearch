@@ -159,6 +159,7 @@ ignore = [
     "ANN",     # Flake8 annotations. (We use pyright for type checking.)
     "C90",     # McCabe complexity.
     "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.)
+    "CPY001",  # Missing copyright notice. (License is in LICENSE, not per-file.)
 
     # Relax docstring rules.
     "D100",    # Undocumented public module.
@@ -196,6 +197,7 @@ ignore = [
     "PLR0912", # Too many branches.
     "PLR0913", # Too many arguments.
     "PLR0915", # Too many statements.
+    "PLR0917", # Too many positional arguments. (Protocol/tool signatures.)
     "PLR2044", # Empty comment.
     "PLW0642", # Self or cls assignment.
     "RET504",  # Unnecessary assign.
