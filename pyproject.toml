@@ -1,6 +1,6 @@
 [project]
 name = "wesearch"
-version = "0.1.0"
+version = "0.1.1"
 description = "Web search, fetch, and paper-research toolkit."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,6 +31,13 @@ dependencies = [
     "wrapt",
 ]
 
+[project.optional-dependencies]
+# The MCP server (wesearch-mcp) exposes wesearch tools to agent clients.
+mcp = ["mcp>=1.10"]
+
+[project.scripts]
+wesearch-mcp = "wesearch.mcp_server:main"
+
 [dependency-groups]
 # uv sync --all-groups
 
@@ -58,12 +65,6 @@ dev = [
     {include-group = "test"},
     {include-group = "typecheck"},
 ]
-
-[project.optional-dependencies]
-mcp = ["mcp>=1.10"]
-
-[project.scripts]
-wesearch-mcp = "wesearch.mcp_server:main"
 
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
@@ -180,6 +181,7 @@ ignore = [
 
     # Standard style relaxations.
     "A002",    # Builtin argument shadowing.
+    "BLE001",  # Blind exception (teardown/back-channel handlers must not raise).
     "E501",    # Line too long. (Will be fixed by formatter.)
     "EM101",   # Raw string in exception.
     "EM102",   # F-string in exception.
@@ -297,6 +299,7 @@ reportExplicitAny = false                  # Explicit `Any` annotations are inte
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
 reportInvalidCast = false                  # All cast() calls are intentional.
 reportPrivateUsage = false                 # Redundant with ruff SLF001.
+reportPrivateLocalImportUsage = false      # Sibling *_test.py import module-private aliases.
 reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
 reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
 reportUnusedImport = false                 # Redundant with ruff F401.

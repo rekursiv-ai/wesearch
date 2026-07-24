@@ -211,32 +211,6 @@ def _sandbox() -> bool:
     return os.geteuid() != 0
 
 
-_CONNECTION_TIMEOUT_ENV = "WESEARCH_BROWSER_CONNECTION_TIMEOUT_SEC"
-
-
-def _browser_connection_timeout() -> float:
-    """Seconds to wait for Chrome's DevTools channel before giving up.
-
-    The 1.0 s default fails fast when no usable browser exists (keeping the
-    curl-then-zendriver cascade snappy), but wrapper-launched browsers need
-    longer to expose DevTools -- Ubuntu's snap chromium takes several seconds
-    per launch, so the default can never connect there (each retry restarts
-    the browser, so short windows never accumulate into a success). Set
-    ``WESEARCH_BROWSER_CONNECTION_TIMEOUT_SEC`` (e.g. to ``30``) to accommodate
-    them; the launch is pooled, so the cost is paid once per profile, not per
-    fetch. An unset, empty, or malformed value keeps the default. Snap
-    chromium additionally needs the profile jar on a non-hidden path -- see
-    the README's snap note.
-    """
-    raw = os.environ.get(_CONNECTION_TIMEOUT_ENV, "")
-    if not raw:
-        return 1.0
-    try:
-        return float(raw)
-    except ValueError:
-        return 1.0
-
-
 def default_profile_dir() -> Path:
     """The fresh dedicated Chrome ``user_data_dir`` the browser backend uses.
 
@@ -380,7 +354,7 @@ async def _launch_browser(
                 headless=headless,
                 user_data_dir=str(profile_dir),
                 sandbox=_sandbox(),
-                browser_connection_timeout=_browser_connection_timeout(),
+                browser_connection_timeout=1.0,
             )
         )
     except Exception as error:
@@ -566,7 +540,7 @@ class _BrowserPool:
         for browser in browsers:
             try:
                 self.run(browser.stop())
-            except Exception:  # noqa: BLE001 -- teardown must not raise.
+            except Exception:
                 logger.debug("browser stop failed during shutdown", exc_info=True)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()

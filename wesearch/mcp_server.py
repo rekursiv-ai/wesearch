@@ -33,9 +33,11 @@ from wesearch.search import search as web_search_fn
 if TYPE_CHECKING:
     from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 
-_ABSTRACT_CHARS = 500
-_DETAIL_ABSTRACT_CHARS = 1500
-_MAX_AUTHORS = 5
+_ABSTRACT_CHARS = 500  # config-globals: ignore -- token-lean output tuning constant.
+_DETAIL_ABSTRACT_CHARS = (
+    1500  # config-globals: ignore -- token-lean output tuning constant.
+)
+_MAX_AUTHORS = 5  # config-globals: ignore -- token-lean output tuning constant.
 
 mcp = FastMCP(
     name="wesearch",
