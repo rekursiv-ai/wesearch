@@ -172,9 +172,9 @@ def fetch_stdlib(
                     current_url,
                     request_headers,
                     method,
-                    body,
-                    response.status,
-                    redirect_url,
+                    body=body,
+                    status=response.status,
+                    redirect_url=redirect_url,
                 )
                 if (
                     redir_hostname != hostname
