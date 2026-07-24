@@ -1,4 +1,4 @@
-"""Rate limiters (sync-back test): sliding-window and token-bucket.
+"""Rate limiters: sliding-window and token-bucket.
 
 Each limiter blocks the caller until a request slot is available, via either
 :meth:`acquire` (sync, sleeps the thread) or :meth:`acquire_async` (sleeps
