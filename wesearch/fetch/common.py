@@ -191,6 +191,7 @@ def apply_redirect(
     current_url: str,
     headers: dict[str, str],
     method: str,
+    *,
     body: bytes | None,
     status: int,
     redirect_url: str,

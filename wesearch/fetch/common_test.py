@@ -52,9 +52,9 @@ class TestApplyRedirect:
             "https://x/submit",
             {"content-type": "application/json", "Accept": "*/*"},
             "POST",
-            b"{}",
-            303,
-            "https://x/result",
+            body=b"{}",
+            status=303,
+            redirect_url="https://x/result",
         )
         assert method == "GET"
         assert body is None
@@ -62,14 +62,24 @@ class TestApplyRedirect:
 
     def test_302_downgrades_post_to_get(self) -> None:
         _headers, method, body = apply_redirect(
-            "https://x/submit", {}, "POST", b"{}", 302, "https://x/land"
+            "https://x/submit",
+            {},
+            "POST",
+            body=b"{}",
+            status=302,
+            redirect_url="https://x/land",
         )
         assert method == "GET"
         assert body is None
 
     def test_307_preserves_method_and_body(self) -> None:
         _headers, method, body = apply_redirect(
-            "https://x/submit", {}, "POST", b"{}", 307, "https://x/land"
+            "https://x/submit",
+            {},
+            "POST",
+            body=b"{}",
+            status=307,
+            redirect_url="https://x/land",
         )
         assert method == "POST"
         assert body == b"{}"
@@ -79,9 +89,9 @@ class TestApplyRedirect:
             "https://a.com/1",
             {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"', "Accept": "*/*"},
             "GET",
-            None,
-            302,
-            "https://b.com/2",
+            body=None,
+            status=302,
+            redirect_url="https://b.com/2",
         )
         assert "Cookie" not in headers
         assert "sec-ch-ua-arch" not in headers
@@ -92,9 +102,9 @@ class TestApplyRedirect:
             "https://a.com/1",
             {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"'},
             "GET",
-            None,
-            302,
-            "https://a.com/2",
+            body=None,
+            status=302,
+            redirect_url="https://a.com/2",
         )
         assert headers.get("Cookie") == "SID=x"
         assert headers.get("sec-ch-ua-arch") == '"x86"'

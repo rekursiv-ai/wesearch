@@ -219,7 +219,12 @@ class _CurlLoop:
         if on_redirect is not None:
             on_redirect(redirect_url)
         self.headers, self.method, self.body = apply_redirect(
-            self.url, self.headers, self.method, self.body, status, redirect_url
+            self.url,
+            self.headers,
+            self.method,
+            body=self.body,
+            status=status,
+            redirect_url=redirect_url,
         )
         self.url = redirect_url
         return True

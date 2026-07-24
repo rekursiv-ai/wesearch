@@ -116,6 +116,7 @@ def _lean_author(record: AuthorRecord) -> dict[str, object]:
 @mcp.tool()
 def paper_search(
     query: str,
+    *,
     source: Literal["fused", "s2", "openalex", "searxng"] = "fused",
     limit: int = 10,
     year_from: int | None = None,
