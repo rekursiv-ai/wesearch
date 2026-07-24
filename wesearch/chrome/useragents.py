@@ -24,6 +24,11 @@ import json
 import logging
 import random
 
+from wesearch.chrome.headers import (
+    chrome_user_agent,
+    impersonate_version_platform,
+)
+
 
 __all__ = [
     "UserAgentKind",
@@ -80,7 +85,15 @@ def refresh(kind: UserAgentKind) -> None:
         "https://raw.githubusercontent.com/intoli/user-agents/"
         "main/src/user-agents.json.gz"
     )
-    body, _ = fetch(url, request=RequestParams(timeout_sec=30))
+    body, _ = fetch(
+        url,
+        request=RequestParams(
+            headers={"User-Agent": _refresh_user_agent(kind)},
+            raw_headers=True,
+            timeout_sec=30,
+            transport="stdlib",
+        ),
+    )
     parsed: object = json.loads(gzip.decompress(body))
     if not isinstance(parsed, list):
         raise RuntimeError(f"expected JSON array from {url}; upstream shape changed?")  # noqa: TRY004
@@ -126,6 +139,12 @@ def _is_android_chrome(ua: str, device: str) -> bool:
 def _pool_path(kind: UserAgentKind) -> Path:
     """The file holding ``kind``'s pool, alongside this module."""
     return Path(__file__).with_name(f"{kind}_useragents.txt")
+
+
+def _refresh_user_agent(kind: UserAgentKind) -> str:
+    """Return a coherent fixed identity for the maintenance download."""
+    major, platform = impersonate_version_platform(impersonate_target(kind))
+    return chrome_user_agent(major, platform)
 
 
 if __name__ == "__main__":

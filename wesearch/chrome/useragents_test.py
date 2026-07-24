@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import ClassVar, cast
 from unittest.mock import patch
 
 import gzip
@@ -22,7 +23,7 @@ from wesearch.fetch import FetchSession
 
 
 @pytest.fixture(autouse=True)
-def clear_pool_cache() -> Any:
+def clear_pool_cache() -> Iterator[None]:
     """Isolate the module-global ``@cache``: a ``refresh`` test clears it and a
     ``_pool_path`` patch can seed tmp content, so reset it around every test to
     keep that state from leaking into other modules under xdist.
@@ -141,6 +142,26 @@ class TestRefresh:
             pytest.raises(RuntimeError, match="0 user agents"),
         ):
             useragents.refresh("chrome_desktop")
+
+    def test_refresh_bypasses_profile_and_egress_discovery(
+        self, tmp_path: Path
+    ) -> None:
+        pool_file = tmp_path / "chrome_desktop.txt"
+        payload = gzip.compress(json.dumps(self._DATASET).encode())
+        with (
+            patch(
+                "wesearch.fetch.fetch",
+                return_value=(payload, FetchSession()),
+            ) as fetch_mock,
+            patch.object(useragents, "_pool_path", return_value=pool_file),
+        ):
+            useragents.refresh("chrome_desktop")
+
+        request = fetch_mock.call_args.kwargs["request"]
+        assert request.transport == "stdlib"
+        assert request.raw_headers is True
+        assert request.headers is not None
+        assert request.headers["User-Agent"]
 
 
 if __name__ == "__main__":
