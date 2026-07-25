@@ -2,8 +2,8 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/wesearch.svg)](https://pypi.org/project/wesearch/)
 [![CI](https://github.com/rekursiv-ai/wesearch/actions/workflows/package-validation.yml/badge.svg?branch=main)](https://github.com/rekursiv-ai/wesearch/actions/workflows/package-validation.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/discord/1530237005311639592?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/2GZFPPvCqn)
 
 > **Pre-1.0:** the API surface may change before 1.0. Pin an exact version if you depend on it.
