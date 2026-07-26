@@ -18,6 +18,39 @@ def test_error_body_captcha_widget_is_puzzle(marker: str) -> None:
     assert classify_challenge(f'<div class="{marker}"></div>') is PuzzleChallengeError
 
 
+def test_captcha_provider_named_in_js_config_is_content() -> None:
+    # REV: a page that merely NAMES a captcha backend in its JS config (every
+    # Wikipedia article carries this in mw.config) must not be misread as a
+    # served challenge. The literal ``hcaptcha`` appears only inside a JSON
+    # string, never as a rendered widget element.
+    body = (
+        "<html><head><title>Reciprocal rank fusion - Wikipedia</title></head>"
+        '<body><script>RLCONF={"wgconfirmeditcaptchaneededforgenericedit":'
+        '"hcaptcha","wgconfirmeditforceshowcaptcha":false};</script>'
+        "<p>Reciprocal rank fusion is a method...</p></body></html>"
+    )
+    assert classify_challenge(body) is None
+
+
+def test_captcha_marker_in_script_src_is_content() -> None:
+    # A script reference to a captcha library (present on countless pages with a
+    # dormant, non-blocking widget) is not a served challenge.
+    body = (
+        "<html><head><title>Contact Us</title>"
+        '<script src="https://js.hcaptcha.com/1/api.js"></script></head>'
+        "<body><h1>Contact form below</h1></body></html>"
+    )
+    assert classify_challenge(body) is None
+
+
+def test_recaptcha_mentioned_in_prose_is_content() -> None:
+    body = (
+        "<html><head><title>How reCAPTCHA works</title></head>"
+        "<body>This article explains recaptcha and hcaptcha internals.</body></html>"
+    )
+    assert classify_challenge(body) is None
+
+
 def test_success_body_captcha_widget_is_content() -> None:
     body = '<form><div class="g-recaptcha" data-sitekey="x"></div></form>'
     assert classify_challenge(body, on_success_body=True) is None

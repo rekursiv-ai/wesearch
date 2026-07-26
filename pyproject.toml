@@ -1,6 +1,6 @@
 [project]
 name = "wesearch"
-version = "0.1.1"
+version = "0.1.2"
 description = "Web search, fetch, and paper-research toolkit."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -32,8 +32,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The MCP server (wesearch-mcp) exposes wesearch tools to agent clients.
-mcp = ["mcp>=1.10"]
+# Article-text extraction (trafilatura) and RSS/Atom parsing (defusedxml) that
+# web_fetch uses. A separate extra so a consumer wanting the fetch/extract
+# capability (e.g. sagent) pulls it WITHOUT the MCP server dependency.
+extract = ["trafilatura", "defusedxml>=0.7.1"]
+# The MCP server (wesearch-mcp) exposes wesearch tools to agent clients; its
+# web_fetch tool needs extraction, so mcp includes the extract extra.
+mcp = ["mcp>=1.10", "wesearch[extract]"]
 
 [project.scripts]
 wesearch-mcp = "wesearch.mcp_server:main"
