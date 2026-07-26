@@ -6,8 +6,6 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/discord/1530237005311639592?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/2GZFPPvCqn)
 
-> **Pre-1.0:** the API surface may change before 1.0. Pin an exact version if you depend on it.
-
 Web search, fetch, and paper-research toolkit.
 
 `wesearch` is a synchronous, batteries-included library for programmatic web access: run a
@@ -15,9 +13,6 @@ search, fetch a page through a real-browser fingerprint, extract content, and lo
 papers across multiple providers. It is the web layer factored out of a larger agent stack, so
 it is built to survive bot-detection, rate limits, and flaky endpoints without a running browser
 in the common case.
-
-> *If you're writing agents or scripts that need web search, resilient page fetching, and
-> scholarly-paper lookup without standing up a browser stack.*
 
 ## Install
 
