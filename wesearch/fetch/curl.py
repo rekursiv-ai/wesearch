@@ -52,10 +52,10 @@ __all__ = [
 # Live curl_cffi Sessions keyed by identity, so a session reuses one connection
 # across requests -- the connection continuity a real browser has, and which a
 # per-call request() (fresh TLS each time) lacks. Keyed on impersonate too.
-# config-globals: ignore -- live pool of open connections, not a tunable.
+# A live pool of open connections, not a tunable.
 _curl_sessions: dict[tuple[str, str, str], cc_requests.Session[Response]] = {}
 # Guards every mutation of the live curl session pool.
-_curl_lock = threading.Lock()  # config-globals: ignore -- guards live sessions.
+_curl_lock = threading.Lock()
 
 
 def curl_session(

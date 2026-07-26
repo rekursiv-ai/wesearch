@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast, overload
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, cast, overload
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import hashlib
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 # Internal builds keep extra backends; public exports keep only DuckDuckGo.
 _BACKEND_NAMES = Literal["duckduckgo", "searxng"]
-DEFAULT_SEARCH_BACKEND: SearchBackends = "duckduckgo"
+DEFAULT_SEARCH_BACKEND: Final[SearchBackends] = "duckduckgo"
 SearchBackends: TypeAlias = _BACKEND_NAMES  # noqa: UP040 -- type keyword breaks get_args() at runtime
 
 
@@ -281,7 +281,7 @@ def gsa_headers_for_query(query: str) -> dict[str, str]:
 # SearXNG
 # ---------------------------------------------------------------------------
 
-_SEARXNG_URL_ENV = "SEARXNG_URL"  # config-globals: ignore -- env var name.
+_SEARXNG_URL_ENV: Final = "SEARXNG_URL"
 # SearXNG result categories (tabs) -- the full set from ``categories_as_tabs``
 # in SearXNG's ``settings.yml``. Each maps to one or more result-template
 # shapes; ``science`` yields ``paper.html`` (structured ``PaperResult``). The
@@ -677,9 +677,7 @@ def _searxng_url() -> str:
 # DuckDuckGo
 # ---------------------------------------------------------------------------
 
-_DUCKDUCKGO_URL = (
-    "https://html.duckduckgo.com/html/"  # config-globals: ignore -- endpoint URL.
-)
+_DUCKDUCKGO_URL: Final = "https://html.duckduckgo.com/html/"
 
 
 @cache
