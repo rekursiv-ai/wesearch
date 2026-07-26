@@ -83,7 +83,7 @@ def classify_challenge(
         return None
     if any(marker in text for marker in (*cloudflare, *cloudflare_ambient)):
         return CloudflareChallengeError
-    if any(marker in text for marker in puzzle_widget):
+    if _has_widget_marker(text, puzzle_widget):
         return PuzzleChallengeError
     return None
 
@@ -135,6 +135,37 @@ def _page_title(text: str) -> str | None:
 
 def _has_markup_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in tag for tag in _TAG_RE.findall(text) for marker in markers)
+
+
+# A served CAPTCHA widget is a marker used as an element identity -- a class or
+# id value (``class="h-captcha"``) or the ``data-sitekey`` attribute -- inside a
+# rendered tag. A marker inside a ``src``/``href`` URL (``js.hcaptcha.com``) or a
+# JSON string (Wikipedia's ``mw.config`` names its edit-captcha backend) is a
+# mention, not a challenge; matching those raised a false PuzzleChallengeError on
+# ordinary pages. This restricts the match to the widget's structural anatomy.
+_ATTR_CONTEXT_RE = re.compile(r'(?:class|id)\s*=\s*["\'][^"\']*$')
+
+
+def _has_widget_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """Whether a puzzle-widget marker appears as an element class/id/attribute.
+
+    Restricts each marker to a class/id attribute value or a bare attribute name
+    (``data-sitekey``) inside an HTML tag, excluding URLs and JSON strings that
+    merely name a captcha provider.
+    """
+    for tag in _TAG_RE.findall(text):
+        for marker in markers:
+            index = tag.find(marker)
+            if index < 0:
+                continue
+            # A bare attribute name (data-sitekey) is a widget signal on its own.
+            if marker.startswith("data-"):
+                return True
+            # Otherwise require the marker to sit inside a class/id attribute
+            # value -- the preceding text must open such an attribute quote.
+            if _ATTR_CONTEXT_RE.search(tag[:index]):
+                return True
+    return False
 
 
 def _is_cloudflare_front(headers: dict[str, str]) -> bool:

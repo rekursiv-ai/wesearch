@@ -1,7 +1,7 @@
 """Unified HTTP fetch with selectable transport backends."""
 
 from wesearch.fetch.challenge import classify_challenge, classify_http_error
-from wesearch.fetch.common import ValidatedHost
+from wesearch.fetch.common import ValidatedHost, ValidatedHosts
 from wesearch.fetch.fetch import (
     FetchSession,
     RequestParams,
@@ -20,6 +20,7 @@ __all__ = [
     "RequestParams",
     "Transport",
     "ValidatedHost",
+    "ValidatedHosts",
     "classify_challenge",
     "classify_http_error",
     "egress_ip",
