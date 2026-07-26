@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import override
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import http.client
 import ssl
 
-from wesearch.errors import FetchError
 from wesearch.fetch.challenge import classify_http_error
 from wesearch.fetch.common import (
+    _REDIRECT_STATUSES,
     Observer,
     ValidatedHosts,
     apply_redirect,
@@ -20,6 +20,7 @@ from wesearch.fetch.common import (
     decompress_error_body,
     host_header,
     join_headers,
+    redirect_target,
 )
 
 
@@ -142,22 +143,13 @@ def fetch_stdlib(
             if on_response is not None:
                 on_response(response.status, resp_headers, current_url)
 
-            is_redirect = response.status in (301, 302, 303, 307, 308)
+            is_redirect = response.status in _REDIRECT_STATUSES
             if is_redirect and remaining > 0:
                 remaining -= 1
-                location = resp_headers.get("location")
-                response.read()
-                if not location:
-                    raise FetchError(
-                        current_url,
-                        response.status,
-                        resp_headers,
-                        b"Redirect with no Location header",
-                    )
-                # RFC 3986 relative resolution against the current URL: handles
-                # absolute, scheme-relative (//host/p), and path-relative (both
-                # "/p" and bare "p") Locations without corrupting the host.
-                redirect_url = urljoin(current_url, location)
+                response.read()  # Drain the socket before advancing the hop.
+                redirect_url = redirect_target(
+                    current_url, response.status, resp_headers
+                )
                 redir = urlparse(redirect_url)
                 redir_scheme = redir.scheme or scheme
                 if on_redirect is not None:

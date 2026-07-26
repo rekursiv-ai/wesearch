@@ -28,6 +28,8 @@ from wesearch.fetch.common import (
 
 
 if TYPE_CHECKING:
+    from http.cookiejar import CookieJar
+
     from curl_cffi import requests as cc_requests
     from curl_cffi.requests import Response
     from curl_cffi.requests.impersonate import BrowserTypeLiteral
@@ -97,7 +99,10 @@ def seed_session_jar(
     """
     if not cookies:
         return
-    present = {c.name for c in session.cookies.jar}
+    # curl_cffi re-exports Cookies through its inline requests/__init__, which
+    # basedpyright merges with the submodule stub into ``CookieJar | Unknown``;
+    # cast to the real stdlib jar so its Cookie iteration stays typed.
+    present = {c.name for c in cast("CookieJar", session.cookies.jar)}
     for name, value in cookies.items():
         if name not in present:  # never clobber a live jar cookie with a stale copy
             _jar_set(session, domain, name, value)

@@ -41,13 +41,15 @@ import time
 
 from wesearch.chrome.headers import (
     chrome_client_hints,
+    chrome_headers_for_google,
     chrome_navigation_headers,
     impersonate_version_platform,
+    is_google_property,
 )
 from wesearch.chrome.useragents import draw_user_agent, kind_for_impersonate
 from wesearch.errors import BotDetectionError, FetchError
 from wesearch.fetch import transport_routing
-from wesearch.fetch.common import Observer, ValidatedHosts
+from wesearch.fetch.common import Observer, ValidatedHosts, origin
 from wesearch.fetch.curl import (
     close_curl_session,
     close_curl_sessions_except,
@@ -357,21 +359,21 @@ class _ResponseLearner:
         identity. Accept-CH opt-ins are keyed by the responding origin, so a
         cross-origin hop's hints attach to that origin, never this one.
         """
-        if _origin(url) == _origin(self._url):
+        if origin(url) == origin(self._url):
             set_cookie = resp_headers.get("set-cookie")
             if set_cookie:
                 self._cookies.update(parse_set_cookie(set_cookie))
         hints = _accept_ch_hints(resp_headers)
         if hints:
-            self._accept_ch[_origin(url)] = hints
+            self._accept_ch[origin(url)] = hints
         if self._caller is not None:
             self._caller(status, resp_headers)
 
     def merge_into(self, session: FetchSession) -> FetchSession:
         """Return ``session`` updated with the observed cookies + opt-ins."""
         updated = session.with_cookies(self._cookies)
-        for origin, hints in self._accept_ch.items():
-            updated = updated.with_accept_ch(origin, hints)
+        for org, hints in self._accept_ch.items():
+            updated = updated.with_accept_ch(org, hints)
         return updated
 
 
@@ -568,13 +570,13 @@ def _send_as(
         seeded_headers = {"User-Agent": ua, **seeded_headers}
     captured: dict[str, str] = {}
 
-    request_origin = _origin(request.url)
+    request_origin = origin(request.url)
 
     def capture(status: int, resp_headers: dict[str, str], url: str) -> None:
         # Persist only cookies the request's OWN origin set; a cross-origin
         # redirect target's Set-Cookie belongs to that origin's profile, not this
         # one, so it must not pollute (egress, request.domain).
-        if _origin(url) == request_origin:
+        if origin(url) == request_origin:
             set_cookie = resp_headers.get("set-cookie")
             if set_cookie:
                 captured.update(parse_set_cookie(set_cookie))
@@ -978,7 +980,12 @@ def _build_headers(
         method=method,
         content_type=content_type or "",
         origin=f"{parsed.scheme}://{parsed.netloc}",
+        # The pinned-curl raw handle rides HTTP/2 (impersonate's fingerprint), so
+        # it carries the HTTP/2-only Priority header; the stdlib path is HTTP/1.1
+        # and must omit it to match a real Chrome on that protocol.
+        http2=pinned_curl,
     )
+    h.update(_google_headers(url, impersonate))
     if extra:
         # Caller wins; dict.update preserves slot for existing keys and
         # appends new ones at the end.
@@ -986,10 +993,17 @@ def _build_headers(
     return h
 
 
-def _origin(url: str) -> str:
-    """The scheme://host[:port] origin of a URL (the Accept-CH opt-in key)."""
-    parsed = urlparse(url)
-    return f"{parsed.scheme}://{parsed.netloc}"
+def _google_headers(url: str, impersonate: str) -> dict[str, str]:
+    """The Google-only integrity headers for ``url``, empty off a Google host.
+
+    A real Chrome sends ``x-browser-*`` / ``x-client-data`` only to Google
+    properties, so :func:`fetch` adds them by host -- every transport, no caller
+    wiring -- and nothing to any other origin.
+    """
+    if not is_google_property(urlparse(url).hostname or ""):
+        return {}
+    major, platform = impersonate_version_platform(impersonate)
+    return chrome_headers_for_google(major=major, platform=platform)
 
 
 def _accept_ch_hints(resp_headers: dict[str, str]) -> frozenset[str]:
@@ -1025,7 +1039,7 @@ def _curl_structural_headers(
     Origin/Content-Type and caller extras follow (Cookie is merged by caller).
     """
     h: dict[str, str] = {}
-    wanted = accept_ch.get(_origin(url))
+    wanted = accept_ch.get(origin(url))
     if wanted:
         major, platform = impersonate_version_platform(impersonate)
         hints = chrome_client_hints(major=major, platform=platform)
@@ -1035,6 +1049,7 @@ def _curl_structural_headers(
             h["Content-Type"] = content_type
         parsed = urlparse(url)
         h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+    h.update(_google_headers(url, impersonate))
     if extra:
         h.update(extra)
     return h
