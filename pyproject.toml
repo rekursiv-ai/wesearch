@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     # web client / scraping
     "beautifulsoup4",
-    "curl-cffi>=0.15",
+    "curl-cffi>=0.15.1b2",
     "zendriver>=0.15.5",
     # compression (Content-Encoding decode)
     "brotli",

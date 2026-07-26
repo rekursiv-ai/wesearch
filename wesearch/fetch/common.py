@@ -28,6 +28,7 @@ __all__ = [
     "default_port",
     "host_header",
     "join_headers",
+    "origin",
     "redirect_target",
     "rewrite_origin",
 ]
@@ -49,8 +50,19 @@ Observer = Callable[[int, dict[str, str], str], None]
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
-def _origin(url: str) -> str:
-    """The scheme://host[:port] origin of a URL (the Accept-CH opt-in key)."""
+def origin(url: str) -> str:
+    """Return the ``scheme://host[:port]`` origin of a URL.
+
+    The Accept-CH opt-in key and the unit of same-origin cookie/hint scoping,
+    shared by the fetch orchestrator and the redirect transform.
+
+    Args:
+      url: The URL to reduce to its origin.
+
+    Returns:
+      origin: The ``scheme://netloc`` prefix of ``url``.
+
+    """
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
 
@@ -216,7 +228,7 @@ def apply_redirect(
         method = "GET"
         body = None
         headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-    if _origin(current_url) != _origin(redirect_url):
+    if origin(current_url) != origin(redirect_url):
         headers = {k: v for k, v in headers.items() if k.lower() not in _ORIGIN_BOUND}
     return headers, method, body
 

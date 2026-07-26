@@ -395,8 +395,10 @@ class TestHeaderOrder:
         return dict(mock_conn.request.call_args.kwargs["headers"])
 
     def test_get_navigation_order(self) -> None:
-        # The exact order a real Chrome 146 navigation sends (captured on the
-        # wire): no Connection header, sec-ch-ua first, Priority last.
+        # The exact order a real Chrome 146 navigation sends over HTTP/1.1 (the
+        # stdlib transport): no Connection header, sec-ch-ua first, and NO
+        # Priority -- Priority is an HTTP/2 construct a real Chrome omits on
+        # HTTP/1.1 (verified against live Chrome via the parity oracle).
         headers = self._capture_headers()
         assert list(headers) == [
             "sec-ch-ua",
@@ -411,7 +413,6 @@ class TestHeaderOrder:
             "Sec-Fetch-Dest",
             "Accept-Encoding",
             "Accept-Language",
-            "Priority",
         ]
         assert headers["Sec-Fetch-Mode"] == "navigate"
         assert "Chrome/" in headers["User-Agent"]
@@ -431,7 +432,6 @@ class TestHeaderOrder:
             "Sec-Fetch-Dest",
             "Accept-Encoding",
             "Accept-Language",
-            "Priority",
         ]
         assert headers["Accept"] == "*/*"
         assert headers["Content-Type"] == "application/json"

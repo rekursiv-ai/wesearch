@@ -40,6 +40,7 @@ __all__ = [
     "chrome_navigation_headers",
     "chrome_user_agent",
     "impersonate_version_platform",
+    "is_google_property",
 ]
 
 type ChromePlatform = Literal["Windows", "Linux", "macOS", "Android"]
@@ -102,6 +103,7 @@ def chrome_navigation_headers(
     method: str = "GET",
     content_type: str = "",
     origin: str = "",
+    http2: bool = False,
 ) -> dict[str, str]:
     """Return the full Chrome header set for a request, in exact wire order.
 
@@ -119,6 +121,11 @@ def chrome_navigation_headers(
         fetch/XHR shape (``Accept: */*``, ``Origin``, cross-site Sec-Fetch).
       content_type: Request body content type, added for a non-GET/HEAD.
       origin: The request origin (``scheme://host``) for a non-GET/HEAD.
+      http2: Whether the request rides HTTP/2. The ``Priority`` header is an
+        HTTP/2 construct; a real Chrome omits it on HTTP/1.1, so the stdlib
+        transport (HTTP/1.1 only) must leave ``http2`` false to match. The
+        curl transport carries ``Priority`` on HTTP/1.1 regardless (curl_cffi's
+        impersonation injects it pre-negotiation), a known curl_cffi limitation.
 
     Returns:
       headers: The ordered Chrome header map.
@@ -155,7 +162,8 @@ def chrome_navigation_headers(
         h["Sec-Fetch-Dest"] = "empty"
     h["Accept-Encoding"] = "gzip, deflate, br, zstd"
     h["Accept-Language"] = "en-US,en;q=0.9"
-    h["Priority"] = "u=0, i"
+    if http2:
+        h["Priority"] = "u=0, i"
     return h
 
 
@@ -206,6 +214,39 @@ def chrome_client_hints(
         "sec-ch-ua-wow64": "?0",
         "sec-ch-ua-full-version-list": full_list,
     }
+
+
+def is_google_property(host: str) -> bool:
+    """Whether a real Chrome sends its ``x-browser-*`` integrity headers to ``host``.
+
+    Chrome scopes the Google-only header set to Google-owned properties; a
+    request to any other host must not carry them (sending them elsewhere is
+    itself a bot tell). Matches the registrable Google domains by suffix.
+
+    Args:
+      host: The bare DNS hostname of the request target.
+
+    Returns:
+      is_google: True when ``host`` is a Google-owned property.
+
+    """
+    host = host.casefold().rstrip(".")
+    return any(
+        host == suffix or host.endswith(f".{suffix}")
+        for suffix in _GOOGLE_HOST_SUFFIXES
+    )
+
+
+# The Google-owned property suffixes a real Chrome sends x-browser-*/x-client-data
+# to. Not an exhaustive Google-domain list -- the properties this library fetches
+# (Search, Scholar, and their static/api hosts).
+# config-globals: ignore -- derived constant, not a tunable.
+_GOOGLE_HOST_SUFFIXES: Final = (
+    "google.com",
+    "gstatic.com",
+    "googleapis.com",
+    "googleusercontent.com",
+)
 
 
 def chrome_headers_for_google(

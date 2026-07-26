@@ -35,6 +35,8 @@ fetch_mod = importlib.import_module("wesearch.fetch.fetch")
 
 
 if TYPE_CHECKING:
+    from http.cookiejar import CookieJar
+
     from curl_cffi.requests import Response
 
 
@@ -645,7 +647,7 @@ class TestSeedSessionJar:
                 )
         finally:
             session.close()
-        jar = {c.name: c for c in session.cookies.jar}
+        jar = {c.name: c for c in cast("CookieJar", session.cookies.jar)}
         assert jar["__Secure-STRP"].secure is True
         assert jar["__Secure-STRP"].domain == "www.google.com"
         # __Host- is host-only per spec: Secure, no Domain, Path=/.
