@@ -27,7 +27,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 import base64
 import hashlib
@@ -48,9 +48,7 @@ type ChromePlatform = Literal["Windows", "Linux", "macOS", "Android"]
 # presents (its UA + basic client hints), so the extended hints we add agree
 # with what curl already put on the wire. Keep in step with the installed
 # curl_cffi's DEFAULT_CHROME as it advances.
-_IMPERSONATE: dict[
-    str, tuple[int, ChromePlatform]
-] = {  # config-globals: ignore -- static impersonate->version map.
+_IMPERSONATE: Final[dict[str, tuple[int, ChromePlatform]]] = {
     "chrome": (146, "macOS"),
     "chrome_android": (131, "Android"),
 }
@@ -68,9 +66,7 @@ def impersonate_version_platform(impersonate: str) -> tuple[int, ChromePlatform]
 # Per-platform Google API keys hard-coded in chrome.dll, used as the prefix when
 # hashing the User-Agent into x-browser-validation. From the reverse-engineering
 # above; stable across Chrome builds to date.
-_PLATFORM_API_KEY: dict[
-    ChromePlatform, str
-] = {  # config-globals: ignore -- Chrome's own hard-coded API keys.
+_PLATFORM_API_KEY: Final[dict[ChromePlatform, str]] = {
     "Windows": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
     "Linux": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
     "macOS": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
@@ -80,9 +76,7 @@ _PLATFORM_API_KEY: dict[
 # The UA OS token curl_cffi presents per platform (the string inside the UA's
 # first parenthesis). Android carries a device model too, but a generic "K" is
 # what a headless-of-recent Chrome reports.
-_UA_OS: dict[
-    ChromePlatform, str
-] = {  # config-globals: ignore -- static per-platform UA OS tokens.
+_UA_OS: Final[dict[ChromePlatform, str]] = {
     "Windows": "Windows NT 10.0; Win64; x64",
     "Linux": "X11; Linux x86_64",
     "macOS": "Macintosh; Intel Mac OS X 10_15_7",

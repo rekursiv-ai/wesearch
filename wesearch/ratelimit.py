@@ -30,7 +30,7 @@ from collections import deque
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Final, Protocol, cast, runtime_checkable
 
 import asyncio
 import fcntl
@@ -128,7 +128,7 @@ class SystemClock:
         await asyncio.sleep(seconds)
 
 
-_STATE_BYTES = 16  # config-globals: ignore -- binary state width.
+_STATE_BYTES: Final = 16
 
 
 @runtime_checkable

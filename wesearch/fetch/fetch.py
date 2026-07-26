@@ -666,13 +666,13 @@ def _send_via_zendriver(
     return result.body
 
 
-_egress_lock = threading.Lock()  # config-globals: ignore -- guards egress state.
+_egress_lock = threading.Lock()  # guards egress state, not a tunable
 
 # Memoized from the most recent successful probe by any :func:`egress_ip` call,
 # so the whole process shares one observed egress. ``None`` until the first
 # successful probe; a failed probe leaves the prior value intact. A deliberate
 # module global: shared *observed* state (a last-seen cache), not a tunable.
-_last_egress_ip: str | None = None  # config-globals: ignore -- shared observed state.
+_last_egress_ip: str | None = None
 
 
 def last_known_egress_ip() -> str | None:
@@ -685,7 +685,7 @@ def last_known_egress_ip() -> str | None:
 # egress-keyed resources (open connections, running browsers) can invalidate
 # them WITHOUT fetch.py naming that transport. fetch.py tears down its OWN curl
 # pool inline; other backends (e.g. the zendriver browser pool) register here.
-# config-globals: ignore -- observer registry, not a tunable.
+# An observer registry, not a tunable.
 _on_egress_rotation: list[Callable[[str | None], None]] = []
 
 
