@@ -30,10 +30,10 @@ from wesearch.errors import (
 from wesearch.fetch import RequestParams, Transport, fetch
 from wesearch.lib.custom_json import (
     datetime_val,
+    dict_val,
     float_val,
     int_val,
-    str_list_val,
-    str_map_val,
+    list_val,
     str_val,
 )
 
@@ -537,7 +537,7 @@ def _searxng_map(item: dict[str, object]) -> MapResult:
         snippet=clean_text(str_val(item.get("content"))),
         latitude=float_val(item.get("latitude")) if "latitude" in item else None,
         longitude=float_val(item.get("longitude")) if "longitude" in item else None,
-        address=str_map_val(item.get("address")),
+        address=MappingProxyType(dict_val(item.get("address"), str)),
     )
 
 
@@ -564,7 +564,7 @@ def _searxng_package(item: dict[str, object]) -> PackageResult:
         homepage=str_val(item.get("homepage")),
         source_code_url=str_val(item.get("source_code_url")),
         popularity=str_val(item.get("popularity")),
-        tags=str_list_val(item.get("tags")),
+        tags=tuple(list_val(item.get("tags"), str)),
     )
 
 
@@ -635,12 +635,12 @@ def _searxng_paper(item: dict[str, object]) -> PaperResult:
         url=str_val(item.get("url")),
         title=clean_text(str_val(item.get("title"))),
         snippet=clean_text(str_val(item.get("content"))),
-        authors=str_list_val(item.get("authors")),
+        authors=tuple(list_val(item.get("authors"), str)),
         journal=clean_text(str_val(item.get("journal"))),
         doi=str_val(item.get("doi")),
         pdf_url=str_val(item.get("pdf_url")),
         published=datetime_val(item.get("publishedDate")),
-        tags=str_list_val(item.get("tags")),
+        tags=tuple(list_val(item.get("tags"), str)),
         citations=int(cites.group(1).replace(",", "")) if cites else None,
     )
 
