@@ -13,7 +13,7 @@ import pytest
 # The MCP server needs the optional [mcp] extra. Skip the whole module when it is
 # absent (e.g. a plain `uv run pytest` without --all-extras) instead of erroring
 # on collection; CI installs the extra and exercises these tests.
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp.server")
 
 from wesearch import mcp_server
 from wesearch.paper import (
@@ -78,7 +78,8 @@ def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["complete"] is False
     records = out["records"]
     assert isinstance(records, list)
-    assert records[0]["title"] == "Microcanonical Sampling"
+    first = cast("dict[str, object]", records[0])
+    assert first["title"] == "Microcanonical Sampling"
 
 
 def test_paper_details_normalizes_id(monkeypatch: pytest.MonkeyPatch) -> None:
