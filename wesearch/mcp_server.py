@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from wesearch.lib.userdirs import cache_dir
 from wesearch.paper import (
@@ -39,7 +39,7 @@ _DETAIL_ABSTRACT_CHARS = (
 )
 _MAX_AUTHORS = 5  # config-globals: ignore -- token-lean output tuning constant.
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="wesearch",
     instructions=(
         "Scholarly-paper search and resilient web access. Paper ids may be "

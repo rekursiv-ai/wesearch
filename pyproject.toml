@@ -38,7 +38,7 @@ dependencies = [
 extract = ["trafilatura", "defusedxml>=0.7.1"]
 # The MCP server (wesearch-mcp) exposes wesearch tools to agent clients; its
 # web_fetch tool needs extraction, so mcp includes the extract extra.
-mcp = ["mcp>=1.10", "wesearch[extract]"]
+mcp = ["mcp>=2.0.0", "wesearch[extract]"]
 
 [project.scripts]
 wesearch-mcp = "wesearch.mcp_server:main"
