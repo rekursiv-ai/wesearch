@@ -30,11 +30,6 @@ def _fetch_returning(payload: object) -> MagicMock:
     return MagicMock(return_value=(json.dumps(payload).encode(), FetchSession()))
 
 
-class TestFields:
-    def test_author_fields_exclude_deprecated_aliases(self) -> None:
-        assert "aliases" not in s2.AUTHOR_FIELDS_STR.split(",")
-
-
 class TestGet:
     def test_parses_object(self) -> None:
         with patch(

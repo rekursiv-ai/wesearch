@@ -94,11 +94,10 @@ def _default_paper_fields() -> tuple[str, ...]:
 
 def _default_author_fields() -> tuple[str, ...]:
     """S2 author fields every author query requests."""
-    # S2 removed aliases in May 2024 to prevent deadnaming.
-    # https://github.com/allenai/s2-folks/blob/main/API_RELEASE_NOTES.md#may-2024
     return (
         "authorId",
         "name",
+        "aliases",
         "affiliations",
         "homepage",
         "hIndex",
