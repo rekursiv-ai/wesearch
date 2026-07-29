@@ -1824,7 +1824,7 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.2"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
