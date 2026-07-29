@@ -160,6 +160,11 @@ Run a specific tier with `uv run pytest -m integration`, or everything with
 The `zendriver` backend tests need a Chrome or Chromium binary on `PATH`; without one they are
 skipped automatically. No other system dependency is required to run the fast unit tier.
 
+## Roadmap
+
+An MCP server exposing `search` / `fetch` / paper-lookup as tools for coding agents is planned,
+so an agent can call the toolkit directly.
+
 ## MCP server
 
 The toolkit is directly callable by coding agents over MCP:
