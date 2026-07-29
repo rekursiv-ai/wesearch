@@ -74,7 +74,7 @@ repos:
         files: ^(pyproject\.toml|uv\.lock)$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.15.18
     hooks:
       # Exclusions defined in pyproject.toml.
       - id: ruff-check
@@ -196,4 +196,4 @@ repos:
             uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
-        args: [-q, --tb=short, -m, integration]
+        args: [-q, --tb=short, --no-cov, -m, integration]
