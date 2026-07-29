@@ -60,6 +60,9 @@ test = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pytest>=7.0",
+    # chrome/echo.py mints a self-signed localhost certificate for the TLS echo
+    # oracle. Test-only: nothing in the shipped package imports it.
+    "cryptography",
 ]
 typecheck = [
     "basedpyright>=1.10",
@@ -86,7 +89,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["wesearch"]
-exclude = ["**/*_test.py", "**/conftest.py"]
+# echo.py is a test oracle rather than public surface: only echo_test.py imports
+# it, and it needs cryptography, which is a test-group dependency. Shipping it
+# would hand consumers a module whose imports they cannot satisfy.
+exclude = ["**/*_test.py", "**/conftest.py", "wesearch/chrome/echo.py"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
