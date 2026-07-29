@@ -149,6 +149,31 @@ def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> _Stub
     return pool
 
 
+def test_launch_browser_caps_dead_browser_connect_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # zendriver retries the DevTools connection ``browser_connection_max_tries``
+    # times, each bounded by ``browser_connection_timeout``. When Chrome cannot
+    # connect, the launch blocks for their product before raising. A healthy
+    # Chrome exposes DevTools in ~0.3s, so the budget must clear that with margin
+    # yet stay small: an unbounded product turns a transient browser gap into a
+    # multi-second hang that stacks past the live-test timeout instead of
+    # surfacing as a fast skip.
+    captured: dict[str, float] = {}
+
+    async def fake_start(config: Any) -> _FakeBrowser:
+        captured["timeout"] = config.browser_connection_timeout
+        captured["max_tries"] = config.browser_connection_max_tries
+        return _FakeBrowser()
+
+    monkeypatch.setattr(zendriver, "start", fake_start)
+    asyncio.run(fz_mod._launch_browser(tmp_path, headless=True))
+
+    budget = captured["timeout"] * captured["max_tries"]
+    assert captured["timeout"] >= 0.3, "connect timeout must clear healthy startup"
+    assert budget <= 3.0, f"dead-browser connect budget {budget}s too large"
+
+
 def test_launch_browser_uses_vanilla_zendriver_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
