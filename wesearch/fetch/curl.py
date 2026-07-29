@@ -97,6 +97,9 @@ def seed_session_jar(
     """
     if not cookies:
         return
+    # Cast keeps iteration typed under monorepo basedpyright; the export
+    # disables unknown-member warnings and ty rejects the redundant cast, so
+    # export ships the bare iteration.
     present = {c.name for c in session.cookies.jar}
     for name, value in cookies.items():
         if name not in present:  # never clobber a live jar cookie with a stale copy

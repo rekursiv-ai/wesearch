@@ -354,7 +354,14 @@ async def _launch_browser(
                 headless=headless,
                 user_data_dir=str(profile_dir),
                 sandbox=_sandbox(),
-                browser_connection_timeout=1.0,
+                # zendriver retries the DevTools connection ``max_tries`` times,
+                # each bounded by ``timeout``; the product is the launch's dead
+                # time when Chrome cannot connect. Healthy Chrome exposes
+                # DevTools in ~0.3s, so 0.5s clears it with margin while 6 tries
+                # cap a dead-browser launch at 3s -- a fast skip rather than the
+                # default 10x1.0s=10s hang that stacked past live-test timeouts.
+                browser_connection_timeout=0.5,
+                browser_connection_max_tries=6,
             )
         )
     except Exception as error:
