@@ -31,7 +31,7 @@ papers across multiple providers. It is the web layer factored out of a larger a
 it is built to survive bot-detection, rate limits, and flaky endpoints without a running browser
 in the common case.
 
-## Quickstart
+## Example
 
 ```python
 from wesearch.search import search
