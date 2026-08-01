@@ -5,6 +5,13 @@ All notable wesearch changes are documented here. This project follows
 
 ## Unreleased
 
+## 0.1.7 - 2026-08-01
+
+### Changed
+
+- README carries a one-line description below the badges; PyPI renders the
+  README, so the project page had been showing the previous text.
+
 ## 0.1.6 - 2026-08-01
 
 ### Changed
