@@ -15,10 +15,12 @@
 
 # Ubuntu/Debian:
 #   # Required for quick install.
-#   sudo apt-get install -y curl &&
-#       curl -LsSf https://astral.sh/uv/install.sh | sh
+#   sudo apt-get install -y curl
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv add wesearch
+
+# Alternatively: python -m pip install wesearch
 ```
 
 Web search, fetch, and paper-research toolkit.
@@ -28,16 +30,6 @@ search, fetch a page through a real-browser fingerprint, extract content, and lo
 papers across multiple providers. It is the web layer factored out of a larger agent stack, so
 it is built to survive bot-detection, rate limits, and flaky endpoints without a running browser
 in the common case.
-
-## Install
-
-```bash
-pip install wesearch
-```
-
-```bash
-uv add wesearch
-```
 
 ## Quickstart
 
