@@ -1,4 +1,4 @@
-# wesearch🕸️
+# wesearch
 
 [![PyPI version](https://img.shields.io/pypi/v/wesearch.svg)](https://pypi.org/project/wesearch/)
 [![CI](https://github.com/rekursiv-ai/wesearch/actions/workflows/package-validation.yml/badge.svg?branch=main)](https://github.com/rekursiv-ai/wesearch/actions/workflows/package-validation.yml)
