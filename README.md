@@ -6,6 +6,8 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/discord/1530237005311639592?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/2GZFPPvCqn)
 
+A wascally web research toolkit for agents; web search, web fetch, and publication research.
+
 ## Quick Start
 
 ```bash
@@ -22,8 +24,6 @@ uv add wesearch
 
 # Alternatively: python -m pip install wesearch
 ```
-
-Web search, fetch, and paper-research toolkit.
 
 `wesearch` is a synchronous, batteries-included library for programmatic web access: run a
 search, fetch a page through a real-browser fingerprint, extract content, and look up scholarly
