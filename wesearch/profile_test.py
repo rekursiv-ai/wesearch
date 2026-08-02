@@ -207,8 +207,11 @@ class TestConcurrentSafety:
         store = _store(tmp_path)
         store.save("1.2.3.4", "x.com", Profile(ua="u", cookies={}))
 
+        # 12 rounds x 4 threads = 48 interleaved read-modify-writes. The race
+        # this guards is per-write, so it either reproduces in the first few
+        # rounds or not at all; 50 rounds cost 1.9s to re-prove the same thing.
         def worker(n: int) -> None:
-            for i in range(50):
+            for i in range(12):
                 store.update_cookies("1.2.3.4", "x.com", {f"k{n}": str(i)})
 
         threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]

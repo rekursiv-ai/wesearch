@@ -6,6 +6,7 @@ from pathlib import Path
 
 import http.client
 import ssl
+import time
 
 from wesearch.chrome.echo import (
     EchoOracle,
@@ -65,6 +66,23 @@ class TestEchoOracle:
             conn.getresponse().read()
             conn.close()
             assert oracle.captured() == ()
+
+
+class TestEchoOracleShutdown:
+    def test_close_returns_promptly(self) -> None:
+        """close() must wake the accept loop, not wait out the join timeout.
+
+        ``socket.close()`` alone does NOT interrupt a thread blocked in
+        ``accept()`` on Linux: the thread stays parked, ``join(timeout=5.0)``
+        burns the full five seconds, and the daemon thread is abandoned. Every
+        oracle test paid that 5s. ``shutdown()`` first wakes it immediately.
+        """
+        oracle = EchoOracle()
+        start = time.perf_counter()
+        oracle.close()
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 1.0, f"close() took {elapsed:.2f}s; accept loop not woken"
 
 
 if __name__ == "__main__":
