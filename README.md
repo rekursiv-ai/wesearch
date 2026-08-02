@@ -167,11 +167,6 @@ Run a specific tier with `uv run pytest -m integration`, or everything with
 The `zendriver` backend tests need a Chrome or Chromium binary on `PATH`; without one they are
 skipped automatically. No other system dependency is required to run the fast unit tier.
 
-## Roadmap
-
-An MCP server exposing `search` / `fetch` / paper-lookup as tools for coding agents is planned,
-so an agent can call the toolkit directly.
-
 ## MCP server
 
 The toolkit is directly callable by coding agents over MCP:
@@ -192,6 +187,7 @@ deliberately compact for model consumption; abstracts are truncated and
 empty fields dropped. The server is synchronous and per-client — state that
 must be shared (rate limits, cookie/UA profiles) is already cross-process
 safe on disk, so no daemon is needed.
+
 ## See also
 
 Sibling libraries in the [rekursiv-ai](https://github.com/rekursiv-ai) family:
