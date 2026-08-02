@@ -30,6 +30,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
+import contextlib
 import socket
 import ssl
 import tempfile
@@ -104,6 +105,13 @@ class EchoOracle:
 
     def close(self) -> None:
         """Stop the listener and release the socket (idempotent)."""
+        # shutdown() BEFORE close(): closing a listening socket does not wake a
+        # thread blocked in accept() on Linux, so the join below would wait out
+        # its full timeout on every teardown and then abandon the thread.
+        # shutdown() fails the accept immediately.
+        # Already shut down or never connected: close() below still applies.
+        with contextlib.suppress(OSError):
+            self._sock.shutdown(socket.SHUT_RDWR)
         self._sock.close()
         self._thread.join(timeout=5.0)
 
