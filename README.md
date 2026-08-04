@@ -203,7 +203,7 @@ Sibling libraries in the [rekursiv-ai](https://github.com/rekursiv-ai) family:
 If you find our work useful, please consider citing:
 
 ```bibtex
-@misc{rekursiv2026wesearch,
+@misc{rekursivai2026wesearch,
       title={Wesearch - A wascally web research toolkit for agents.},
       author={Joshua V. Dillon},
       year={2026},
