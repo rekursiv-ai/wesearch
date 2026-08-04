@@ -198,6 +198,20 @@ Sibling libraries in the [rekursiv-ai](https://github.com/rekursiv-ai) family:
 - [priml](https://github.com/rekursiv-ai/priml) — Composable PyTorch building blocks: models, optimizers, losses, and a step-based training loop.
 - [configgle](https://github.com/rekursiv-ai/configgle) — Hierarchical experiment configuration in typed pure-Python dataclasses instead of YAML.
 
+## Citing
+
+If you find our work useful, please consider citing:
+
+```bibtex
+@misc{rekursiv2026wesearch,
+      title={Wesearch - A wascally web research toolkit for agents.},
+      author={Joshua V. Dillon},
+      year={2026},
+      howpublished={Github},
+      url={https://github.com/rekursiv-ai/wesearch},
+}
+```
+
 ## License
 
 Apache-2.0.
