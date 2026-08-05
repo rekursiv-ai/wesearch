@@ -202,12 +202,20 @@ def _fused(
     # errored, so the caller can decline to cache the partial result.
     if not answered:
         raise PaperError("; ".join(errors))
-    records = fuse(s2_hits, oa_hits)
+    # Each backend already returned up to ``limit`` rows, so a disjoint fused
+    # set holds up to twice that. Trim HERE, after fusion, so a paper both
+    # backends ranked -- the hit fusion exists to surface -- outranks a lone
+    # backend's spare rows rather than being cut with them. Trimming is this
+    # function's job, not a consumer's: ``SearchResult.records`` promises a
+    # trimmed list, and a caller that re-slices cannot restore what fusion knew.
+    fused = fuse(s2_hits, oa_hits)
+    records = fused if limit is None else fused[:limit]
     return SearchResult(
         records=records,
         # The two backend totals overlap unknowably, so `max` is the honest
         # lower bound -- but the fused set can hold papers unique to each, so
-        # never report fewer than the records actually returned.
-        total=max(s2_total, oa_total, len(records)),
+        # never report fewer than fusion actually found (pre-trim, since the
+        # trimmed-away records are matches the caller may still page to).
+        total=max(s2_total, oa_total, len(fused)),
         complete=not errors,
     )

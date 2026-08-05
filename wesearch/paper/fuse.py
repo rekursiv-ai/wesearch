@@ -3,8 +3,14 @@
 Merges Semantic Scholar and OpenAlex hit lists into one ranked list: each
 backend contributes ``weight / (offset + rank)`` to a paper's score, summed
 across backends, so cross-backend agreement outranks either backend's lone top
-hit. Duplicates (same DOI or normalized title) are merged for fields and the
-``sources`` tag.
+hit.
+
+One paper carries several identifiers -- a publisher DOI, arXiv's DataCite DOI,
+an arXiv id -- and the two backends rarely report the same subset, so identity
+is a SET of keys, not one key. Records are grouped by connected components over
+those keys (union-find): two records merge when they share ANY identifier, even
+transitively through a third record. A record with no identifier at all falls
+back to its normalized title.
 """
 
 from __future__ import annotations
@@ -20,20 +26,6 @@ _WORD_PUNCT_RE = re.compile(r"[^\w\s]+")
 _WS_RE = re.compile(r"\s+")
 
 
-def _normalize_title(title: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace - for dedup."""
-    lowered = title.lower()
-    nopunct = _WORD_PUNCT_RE.sub(" ", lowered)
-    return _WS_RE.sub(" ", nopunct).strip()
-
-
-def _dedup_key(rec: PaperRecord) -> str:
-    """Prefer DOI; fall back to normalized title for DOI-less records."""
-    if rec.doi:
-        return f"doi:{rec.doi.lower()}"
-    return f"title:{_normalize_title(rec.title)}"
-
-
 def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRecord]:
     """Reciprocal-rank-fuse S2 and OpenAlex hits into one ranked list.
 
@@ -46,7 +38,7 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
       oa_hits: OpenAlex results in rank order (best first).
 
     Returns:
-      fused: Papers ordered by descending fused score.
+      fused: Papers ordered by descending fused score, one entry per paper.
 
     References:
       https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf
@@ -63,16 +55,85 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     offset = 10.0
     # S2's relevance ranking is more precise than OpenAlex's broad text match,
     # so an S2 rank counts for more; an OpenAlex-only paper still scores.
-    weights = ((s2_hits, 1.0), (oa_hits, 0.7))
+    weights = ((s2_hits, "s2", 1.0), (oa_hits, "openalex", 0.7))
 
-    by_key: dict[str, PaperRecord] = {}
-    score: dict[str, float] = {}
-    for hits, weight in weights:
+    groups = _group_by_identity([rec for hits, _label, _w in weights for rec in hits])
+    merged: dict[int, PaperRecord] = {}
+    score: dict[int, float] = {}
+    # A backend that returns one paper twice (OpenAlex indexes a preprint and
+    # its published version as separate works) must contribute ONE reciprocal
+    # rank, not the sum of both rows -- otherwise a self-collision at ranks
+    # 11-12 outranks that backend's own #1. Keep each backend's best rank only.
+    best_rank: dict[tuple[int, str], int] = {}
+    index = 0
+    for hits, label, weight in weights:
         for rank, rec in enumerate(hits, start=1):
-            key = _dedup_key(rec)
-            score[key] = score.get(key, 0.0) + weight / (offset + rank)
-            by_key[key] = by_key[key].merge(rec) if key in by_key else rec
-    # Stable sort by descending score over insertion-ordered keys; the S2 loop
-    # runs first so a coincidental score tie keeps S2's key first.
-    ordered = sorted(by_key, key=lambda k: score[k], reverse=True)
-    return [by_key[k] for k in ordered]
+            root = groups[index]
+            index += 1
+            merged[root] = merged[root].merge(rec) if root in merged else rec
+            if best_rank.setdefault((root, label), rank) == rank:
+                score[root] = score.get(root, 0.0) + weight / (offset + rank)
+    # Stable sort by descending score over insertion-ordered roots; the S2 loop
+    # runs first so a coincidental score tie keeps S2's paper first.
+    return [
+        merged[root] for root in sorted(merged, key=lambda r: score[r], reverse=True)
+    ]
+
+
+def _normalize_title(title: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace - for dedup."""
+    return _WS_RE.sub(" ", _WORD_PUNCT_RE.sub(" ", title.lower())).strip()
+
+
+def _identity_keys(rec: PaperRecord) -> list[str]:
+    """Every identifier naming this paper, or its title when it has none.
+
+    A DOI and an arXiv id are separate namespaces for the SAME paper, so both
+    are emitted: a record carrying only the publisher DOI and one carrying only
+    arXiv's DataCite DOI join through whichever key they share. Title is a last
+    resort -- two distinct papers can share one (``Discussion``, ``Editorial
+    introduction``), so it is used only when no identifier exists at all.
+    """
+    keys: list[str] = []
+    if rec.doi:
+        keys.append(f"doi:{rec.doi.lower()}")
+    if rec.arxiv_id:
+        keys.append(f"arxiv:{rec.arxiv_id.lower()}")
+    return keys or [f"title:{_normalize_title(rec.title)}"]
+
+
+def _group_by_identity(records: list[PaperRecord]) -> list[int]:
+    """Return each record's component root under union-find over its keys.
+
+    Args:
+      records: Records to group, in the order their ranks will be scored.
+
+    Returns:
+      roots: One component root per input record, positionally aligned.
+
+    """
+    parent: dict[int, int] = {}
+    owner: dict[str, int] = {}
+    for index, rec in enumerate(records):
+        parent[index] = index
+        for key in _identity_keys(rec):
+            other = owner.setdefault(key, index)
+            _union(parent, index, other)
+    return [_find(parent, index) for index in range(len(records))]
+
+
+def _find(parent: dict[int, int], node: int) -> int:
+    """Return ``node``'s component root, compressing the path behind it."""
+    root = node
+    while parent[root] != root:
+        root = parent[root]
+    while parent[node] != root:
+        parent[node], node = root, parent[node]
+    return root
+
+
+def _union(parent: dict[int, int], left: int, right: int) -> None:
+    """Merge two components, keeping the earlier-seen record as the root."""
+    left_root, right_root = _find(parent, left), _find(parent, right)
+    if left_root != right_root:
+        parent[max(left_root, right_root)] = min(left_root, right_root)

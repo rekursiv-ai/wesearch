@@ -12,7 +12,7 @@ Import each name from the submodule that defines it (this package's
 
 - :mod:`.search` -- ``search`` + ``SearchResult`` / ``Source``.
 - :mod:`.details` -- ``metadata``, ``metadata_batch``, ``references``,
-  ``citations``, ``cited_by`` + ``Listing``.
+  ``citations`` + ``Listing``.
 - :mod:`.authors` -- ``search_authors``, ``author_metadata``,
   ``author_papers`` + ``AuthorSearchResult``.
 - :mod:`.fetch` -- ``download`` (PDF source cascade).

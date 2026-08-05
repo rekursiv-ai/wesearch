@@ -141,22 +141,22 @@ def test_web_fetch_extracts_and_truncates(monkeypatch: pytest.MonkeyPatch) -> No
     assert text.startswith("Hello")
 
 
-def test_dedupe_drops_fusion_duplicates() -> None:
-    first = PaperRecord(title="CogToM", arxiv_id="2601.15628")
-    by_title = PaperRecord(title="cogtom ")
-    by_id = PaperRecord(title="CogToM: a benchmark", arxiv_id="2601.15628")
-    distinct = PaperRecord(title="MuMA-ToM")
-    unique = mcp_server._dedupe([first, by_title, by_id, distinct])
-    assert unique == [first, distinct]
-
-
-def test_paper_search_dedupes_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = PaperSearchResult(records=[_RECORD, _RECORD], total=2, complete=True)
+def test_paper_search_emits_library_records_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Deduplication and the ``limit`` trim belong to the library, which owns the
+    # identifier graph and the ranking. A server-side pass can only re-decide
+    # identity from the lean fields it kept -- which is how the prior casefolded
+    # -title dedup destroyed distinct papers that share a title ("Discussion",
+    # "Editorial introduction"). Emit exactly what the library returned.
+    distinct = PaperRecord(title="Discussion", doi="10.1/a", year=1998)
+    namesake = PaperRecord(title="Discussion", doi="10.1/b", year=1997)
+    fake = PaperSearchResult(records=[distinct, namesake], total=2, complete=True)
     monkeypatch.setattr(paper_search_mod, "search", _returns(fake))
-    out = mcp_server.paper_search("dupes")
+    out = mcp_server.paper_search("discussion")
     records = out["records"]
     assert isinstance(records, list)
-    assert len(cast("list[object]", records)) == 1
+    assert len(cast("list[object]", records)) == 2
 
 
 def test_all_tools_registered() -> None:

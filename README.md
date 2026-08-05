@@ -84,7 +84,7 @@ wesearch/
 ├── errors.py        FetchError, BotDetectionError + subclasses
 └── paper/           scholarly-paper lookup
     ├── search.py    search(...) across Semantic Scholar, OpenAlex, SearXNG
-    ├── details.py   metadata / references / citations / cited_by
+    ├── details.py   metadata / references / citations
     ├── authors.py   author search and publication lists
     ├── fetch.py     PDF download cascade
     └── providers/   per-source backends (openalex, s2, searxng)
@@ -211,7 +211,3 @@ If you find our work useful, please consider citing:
       url={https://github.com/rekursiv-ai/wesearch},
 }
 ```
-
-## License
-
-Apache-2.0.

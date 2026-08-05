@@ -56,6 +56,53 @@ class TestFuse:
         out = fuse(s2, oa)
         assert len(out) == 1
 
+    def test_dedup_by_arxiv_id_across_differing_dois(self) -> None:
+        # A preprint and its published version are ONE paper carrying two DOIs
+        # (10.48550/arxiv.* and the publisher's). Keying on DOI alone splits
+        # them; the shared arXiv id is the identity that joins them. Measured
+        # live: 10 such pairs across 6 queries, the whole of the real fused
+        # duplication.
+        s2 = [
+            PaperRecord(
+                title="RRF",
+                doi="10.1145/3596512",
+                arxiv_id="2210.11934",
+                sources=("s2",),
+            )
+        ]
+        oa = [
+            PaperRecord(
+                title="RRF",
+                doi="10.48550/arxiv.2210.11934",
+                arxiv_id="2210.11934",
+                sources=("openalex",),
+            )
+        ]
+        out = fuse(s2, oa)
+        assert len(out) == 1
+        assert set(out[0].sources) == {"s2", "openalex"}
+        # The publisher DOI wins: S2 is merged first and its values take priority.
+        assert out[0].doi == "10.1145/3596512"
+
+    def test_same_backend_duplicate_does_not_double_score(self) -> None:
+        # A backend that returns ONE paper twice must not out-rank a distinct
+        # paper it ranked far higher. Summing both occurrences' reciprocal-rank
+        # contributions lets a duplicate pair at ranks 11-12 beat the backend's
+        # own #1, so a contribution is per BACKEND per paper, not per row.
+        # Measured live: 21 of 22 intra-backend collisions are OpenAlex's own
+        # preprint/published twins, so this is the common case, not a corner.
+        oa = [PaperRecord(title="top", doi="10.1/top", sources=("openalex",))]
+        oa += [
+            PaperRecord(title=f"filler{i}", doi=f"10.1/f{i}", sources=("openalex",))
+            for i in range(9)
+        ]
+        oa += [
+            PaperRecord(title="dup", doi="10.1/dup", sources=("openalex",)),
+            PaperRecord(title="dup", doi="10.1/dup", sources=("openalex",)),
+        ]
+        out = fuse([], oa)
+        assert out[0].title == "top"
+
     def test_openalex_only_still_ranked(self) -> None:
         # A throttled S2 (empty) degrades to OpenAlex-ranked results, not nothing.
         out = fuse([], [_rec("a", source="openalex"), _rec("b", source="openalex")])

@@ -2,7 +2,7 @@
 
 Single/batched metadata (Semantic Scholar), backward edges (:func:`references`)
 and forward edges (:func:`citations`) over a ``source``-selected graph backend
-(S2 or OpenAlex), plus the Google Scholar cited-by pivot (:func:`cited_by`).
+(S2 or OpenAlex).
 Sync -- a coroutine call site lifts these with ``asyncio.to_thread``.
 """
 

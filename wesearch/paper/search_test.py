@@ -85,6 +85,43 @@ class TestFusedSearch:
         ):
             search("q")
 
+    def test_fused_records_honor_limit(self) -> None:
+        # Each backend returns up to ``limit`` rows, so a fused set of disjoint
+        # hits holds up to 2*limit. ``SearchResult.records`` promises the list is
+        # already trimmed, and every consumer must be able to rely on that rather
+        # than re-slicing (or, like the MCP server, silently emitting double).
+        s2_hits = [_rec(f"s{i}", "s2") for i in range(5)]
+        oa_hits = [_rec(f"o{i}", "openalex") for i in range(5)]
+        with (
+            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 100)),
+            patch.object(openalex, "search", return_value=(oa_hits, 100)),
+        ):
+            result = search("q", limit=5)
+        assert len(result.records) == 5
+
+    def test_fused_keeps_highest_ranked_when_trimming(self) -> None:
+        # Trimming happens AFTER fusion, so a paper both backends ranked -- the
+        # hit fusion exists to surface -- survives a tight limit even though it
+        # sits second in each backend's own list.
+        s2_hits = [_rec("solo", "s2"), _rec("shared", "s2")]
+        oa_hits = [_rec("oa_solo", "openalex"), _rec("shared", "openalex")]
+        with (
+            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 9)),
+            patch.object(openalex, "search", return_value=(oa_hits, 9)),
+        ):
+            result = search("q", limit=1)
+        assert [r.title for r in result.records] == ["shared"]
+
+    def test_fused_total_not_below_trimmed_records(self) -> None:
+        # ``total`` is a lower bound on matches, never a count of what was
+        # returned, so trimming must not drag it below the honest backend total.
+        with (
+            patch.object(search_mod, "_s2_search", return_value=([_rec("s", "s2")], 7)),
+            patch.object(openalex, "search", return_value=([_rec("o", "openalex")], 3)),
+        ):
+            result = search("q", limit=1)
+        assert result.total == 7
+
 
 class TestS2SearchParams:
     def test_year_and_open_access_params(self) -> None:
