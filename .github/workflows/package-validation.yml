@@ -46,5 +46,4 @@ jobs:
           uv run python -c "import wesearch"
           rm -rf dist
           uv build --out-dir dist
-          wheel="$(ls dist/wesearch-*.whl | head -n 1)"
-          uv run --isolated --with "$wheel" python -P -c "import wesearch; print(wesearch.__file__)"
+          wheel="$(ls dist/wesearch-*.whl | head -n 1)"; uv run --isolated --with "$wheel" python -P -c "import wesearch; print(wesearch.__file__)"
