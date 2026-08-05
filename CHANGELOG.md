@@ -5,6 +5,20 @@ All notable wesearch changes are documented here. This project follows
 
 ## Unreleased
 
+## 0.1.8 - 2026-08-04
+
+### Added
+
+- Search results carry a completeness signal, so a caller can tell a
+  truncated result set from an exhausted one.
+
+### Fixed
+
+- Paper fusion merges records by DOI and arXiv id rather than title, so the
+  same paper indexed under two title spellings no longer appears twice.
+- Title dedup no longer collapses distinct papers that share a title.
+- The MCP server no longer exposes its tools on an unauthenticated surface.
+
 ## 0.1.7 - 2026-08-01
 
 ### Changed
