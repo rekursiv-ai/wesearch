@@ -278,6 +278,27 @@ class TestWorkToRecord:
         work: MutableJSON = {"ids": {"arxiv": "!!!"}}
         assert openalex._work_to_record(work).arxiv_id is None
 
+    def test_arxiv_id_recovered_from_datacite_doi(self) -> None:
+        # OpenAlex indexes an arXiv preprint as its own work whose DOI is
+        # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
+        # id is right there in the DOI suffix, so leaving arxiv_id None throws
+        # away the only identity that joins the preprint to its published twin.
+        work: MutableJSON = {"doi": "https://doi.org/10.48550/arxiv.2210.11934"}
+        rec = openalex._work_to_record(work)
+        assert rec.arxiv_id == "2210.11934"
+        assert rec.doi == "10.48550/arxiv.2210.11934"
+
+    def test_structured_arxiv_id_wins_over_doi_suffix(self) -> None:
+        work: MutableJSON = {
+            "doi": "https://doi.org/10.48550/arxiv.9999.99999",
+            "ids": {"arxiv": "https://arxiv.org/abs/1706.03762"},
+        }
+        assert openalex._work_to_record(work).arxiv_id == "1706.03762"
+
+    def test_non_arxiv_doi_yields_no_arxiv_id(self) -> None:
+        work: MutableJSON = {"doi": "https://doi.org/10.1145/3596512"}
+        assert openalex._work_to_record(work).arxiv_id is None
+
 
 class TestReferences:
     def test_resolves_then_batches(self) -> None:

@@ -273,6 +273,14 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         )
         if m:
             arxiv = m.group(1)
+    if arxiv is None and doi is not None:
+        # OpenAlex indexes an arXiv preprint as its own work whose DOI is
+        # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
+        # id is the DOI suffix; recovering it here is what lets fusion join the
+        # preprint to its published twin (they share no DOI).
+        m = re.match(r"10\.48550/arxiv\.(.+)$", doi, re.IGNORECASE)
+        if m:
+            arxiv = m.group(1)
 
     primary = cast(MutableJSON, work.get("primary_location") or {})
     source = cast(MutableJSON, primary.get("source") or {})
