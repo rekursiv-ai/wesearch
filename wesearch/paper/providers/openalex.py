@@ -96,8 +96,8 @@ def search(
     year_to: int | None,
     open_access_only: bool,
     transport: Transport = "auto",
-) -> tuple[list[PaperRecord], int]:
-    """Query OpenAlex via ``title_and_abstract.search`` and return (records, total).
+) -> tuple[list[PaperRecord], int, bool]:
+    """Query OpenAlex via ``title_and_abstract.search``.
 
     Deliberately NOT the broad ``search=`` param: its ``relevance_score`` is
     dominated by a citation-count term, floating high-citation off-topic reviews
@@ -112,6 +112,11 @@ def search(
       year_to: Inclusive upper publication-year bound, when set.
       open_access_only: Restrict to works with an open-access location.
       transport: Retrieval transport forwarded to the HTTP layer.
+
+    Returns:
+      records: The mapped works, in OpenAlex rank order.
+      total: OpenAlex's reported match count.
+      complete: Whether the cursor was walked to exhaustion.
 
     Raises:
       PaperError: On an HTTP failure, timeout, or bad JSON.
@@ -129,7 +134,7 @@ def search(
     terms = f"title_and_abstract.search:{sanitized}"
     flt = f"{base},{terms}" if base else terms
     page, total = _paginate_works({"filter": flt}, limit=limit, transport=transport)
-    return [_work_to_record(w) for w in page.entries], total
+    return [_work_to_record(w) for w in page.entries], total, page.complete
 
 
 def _paginate_works(
@@ -192,7 +197,13 @@ def _get(
     api_key = os.environ.get("OPENALEX_API_KEY", "")
     if api_key:
         params = {**params, "api_key": api_key}
-    cross_process_limiter(source, per_seconds=interval_sec).acquire()
+    try:
+        cross_process_limiter(source, per_seconds=interval_sec).acquire()
+    except OSError as e:
+        # The gate is a lock file; a filesystem failure here is a backend
+        # failure like any other. Left raw it escapes the caller's PaperError
+        # handler, and a fused search would abort rather than degrade to S2.
+        raise BackendError(f"OpenAlex rate-limit gate failed: {e}", status=0) from e
     try:
         raw, _ = fetch(
             url=f"{base}{path}",
@@ -224,9 +235,17 @@ def _get(
             f"OpenAlex request failed (timeout or connection error): {e}", status=0
         ) from e
     try:
-        return cast(MutableJSON, json.loads(raw))
-    except json.JSONDecodeError as e:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise BackendError(f"OpenAlex returned invalid JSON: {e}") from e
+    # A cast would let a bare list or ``null`` through to an AttributeError on
+    # the first ``.get`` -- outside PaperError, so a fused search aborts and
+    # discards the other backend's good result instead of degrading to it.
+    if not isinstance(body, dict):
+        raise BackendError(
+            f"OpenAlex returned {type(body).__name__}, expected a JSON object."
+        )
+    return cast(MutableJSON, body)
 
 
 def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str | None:
@@ -250,7 +269,7 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         for a in authorships
         if cast(MutableJSON, a.get("author") or {}).get("display_name")
     )
-    title = str(work.get("title") or work.get("display_name") or "(untitled)")
+    title = str(work.get("title") or work.get("display_name") or "")
 
     # DOI: OpenAlex returns it as a full URL - strip the prefix.
     doi_raw = work.get("doi")
@@ -277,8 +296,11 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         # OpenAlex indexes an arXiv preprint as its own work whose DOI is
         # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
         # id is the DOI suffix; recovering it here is what lets fusion join the
-        # preprint to its published twin (they share no DOI).
-        m = re.match(r"10\.48550/arxiv\.(.+)$", doi, re.IGNORECASE)
+        # preprint to its published twin (they share no DOI). The version
+        # suffix must go: S2 reports the bare id, so keeping ``v2`` here would
+        # yield a key that joins nothing -- the exact failure this recovery
+        # exists to prevent.
+        m = re.match(r"10\.48550/arxiv\.(.+?)(?:v\d+)?$", doi, re.IGNORECASE)
         if m:
             arxiv = m.group(1)
 

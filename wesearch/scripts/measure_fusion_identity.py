@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")/../../.." run --frozen \
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
   python3 -m wesearch.scripts.measure_fusion_identity "$@"
 Measure which identifier namespaces actually join records across backends.
 
@@ -26,10 +26,10 @@ from wesearch.lib.custom_json import dict_val, list_val, str_val
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
-from wesearch.paper.search import _s2_search
+from wesearch.paper.search import search
 
 
-_ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$", re.IGNORECASE)
+_ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+?)(?:v\d+)?$", re.IGNORECASE)
 
 
 def _doi_keys(rec: PaperRecord) -> list[str]:
@@ -49,22 +49,26 @@ def _arxiv_keys(rec: PaperRecord) -> list[str]:
     return keys
 
 
-def _raw_records(query: str) -> tuple[list[PaperRecord], list[PaperRecord]]:
-    """Fetch one page from each backend, retrying S2's shared-gate throttle."""
-    s2_hits: list[PaperRecord] = []
-    for _attempt in range(4):
+def _raw_records(
+    query: str, *, attempts: int = 4
+) -> tuple[list[PaperRecord], list[PaperRecord]]:
+    """Fetch one page from each backend, retrying S2's shared-gate throttle.
+
+    Raises:
+      PaperError: When S2 stays throttled. A backend that never answered is an
+        unavailable sample, not zero joins -- reporting it as data would
+        publish a measurement nobody took.
+
+    """
+    for _attempt in range(attempts):
         try:
-            s2_hits, _total = _s2_search(
-                query,
-                limit=40,
-                year_from=None,
-                year_to=None,
-                open_access_only=False,
-            )
+            s2_hits = search(query, source="s2", limit=40).records
             break
         except PaperError:
             time.sleep(6.0)
-    oa_hits, _oa_total = openalex.search(
+    else:
+        raise PaperError(f"Semantic Scholar unavailable for {query!r}")
+    oa_hits, _oa_total, _oa_complete = openalex.search(
         query, limit=40, year_from=None, year_to=None, open_access_only=False
     )
     return s2_hits, oa_hits
@@ -99,20 +103,34 @@ def main(
         preprint/published pairs.
 
     Returns:
-      status: Process exit status.
+      status: Process exit status; non-zero when no query yielded a sample, so
+        an unavailable backend cannot read as a clean measurement.
 
     """
     totals = {"doi": 0, "arxiv": 0, "mag_extra": 0}
+    sampled = 0
     for query in queries:
-        s2_hits, oa_hits = _raw_records(query)
+        try:
+            s2_hits, oa_hits = _raw_records(query)
+            s2_mag = _raw_mag_s2(query)
+        except PaperError as e:
+            print(f"{query!r:26s} SKIPPED ({e})")  # noqa: T201 -- CLI probe output.
+            continue
+        sampled += 1
         by_doi = _cross_backend_joins(s2_hits, oa_hits, _doi_keys)
         by_arxiv = _cross_backend_joins(s2_hits, oa_hits, _arxiv_keys)
         # MAG lives on the raw payloads, not on PaperRecord, so read it there.
-        s2_mag = _raw_mag_s2(query)
         oa_mag = _raw_mag_openalex(query)
         mag_pairs = set(s2_mag) & set(oa_mag)
-        # A MAG join is incremental only when the two records disagree on DOI.
-        extra = {mag for mag in mag_pairs if s2_mag[mag].lower() != oa_mag[mag].lower()}
+        # A MAG join is incremental only when the pair shares NO key the
+        # existing identity already uses. Comparing DOIs alone counted a pair
+        # that DOI+arXiv already merges (publisher DOI vs DataCite DOI, one
+        # arXiv id) as new, overstating what a MAG field would buy.
+        extra = {
+            mag
+            for mag in mag_pairs
+            if not _identity_of(s2_mag[mag]) & _identity_of(oa_mag[mag])
+        }
         totals["doi"] += len(by_doi)
         totals["arxiv"] += len(by_arxiv)
         totals["mag_extra"] += len(extra)
@@ -123,17 +141,34 @@ def main(
         )
         time.sleep(1.0)
     print(  # noqa: T201 -- CLI probe output.
-        f"\nTOTAL doi={totals['doi']} doi+arxiv={totals['arxiv']} "
+        f"\nTOTAL queries={sampled}/{len(queries)} doi={totals['doi']} "
+        f"doi+arxiv={totals['arxiv']} "
         f"(+{totals['arxiv'] - totals['doi']} from arXiv) "
         f"mag_beyond_doi={totals['mag_extra']}"
     )
-    return 0
+    return 0 if sampled else 1
 
 
-def _raw_mag_s2(query: str) -> dict[str, str]:
-    """MAG id -> DOI (``""`` when absent) from a raw S2 search page."""
-    out: dict[str, str] = {}
-    for _attempt in range(4):
+def _identity_of(doi: str) -> set[str]:
+    """Keys a bare DOI string contributes under the shipped identity rule."""
+    if not doi:
+        return set()
+    keys = {f"doi:{doi.lower()}"}
+    match = _ARXIV_DOI_RE.match(doi)
+    if match:
+        keys.add(f"arxiv:{match.group(1).lower()}")
+    return keys
+
+
+def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
+    """MAG id -> DOI (``""`` when absent) from a raw S2 search page.
+
+    Raises:
+      PaperError: When S2 stays throttled, for the reason in
+        :func:`_raw_records`.
+
+    """
+    for _attempt in range(attempts):
         try:
             body = s2.get(
                 "/paper/search",
@@ -143,7 +178,8 @@ def _raw_mag_s2(query: str) -> dict[str, str]:
         except PaperError:
             time.sleep(6.0)
     else:
-        return out
+        raise PaperError(f"Semantic Scholar unavailable for {query!r}")
+    out: dict[str, str] = {}
     for row in list_val(body.get("data")):
         ids = dict_val(dict_val(row).get("externalIds"))
         mag = str_val(ids.get("MAG"))

@@ -33,7 +33,12 @@ class PaperRecord:
     """
 
     title: str
-    """Paper title."""
+    """Paper title, or ``""`` when the backend reported none.
+
+    Empty rather than a stand-in like ``"(untitled)"``: the fact is that the
+    backend said nothing, not that the work has no title, and a fabricated
+    string is one every backend produces identically -- so anything keying on
+    a title (:mod:`.fuse`) would read unrelated papers as the same one."""
 
     authors: tuple[str, ...] = ()
     """Author display names in publication order."""

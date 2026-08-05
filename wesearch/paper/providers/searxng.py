@@ -33,8 +33,8 @@ def search(
     open_access_only: bool,
     default_fetch: int = 20,
     transport: Transport = "auto",
-) -> tuple[list[PaperRecord], int]:
-    """Query SearXNG's ``science`` category and return (records, total).
+) -> tuple[list[PaperRecord], int, bool]:
+    """Query SearXNG's ``science`` category.
 
     ``default_fetch`` is the candidate count requested when ``limit`` is
     ``None`` -- larger than SearXNG's bare default (10) because the year/OA
@@ -49,6 +49,12 @@ def search(
       open_access_only: Keep only records with an open-access PDF (client-side).
       default_fetch: Candidate count requested when ``limit`` is ``None``.
       transport: Retrieval transport forwarded to SearXNG.
+
+    Returns:
+      records: The mapped hits, in SearXNG rank order.
+      total: The post-filter count; SearXNG reports no backend total.
+      complete: Whether every hit SearXNG returned survives in ``records``. A
+        client-side filter or ``limit`` that dropped one means more may exist.
 
     Raises:
       BackendError: When the SearXNG request fails.
@@ -71,7 +77,7 @@ def search(
     if open_access_only:
         records = [r for r in records if r.open_access_pdf]
     capped = records if limit is None else records[:limit]
-    return capped, len(capped)
+    return capped, len(capped), len(capped) == len(hits)
 
 
 def _year_in_range(year: int | None, lo: int | None, hi: int | None) -> bool:
@@ -93,7 +99,7 @@ def _to_record(hit: PaperResult) -> PaperRecord:
     if doi is not None and not looks_like_paper_id(doi):  # keep only normalizable
         doi = None
     return PaperRecord(
-        title=hit.title or "(untitled)",
+        title=hit.title,
         authors=hit.authors,
         year=hit.published.year if hit.published is not None else None,
         venue=hit.journal or None,

@@ -656,7 +656,7 @@ class TestTransportConsistency:
 
 class TestFetchSession:
     """``FetchSession`` is a frozen browsing identity a caller threads across
-    requests: ``fetch_session`` returns the session updated with what each
+    requests: ``fetch`` returns the session updated with what each
     response taught it (cookies set, ``Accept-CH`` opt-ins), so the next request
     is more browser-like -- the value-typed, functional API for reuse.
     """

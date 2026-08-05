@@ -59,7 +59,7 @@ class TestSearch:
         with patch(
             "wesearch.paper.providers.openalex.fetch", _fetch_returning(payload)
         ):
-            records, total = openalex.search(
+            records, total, complete = openalex.search(
                 "attention",
                 limit=None,
                 year_from=None,
@@ -69,6 +69,9 @@ class TestSearch:
         assert total == 42
         assert [r.title for r in records] == ["Attention", "B"]
         assert records[0].year == 2017
+        # 2 of 42 returned: the cursor was not walked to exhaustion, and
+        # ``search`` must carry that through rather than claim completeness.
+        assert not complete
 
     def test_query_sanitizes_comma_and_pipe(self) -> None:
         fetch = _search("deep, learning | attention")
@@ -191,6 +194,52 @@ class TestRequestErrors:
             )
         assert "invalid JSON" in str(ei.value)
 
+    @pytest.mark.parametrize("payload", [b"[]", b"null", b'"text"'])
+    def test_non_object_json_raises_backend_error(self, payload: bytes) -> None:
+        # A cast let these through to an AttributeError on the first ``.get``.
+        # That is outside PaperError, so a FUSED search aborted entirely and
+        # discarded S2's good result instead of degrading to it.
+        with (
+            patch(
+                "wesearch.paper.providers.openalex.fetch",
+                MagicMock(return_value=(payload, FetchSession())),
+            ),
+            pytest.raises(BackendError, match="expected a JSON object"),
+        ):
+            openalex.search(
+                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+            )
+
+    def test_undecodable_bytes_raise_backend_error(self) -> None:
+        # json.loads raises UnicodeDecodeError, not JSONDecodeError, on bytes
+        # that are not valid UTF-8 -- also outside the caught type.
+        with (
+            patch(
+                "wesearch.paper.providers.openalex.fetch",
+                MagicMock(return_value=(b"\xff", FetchSession())),
+            ),
+            pytest.raises(BackendError, match="invalid JSON"),
+        ):
+            openalex.search(
+                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+            )
+
+    def test_limiter_failure_raises_backend_error(self) -> None:
+        # The gate is a lock file; a raw OSError escapes every caller's
+        # PaperError handler and defeats fused degradation the same way.
+        limiter = MagicMock()
+        limiter.acquire.side_effect = OSError("read-only file system")
+        with (
+            patch(
+                "wesearch.paper.providers.openalex.cross_process_limiter",
+                return_value=limiter,
+            ),
+            pytest.raises(BackendError, match="rate-limit gate"),
+        ):
+            openalex.search(
+                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+            )
+
 
 class TestFilter:
     def test_all_none_returns_none(self) -> None:
@@ -257,7 +306,11 @@ class TestWorkToRecord:
     def test_sparse_work(self) -> None:
         work: MutableJSON = {}
         rec = openalex._work_to_record(work)
-        assert rec.title == "(untitled)"
+        # Empty, not a stand-in: OpenAlex reported no title, which is not the
+        # same claim as the work having none, and a fabricated string is one
+        # every backend emits identically -- so fusion would read unrelated
+        # papers as one.
+        assert rec.title == ""
         assert rec.authors == ()
         assert rec.year is None
         assert rec.doi is None
@@ -298,6 +351,14 @@ class TestWorkToRecord:
     def test_non_arxiv_doi_yields_no_arxiv_id(self) -> None:
         work: MutableJSON = {"doi": "https://doi.org/10.1145/3596512"}
         assert openalex._work_to_record(work).arxiv_id is None
+
+    def test_datacite_doi_version_suffix_is_stripped(self) -> None:
+        # S2 reports the BARE arXiv id, so a recovered "2210.11934v2" is a key
+        # that joins nothing -- the exact preprint/published merge this
+        # recovery exists to make possible. The structured ``ids.arxiv`` path
+        # already drops the version; the DOI path must agree.
+        work: MutableJSON = {"doi": "https://doi.org/10.48550/arXiv.2210.11934v2"}
+        assert openalex._work_to_record(work).arxiv_id == "2210.11934"
 
 
 class TestReferences:

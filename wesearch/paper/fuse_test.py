@@ -117,6 +117,38 @@ class TestFuse:
         assert out[0].doi == "10.1/s"
 
 
+class TestAMissingTitleIsNotIdentity:
+    def test_two_untitled_papers_do_not_collapse(self) -> None:
+        # A backend reporting no title says nothing about the paper, so two
+        # such records are not the same paper. Keying on the absence unions
+        # every id-less untitled record into ONE component and destroys all
+        # but one -- the same failure the server-side title dedup was removed
+        # for.
+        out = fuse(
+            [
+                PaperRecord(title="", year=1990, sources=("s2",)),
+                PaperRecord(title="", year=2020, sources=("s2",)),
+            ],
+            [],
+        )
+        assert len(out) == 2
+
+    def test_whitespace_is_not_a_title(self) -> None:
+        out = fuse(
+            [PaperRecord(title="   ", sources=("s2",))],
+            [PaperRecord(title="\t", sources=("openalex",))],
+        )
+        assert len(out) == 2
+
+    def test_a_real_shared_title_still_joins(self) -> None:
+        # The refusal is scoped to an ABSENT title: a genuine one is still the
+        # last-resort identity for id-less records.
+        out = fuse(
+            [_rec("Deep Learning!")], [_rec("deep  learning", source="openalex")]
+        )
+        assert len(out) == 1
+
+
 if __name__ == "__main__":
     from wesearch.lib.testing.main import test_main
 

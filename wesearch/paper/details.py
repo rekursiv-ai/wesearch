@@ -9,7 +9,7 @@ Sync -- a coroutine call site lifts these with ``asyncio.to_thread``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 import functools
 
@@ -94,9 +94,11 @@ def references(
       listing: A :class:`Listing` of cited papers.
 
     Raises:
-      PaperError: On backend failure (e.g. an arXiv seed under ``"openalex"``).
+      PaperError: On backend failure (e.g. an arXiv seed under ``"openalex"``),
+        or an unknown ``source``.
 
     """
+    _check_graph_source(source)
     if source == "openalex":
         records, complete = openalex.references(kind, canonical, limit=limit)
         return Listing(records=records, complete=complete)
@@ -135,19 +137,23 @@ def citations(
       listing: A :class:`Listing` of citing papers.
 
     Raises:
-      PaperError: On backend failure, or ``influential_only`` under
-        ``"openalex"``.
+      PaperError: On backend failure, ``influential_only`` under
+        ``"openalex"``, or an unknown ``source``.
 
     """
+    _check_graph_source(source)
     if source == "openalex":
         if influential_only:
             raise PaperError(
                 "'influential_only' is S2-only; OpenAlex has no influence flag."
             )
-        records, total, complete = openalex.citations(
+        records, _total, complete = openalex.citations(
             kind, canonical, limit=limit, year_from=year_from
         )
-        return Listing(records=records, complete=complete or total <= len(records))
+        # The paginator's exhaustion signal alone: OpenAlex's ``meta.count`` is
+        # an estimate and can underreport, so ``total <= len(records)`` turned a
+        # known-short walk into a claim of completeness.
+        return Listing(records=records, complete=complete)
     fields = ",".join(
         ("isInfluential", *(f"citingPaper.{f}" for f in s2.S2_PAPER_FIELDS))
     )
@@ -162,6 +168,18 @@ def citations(
         keep=keep,
     )
     return _edge_listing(page, inner_key="citingPaper")
+
+
+def _check_graph_source(source: GraphSource) -> None:
+    """Reject a source outside :data:`GraphSource`.
+
+    The dispatch below is a single ``if source == "openalex"``, so an unknown
+    value fell through to S2 and silently ran the wrong backend. ``GraphSource``
+    is a ``Literal``, but the MCP tools and any untyped caller are a real
+    boundary, so this is checked rather than asserted.
+    """
+    if source not in get_args(GraphSource):
+        raise PaperError(f"Unknown citation-graph source: {source!r}")
 
 
 def _citation_keep(

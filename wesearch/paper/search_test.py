@@ -25,15 +25,25 @@ def _rec(title: str, source: str) -> PaperRecord:
 class TestSearchDispatch:
     def test_single_backend_openalex(self) -> None:
         with patch.object(
-            openalex, "search", return_value=([_rec("a", "openalex")], 1)
+            openalex, "search", return_value=([_rec("a", "openalex")], 1, True)
         ):
             result = search("q", source="openalex")
         assert [r.title for r in result.records] == ["a"]
         assert result.total == 1
         assert result.complete
 
+    def test_single_backend_carries_the_providers_completeness(self) -> None:
+        # The provider already walked the cursor and knows the answer; `search`
+        # hardcoded True, so every truncated single-backend result claimed to
+        # be exhaustive.
+        with patch.object(
+            openalex, "search", return_value=([_rec("a", "openalex")], 500, False)
+        ):
+            result = search("q", source="openalex", limit=1)
+        assert not result.complete
+
     def test_transport_forwarded_to_provider(self) -> None:
-        with patch.object(openalex, "search", return_value=([], 0)) as provider:
+        with patch.object(openalex, "search", return_value=([], 0, True)) as provider:
             search("q", source="openalex", transport="stdlib")
         assert provider.call_args.kwargs["transport"] == "stdlib"
 
@@ -45,24 +55,30 @@ class TestSearchDispatch:
 class TestFusedSearch:
     def test_both_backends_fused(self) -> None:
         s2_payload: MutableJSON = {
-            "total": 9,
+            "total": 1,
             "data": [{"title": "s", "externalIds": {"DOI": "10.1/s"}}],
         }
         with (
             patch.object(s2, "get", return_value=s2_payload),
-            patch.object(openalex, "search", return_value=([_rec("o", "openalex")], 5)),
+            patch.object(
+                openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
+            ),
         ):
             result = search("q")  # fused default
         assert {r.title for r in result.records} == {"s", "o"}
-        assert result.total == 9
+        assert result.total == 2
         assert result.complete
 
     def test_total_never_below_returned_records(self) -> None:
         # Disjoint hits: each backend reports total=1, fused set has 2 records.
         # total must not be less than what's returned (max(1,1,2) == 2).
         with (
-            patch.object(search_mod, "_s2_search", return_value=([_rec("s", "s2")], 1)),
-            patch.object(openalex, "search", return_value=([_rec("o", "openalex")], 1)),
+            patch.object(
+                search_mod, "_s2_search", return_value=([_rec("s", "s2")], 1, True)
+            ),
+            patch.object(
+                openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
+            ),
         ):
             result = search("q")
         assert len(result.records) == 2
@@ -71,11 +87,27 @@ class TestFusedSearch:
     def test_one_backend_error_is_partial_not_fatal(self) -> None:
         with (
             patch.object(search_mod, "_s2_search", side_effect=PaperError("s2 down")),
-            patch.object(openalex, "search", return_value=([_rec("o", "openalex")], 3)),
+            patch.object(
+                openalex, "search", return_value=([_rec("o", "openalex")], 3, True)
+            ),
         ):
             result = search("q")
         assert [r.title for r in result.records] == ["o"]
         assert not result.complete  # partial -> caller may decline to cache
+
+    def test_a_malformed_backend_payload_still_degrades(self) -> None:
+        # The whole point of fusing: one backend returning garbage must not
+        # cost the caller the other backend's good result. A non-PaperError
+        # escaping the provider aborted the entire search.
+        with (
+            patch.object(
+                search_mod, "_s2_search", return_value=([_rec("s", "s2")], 1, True)
+            ),
+            patch.object(openalex, "fetch", return_value=(b"[]", object())),
+        ):
+            result = search("q")
+        assert [r.title for r in result.records] == ["s"]
+        assert not result.complete
 
     def test_total_failure_raises(self) -> None:
         with (
@@ -93,11 +125,14 @@ class TestFusedSearch:
         s2_hits = [_rec(f"s{i}", "s2") for i in range(5)]
         oa_hits = [_rec(f"o{i}", "openalex") for i in range(5)]
         with (
-            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 100)),
-            patch.object(openalex, "search", return_value=(oa_hits, 100)),
+            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 100, False)),
+            patch.object(openalex, "search", return_value=(oa_hits, 100, False)),
         ):
             result = search("q", limit=5)
         assert len(result.records) == 5
+        # Five fused records were dropped by the trim, so the caller has not
+        # seen everything the backends returned, let alone everything matching.
+        assert not result.complete
 
     def test_fused_keeps_highest_ranked_when_trimming(self) -> None:
         # Trimming happens AFTER fusion, so a paper both backends ranked -- the
@@ -106,8 +141,8 @@ class TestFusedSearch:
         s2_hits = [_rec("solo", "s2"), _rec("shared", "s2")]
         oa_hits = [_rec("oa_solo", "openalex"), _rec("shared", "openalex")]
         with (
-            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 9)),
-            patch.object(openalex, "search", return_value=(oa_hits, 9)),
+            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 9, False)),
+            patch.object(openalex, "search", return_value=(oa_hits, 9, False)),
         ):
             result = search("q", limit=1)
         assert [r.title for r in result.records] == ["shared"]
@@ -116,8 +151,12 @@ class TestFusedSearch:
         # ``total`` is a lower bound on matches, never a count of what was
         # returned, so trimming must not drag it below the honest backend total.
         with (
-            patch.object(search_mod, "_s2_search", return_value=([_rec("s", "s2")], 7)),
-            patch.object(openalex, "search", return_value=([_rec("o", "openalex")], 3)),
+            patch.object(
+                search_mod, "_s2_search", return_value=([_rec("s", "s2")], 7, False)
+            ),
+            patch.object(
+                openalex, "search", return_value=([_rec("o", "openalex")], 3, False)
+            ),
         ):
             result = search("q", limit=1)
         assert result.total == 7

@@ -335,7 +335,7 @@ def fetch(
 class _ResponseLearner:
     """Accumulates what responses teach a session, then folds it in.
 
-    Its :meth:`observe` is the ``on_response`` sink for a :func:`fetch_session`
+    Its :meth:`observe` is the ``on_response`` sink for a :func:`fetch`
     call: it records ``Set-Cookie`` and ``Accept-CH`` from every response (each
     redirect hop and the final one), passing the status/headers through to the
     caller's own callback. :meth:`merge_into` returns the session updated with

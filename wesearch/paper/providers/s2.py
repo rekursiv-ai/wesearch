@@ -455,7 +455,7 @@ def paper_record_from(
     doi = ids.get("DOI")
     arxiv = ids.get("ArXiv")
     return PaperRecord(
-        title=str(data.get("title") or "(untitled)"),
+        title=str(data.get("title") or ""),
         authors=authors,
         year=cast(int | None, data.get("year")),
         venue=(str(data["venue"]) if data.get("venue") else None),
