@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.details import (
+    GraphSource,
     citations,
     metadata,
     metadata_batch,
@@ -130,6 +132,23 @@ class TestOpenAlexGraphSource:
         with patch.object(openalex, "citations", return_value=(recs, 1, True)):
             listing = citations("doi", "10.1/x", limit=None, source="openalex")
         assert listing.complete
+
+    def test_an_underreported_total_cannot_claim_completeness(self) -> None:
+        # OpenAlex's meta.count is an estimate and can come back BELOW what the
+        # walk returned. Re-deriving `complete or total <= len(records)` turned
+        # the paginator's honest "not exhausted" into a claim of completeness.
+        recs = [PaperRecord(title=f"c{i}", sources=("openalex",)) for i in range(200)]
+        with patch.object(openalex, "citations", return_value=(recs, 150, False)):
+            listing = citations("doi", "10.1/x", limit=200, source="openalex")
+        assert not listing.complete
+
+    def test_an_unknown_graph_source_is_rejected(self) -> None:
+        # The dispatch is a single `if source == "openalex"`, so anything else
+        # fell through and silently ran S2 -- the wrong backend, reported as if
+        # it were the requested one.
+        for verb in (references, citations):
+            with pytest.raises(PaperError, match="Unknown citation-graph source"):
+                verb("doi", "10.1/x", limit=1, source=cast(GraphSource, "bogus"))
 
     def test_influential_only_rejected_for_openalex(self) -> None:
         with pytest.raises(PaperError, match="S2-only"):

@@ -8,6 +8,8 @@ from urllib.parse import urljoin, urlparse
 
 import gzip
 import io
+import ipaddress
+import socket
 import zlib
 
 import brotli
@@ -29,6 +31,7 @@ __all__ = [
     "host_header",
     "join_headers",
     "origin",
+    "public_host",
     "redirect_target",
     "rewrite_origin",
 ]
@@ -41,6 +44,67 @@ class ValidatedHost:
 
 
 ValidatedHosts = Callable[[str], ValidatedHost]
+
+
+def public_host(hostname: str) -> ValidatedHost:
+    """Resolve a host to a public IP, refusing every non-public one.
+
+    The ``ValidatedHosts`` resolver an application passes when the URL comes
+    from somewhere it does not trust -- an agent, a user, a fetched page.
+    Without it the caller can be steered to the loopback interface, the cloud
+    metadata endpoint, and every private-range host the process can see.
+    Returning ONE address also pins the connection, so a name that passes
+    validation cannot be re-resolved to a private one before the socket opens.
+
+    Lives here, beside the contract it satisfies, because a security denylist
+    that exists in two places drifts: the next address class added to one copy
+    silently leaves the other exploitable.
+
+    Args:
+      hostname: The bare host the ``ValidatedHosts`` contract passes, never a
+        netloc with a port.
+
+    Returns:
+      validated: The bare host and the single public IP to connect to. Bare
+        because the transport re-appends any port itself, so a port here would
+        be doubled on the wire.
+
+    Raises:
+      ValueError: When ``hostname`` has no host, does not resolve, or resolves
+        to any non-public address.
+
+    """
+    host = urlparse(f"//{hostname}").hostname
+    if not host:
+        raise ValueError("URL has no host.")
+    try:
+        ips = [str(info[4][0]) for info in socket.getaddrinfo(host, None)]
+    except (socket.gaierror, UnicodeError) as e:
+        raise ValueError(f"DNS resolution failed for {host!r}: {e}") from e
+    for candidate in ips:
+        # ipaddress handles the IPv4-mapped IPv6 form (``::ffff:127.0.0.1``)
+        # on every flag below, so no separate unwrapping is needed.
+        address = ipaddress.ip_address(candidate)
+        if (
+            address.is_loopback
+            or address.is_link_local
+            or address.is_private
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            raise ValueError(
+                f"Refusing to fetch {host!r} (resolves to non-public address "
+                f"{address})."
+            )
+    if not ips:
+        raise ValueError(f"DNS resolution returned no address for {host!r}.")
+    # Prefer IPv4: getaddrinfo commonly lists AAAA first, but many networks
+    # have no working v6 route, and pinning a single unreachable v6 address
+    # turns a servable page into a connection failure -- unlike an unpinned
+    # client, which Happy-Eyeballs to v4.
+    return ValidatedHost(host=host, ip=next((a for a in ips if ":" not in a), ips[0]))
+
 
 # Internal per-hop response sink: (status, response headers, responding URL).
 # The URL lets a sink scope what it learns (cookies, hints) to the hop's origin,

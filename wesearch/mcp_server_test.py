@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import asyncio
-import importlib
 
 import pytest
 
@@ -16,6 +16,7 @@ import pytest
 pytest.importorskip("mcp.server")
 
 from wesearch import mcp_server
+from wesearch.fetch import public_host
 from wesearch.paper import (
     authors as paper_authors_mod,
     details as paper_details_mod,
@@ -29,7 +30,6 @@ from wesearch.search import SearchResult as WebSearchResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def _returns[T](value: T) -> Callable[..., T]:
@@ -52,11 +52,13 @@ _RECORD = PaperRecord(
 
 
 def test_lean_paper_caps_authors_and_clips_abstract() -> None:
+    # Defaults, not re-supplied arguments: passing the declared default back in
+    # asserts nothing, and moves with the code instead of pinning it.
     lean = mcp_server._lean_paper(_RECORD)
     assert lean["authors"] == ["A", "B", "C", "D", "E", "et al."]
     abstract = lean["abstract"]
     assert isinstance(abstract, str)
-    assert len(abstract) == mcp_server._ABSTRACT_CHARS
+    assert len(abstract) == 500
     assert abstract.endswith("…")
 
 
@@ -129,16 +131,71 @@ def test_web_search_returns_lean_rows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_web_fetch_extracts_and_truncates(monkeypatch: pytest.MonkeyPatch) -> None:
-    # importlib, not attribute traversal: the package's ``fetch`` re-export
-    # shadows the submodule of the same name.
-    fetch_module = importlib.import_module("wesearch.fetch.fetch")
     html = b"<html><body><p>Hello</p><script>no</script><p>World</p></body></html>"
-    monkeypatch.setattr(fetch_module, "fetch", _returns((html, object())))
+    monkeypatch.setattr(mcp_server, "fetch", _returns((html, object())))
     out = mcp_server.web_fetch("https://e.co", max_chars=7)
     assert out["truncated"] is True
     text = out["text"]
     assert isinstance(text, str)
     assert text.startswith("Hello")
+
+
+def test_web_fetch_pins_the_resolved_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An agent-supplied URL is the SSRF trust boundary, and this server is the
+    # application layer that must opt into pinning -- unpinned, a model reaches
+    # loopback, link-local, and every private-range host the process can see.
+    captured: dict[str, object] = {}
+
+    def _fake_fetch(url: str, *, request: object) -> tuple[bytes, object]:
+        del url
+        captured["validated_hosts"] = getattr(request, "validated_hosts", None)
+        return b"<html><body><p>ok</p></body></html>", object()
+
+    monkeypatch.setattr(mcp_server, "fetch", _fake_fetch)
+    mcp_server.web_fetch("https://e.co")
+    # The resolver's own behavior is pinned in fetch/common_test.py; what this
+    # server owes is opting into it.
+    assert captured["validated_hosts"] is public_host
+
+
+def test_web_fetch_rejects_a_nonpositive_max_chars() -> None:
+    # A negative bound slices from the END, returning nearly the whole page
+    # while still reporting truncated=True.
+    with pytest.raises(ValueError, match="max_chars"):
+        mcp_server.web_fetch("https://e.co", max_chars=-1)
+
+
+def test_paper_search_rejects_a_nonpositive_limit() -> None:
+    # Unbounded, this reaches paginate's own ValueError, which escapes the
+    # PaperError contract every caller catches.
+    with pytest.raises(ValueError, match="limit"):
+        mcp_server.paper_search("q", limit=0)
+
+
+def test_paper_pdf_gives_colliding_slugs_distinct_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ``id_slug`` maps every unsafe character to ``_``, so these two valid DOIs
+    # slug identically and one paper's bytes overwrote the other's.
+    monkeypatch.setattr(mcp_server, "cache_dir", _returns(tmp_path))
+    monkeypatch.setattr(paper_fetch_mod, "download", _returns((b"%PDF-a", "oa")))
+    first = mcp_server.paper_pdf("10.1234/a_b")["path"]
+    monkeypatch.setattr(paper_fetch_mod, "download", _returns((b"%PDF-b", "oa")))
+    second = mcp_server.paper_pdf("10.1234/a/b")["path"]
+    assert first != second
+    assert isinstance(first, str)
+    assert Path(first).read_bytes() == b"%PDF-a"
+
+
+def test_paper_pdf_survives_a_long_doi_suffix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An unbounded slug exceeds the 255-byte filename limit and raises OSError.
+    monkeypatch.setattr(mcp_server, "cache_dir", _returns(tmp_path))
+    monkeypatch.setattr(paper_fetch_mod, "download", _returns((b"%PDF-x", "oa")))
+    path = mcp_server.paper_pdf("10.1234/" + "a" * 300)["path"]
+    assert isinstance(path, str)
+    assert Path(path).read_bytes() == b"%PDF-x"
 
 
 def test_paper_search_emits_library_records_verbatim(

@@ -1,7 +1,13 @@
-"""MCP server exposing wesearch to agent clients over stdio.
+#!/bin/sh
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+MCP server exposing wesearch to agent clients over stdio.
 
 Run with ``wesearch-mcp`` (installed via the ``mcp`` extra: ``pip install
-wesearch[mcp]``). Every tool is a thin wrapper over a public wesearch
+wesearch[mcp]``), as ``sh mcp_server.py``, or as ``python -m
+wesearch.mcp_server``. Every tool is a thin wrapper over a public wesearch
 function, with outputs reshaped to be token-lean for model consumption:
 abstracts are truncated, empty fields dropped, and PDF bytes are written to
 the user cache directory rather than returned inline.
@@ -11,14 +17,28 @@ profile state are cross-process safe on disk, so each MCP client session can
 run its own server process without coordination. Errors surface to the
 client as MCP tool errors carrying the underlying exception message
 (``BotDetectionError`` includes its recovery guidance).
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from mcp.server import MCPServer
+import hashlib
 
+
+try:
+    from mcp.server import MCPServer
+except ImportError as e:  # pragma: no cover -- depends on the install's extras.
+    # The MCP SDK is an optional extra, so this module is the one place in the
+    # package where a missing dependency is expected. A bare ModuleNotFoundError
+    # names `mcp`, which tells a reader nothing about which extra supplies it.
+    raise ImportError(
+        "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]"
+    ) from e
+
+from wesearch.fetch.common import public_host
+from wesearch.fetch.fetch import RequestParams, fetch
 from wesearch.lib.userdirs import cache_dir
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -31,13 +51,13 @@ from wesearch.search import search as web_search_fn
 
 
 if TYPE_CHECKING:
-    from wesearch.paper.custom_types import AuthorRecord, PaperRecord
+    from bs4 import BeautifulSoup
 
-_ABSTRACT_CHARS = 500  # config-globals: ignore -- token-lean output tuning constant.
-_DETAIL_ABSTRACT_CHARS = (
-    1500  # config-globals: ignore -- token-lean output tuning constant.
-)
-_MAX_AUTHORS = 5  # config-globals: ignore -- token-lean output tuning constant.
+    from wesearch.paper.custom_types import AuthorRecord, PaperRecord
+else:
+    from wrapt import lazy_import
+
+    BeautifulSoup = lazy_import("bs4", "BeautifulSoup")  # 140ms
 
 mcp = MCPServer(
     name="wesearch",
@@ -56,12 +76,10 @@ def _clip(text: str | None, limit: int) -> str | None:
     return text[: limit - 1].rstrip() + "…"
 
 
-def _lean_paper(
-    record: PaperRecord, *, abstract_chars: int = _ABSTRACT_CHARS
-) -> dict[str, object]:
+def _lean_paper(record: PaperRecord, *, abstract_chars: int = 500) -> dict[str, object]:
     """Compact dict for one paper: empty fields dropped, abstract clipped."""
-    authors: list[str] = list(record.authors[:_MAX_AUTHORS])
-    if len(record.authors) > _MAX_AUTHORS:
+    authors: list[str] = list(record.authors[:5])
+    if len(record.authors) > 5:
         authors.append("et al.")
     fields: dict[str, object] = {
         "title": record.title,
@@ -71,6 +89,7 @@ def _lean_paper(
         "doi": record.doi,
         "arxiv_id": record.arxiv_id,
         "citation_count": record.citation_count,
+        "reference_count": record.reference_count,
         "open_access_pdf": record.open_access_pdf,
         "is_influential": record.is_influential,
         "abstract": _clip(record.abstract, abstract_chars),
@@ -102,8 +121,10 @@ def paper_search(
 ) -> dict[str, object]:
     """Search scholarly literature. The default "fused" source rank-fuses
     Semantic Scholar and OpenAlex and degrades gracefully if one is down
-    (complete=false means a backend was lost or results were truncated).
+    (complete=false means a backend was lost or more matches remain).
     """
+    if limit < 1:
+        raise ValueError(f"'limit' must be >= 1, got {limit}.")
     result = paper_search_mod.search(
         query,
         source=source,
@@ -126,16 +147,26 @@ def paper_details(paper_id: str) -> dict[str, object]:
     """
     kind, canonical = normalize_id(paper_id)
     record = paper_details_mod.metadata(kind, canonical)
-    lean = _lean_paper(record, abstract_chars=_DETAIL_ABSTRACT_CHARS)
+    # Three times the search clip: a detail lookup is one paper the caller
+    # already chose, so the abstract is what they asked for.
+    lean = _lean_paper(record, abstract_chars=1_500)
     lean["id"] = f"{kind}:{canonical}"
     return lean
 
 
 @mcp.tool()
-def paper_references(paper_id: str, limit: int = 20) -> dict[str, object]:
-    """Papers this paper cites (its bibliography)."""
+def paper_references(
+    paper_id: str,
+    limit: int = 20,
+    source: Literal["s2", "openalex"] = "s2",
+) -> dict[str, object]:
+    """Papers this paper cites (its bibliography). source="openalex" reaches
+    an independent quota when Semantic Scholar is throttled (DOI seeds only).
+    """
+    if limit < 1:
+        raise ValueError(f"'limit' must be >= 1, got {limit}.")
     kind, canonical = normalize_id(paper_id)
-    listing = paper_details_mod.references(kind, canonical, limit=limit)
+    listing = paper_details_mod.references(kind, canonical, limit=limit, source=source)
     return {
         "records": [_lean_paper(r) for r in listing.records],
         "complete": listing.complete,
@@ -148,10 +179,14 @@ def paper_citations(
     limit: int = 20,
     influential_only: bool = False,
     year_from: int | None = None,
+    source: Literal["s2", "openalex"] = "s2",
 ) -> dict[str, object]:
     """Papers that cite this paper. influential_only keeps only citations
-    Semantic Scholar flags as influential.
+    Semantic Scholar flags as influential (S2 only). source="openalex" reaches
+    an independent quota when Semantic Scholar is throttled (DOI seeds only).
     """
+    if limit < 1:
+        raise ValueError(f"'limit' must be >= 1, got {limit}.")
     kind, canonical = normalize_id(paper_id)
     listing = paper_details_mod.citations(
         kind,
@@ -159,6 +194,7 @@ def paper_citations(
         limit=limit,
         influential_only=influential_only,
         year_from=year_from,
+        source=source,
     )
     return {
         "records": [_lean_paper(r) for r in listing.records],
@@ -175,7 +211,12 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
     pdf_bytes, source = paper_fetch_mod.download(kind, canonical)
     target_dir = cache_dir("wesearch") / "pdf"
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{id_slug(kind, canonical)}.pdf"
+    # Slug for a human, digest for identity: ``id_slug`` maps every unsafe
+    # character to ``_``, so ``10.1/a_b`` and ``10.1/a/b`` collide and one
+    # paper overwrites the other. It is also unbounded, and a long DOI suffix
+    # exceeds the 255-byte filename limit.
+    digest = hashlib.sha256(f"{kind}:{canonical}".encode()).hexdigest()[:16]
+    target = target_dir / f"{id_slug(kind, canonical)[:80]}.{digest}.pdf"
     target.write_bytes(pdf_bytes)
     return {"path": str(target), "bytes": len(pdf_bytes), "source": source}
 
@@ -231,29 +272,39 @@ def web_fetch(
     through headless Chrome when a site blocks plain HTTP clients (slower;
     needs a local Chrome/Chromium).
     """
-    from bs4 import (  # noqa: PLC0415 -- heavy import deferred to first use.
-        BeautifulSoup,
-    )
-
-    from wesearch.fetch.fetch import (  # noqa: PLC0415 -- deferred with bs4.
-        RequestParams,
-        fetch,
-    )
-
+    if max_chars < 1:
+        raise ValueError(f"'max_chars' must be >= 1, got {max_chars}.")
     transport: Literal["auto", "curl-then-zendriver"] = (
         "curl-then-zendriver" if browser else "auto"
     )
-    body, _session = fetch(url, request=RequestParams(transport=transport))
+    # The URL comes from a language model, so this server is the application
+    # layer that must opt into SSRF pinning -- unpinned, the model reaches
+    # loopback, the metadata endpoint, and every private-range host.
+    body, _session = fetch(
+        url,
+        request=RequestParams(transport=transport, validated_hosts=public_host),
+    )
     soup = BeautifulSoup(body, "html.parser")
     text = "\n".join(line for line in soup.get_text("\n").splitlines() if line.strip())
     truncated = len(text) > max_chars
     return {"url": url, "text": text[:max_chars], "truncated": truncated}
 
 
-def main() -> None:
-    """Console-script entry point: serve over stdio."""
+def main() -> int:
+    """Serve the MCP tools over stdio.
+
+    Returns:
+      status: Process exit status.
+
+    """
     mcp.run()
+    return 0
 
 
+# The executable lives here rather than in a package `__main__.py`: `mcp` is an
+# optional extra, and `python -m wesearch` starting a server that a default
+# install cannot import would make the whole package look broken. Named after
+# the server, the failure explains itself.
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+# vim: ft=python

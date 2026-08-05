@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import gzip
 import io
+import socket
 import zlib
 
 import brotli
@@ -14,8 +17,94 @@ from wesearch.fetch.common import (
     apply_redirect,
     bracket_ipv6,
     decompress,
+    public_host,
     rewrite_origin,
 )
+
+
+# socket.getaddrinfo returns the canonical 5-tuple
+# (family, type, proto, canonname, sockaddr); only the IP inside sockaddr
+# matters here. ``AddrInfo`` names the shape once so the tests can stop
+# repeating it.
+type AddrInfo = tuple[int, int, int, str, tuple[str, int]]
+
+
+def _addrinfo(*ips: str) -> list[AddrInfo]:
+    """Build a ``socket.getaddrinfo``-shaped result over ``ips``, in order."""
+    return [
+        (socket.AF_INET6 if ":" in ip else socket.AF_INET, 0, 0, "", (ip, 0))
+        for ip in ips
+    ]
+
+
+class TestPublicHost:
+    def test_rejects_dns_failure(self) -> None:
+        with (
+            patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")),
+            pytest.raises(ValueError, match="DNS"),
+        ):
+            public_host("does-not-exist.invalid")
+
+    def test_rejects_a_missing_host(self) -> None:
+        with pytest.raises(ValueError, match="no host"):
+            public_host("")
+
+    def test_rejects_loopback(self) -> None:
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo("127.0.0.1")),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("localhost")
+
+    def test_rejects_link_local_metadata(self) -> None:
+        # The cloud metadata endpoint is the canonical SSRF target.
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo("169.254.169.254")),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("metadata.example")
+
+    def test_rejects_an_ipv4_mapped_private_address(self) -> None:
+        # ``::ffff:10.0.0.1`` is a private v4 address wearing a v6 spelling;
+        # ipaddress flags it, and this pins that it stays flagged.
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo("::ffff:10.0.0.1")),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("mapped.example")
+
+    def test_accepts_a_public_address(self) -> None:
+        with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")):
+            assert public_host("example.com").ip == "8.8.8.8"
+
+    def test_rejects_when_any_resolution_is_private(self) -> None:
+        # One public answer does not license the name: an attacker controlling
+        # the zone can serve the private one on the next lookup.
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8", "127.0.0.1")),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("example.com")
+
+    def test_prefers_ipv4_when_resolver_lists_ipv6_first(self) -> None:
+        # getaddrinfo often returns AAAA first, but many networks have no
+        # working v6 route; pinning that address fails with status 0 on a page
+        # that plainly serves over v4.
+        with patch(
+            "socket.getaddrinfo",
+            return_value=_addrinfo("2606:4700:20::ac43:4403", "104.26.13.77"),
+        ) as resolve:
+            assert public_host("docs.astral.sh").ip == "104.26.13.77"
+        assert resolve.call_count == 1
+
+    def test_uses_ipv6_when_it_is_the_only_family(self) -> None:
+        with patch("socket.getaddrinfo", return_value=_addrinfo("2606:4700:20::1")):
+            assert public_host("v6only.example").ip == "2606:4700:20::1"
+
+    def test_returns_the_bare_host_not_the_netloc(self) -> None:
+        # The transport re-appends any port itself, so a port here doubles it.
+        with patch("socket.getaddrinfo", return_value=_addrinfo("1.2.3.4")):
+            assert public_host("example.com:8443").host == "example.com"
 
 
 class TestRewriteOrigin:

@@ -98,11 +98,11 @@ def fetch_stdlib(
 ) -> bytes:
     """Stdlib transport: http.client with manual redirect following.
 
-    A drop-in peer of :func:`fetch_curl` with the identical signature, so the
+    A drop-in peer of ``curl.fetch_curl`` with the identical signature, so the
     core dispatcher can select either transport. This backend has no TLS
     impersonation and no pooled connection, so ``impersonate`` and ``session``
     are accepted for interface parity and ignored; the coherent Chrome header set
-    is instead hand-built upstream in :func:`_build_headers`.
+    is instead hand-built upstream, in ``fetch``'s own header assembly.
     """
     del impersonate, session  # No impersonation or connection pooling here.
     # The connection is owned entirely here: opened locally and closed in the

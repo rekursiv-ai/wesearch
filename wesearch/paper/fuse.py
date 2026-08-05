@@ -20,7 +20,7 @@ import re
 from wesearch.paper.custom_types import PaperRecord
 
 
-__all__ = ["fuse"]
+__all__ = ["fuse", "normalize_title"]
 
 _WORD_PUNCT_RE = re.compile(r"[^\w\s]+")
 _WS_RE = re.compile(r"\s+")
@@ -55,6 +55,8 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     offset = 10.0
     # S2's relevance ranking is more precise than OpenAlex's broad text match,
     # so an S2 rank counts for more; an OpenAlex-only paper still scores.
+    # Not kwargs: both metrics measure_fusion_quality reports are invariant to
+    # these -- weights only reorder a set the identity rule already fixed.
     weights = ((s2_hits, "s2", 1.0), (oa_hits, "openalex", 0.7))
 
     groups = _group_by_identity([rec for hits, _label, _w in weights for rec in hits])
@@ -80,8 +82,16 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     ]
 
 
-def _normalize_title(title: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace - for dedup."""
+def normalize_title(title: str) -> str:
+    """Lowercase, strip punctuation, and collapse whitespace in a title.
+
+    Args:
+      title: A backend-reported title.
+
+    Returns:
+      normalized: The comparison form used as a last-resort identity key.
+
+    """
     return _WS_RE.sub(" ", _WORD_PUNCT_RE.sub(" ", title.lower())).strip()
 
 
@@ -93,13 +103,20 @@ def _identity_keys(rec: PaperRecord) -> list[str]:
     arXiv's DataCite DOI join through whichever key they share. Title is a last
     resort -- two distinct papers can share one (``Discussion``, ``Editorial
     introduction``), so it is used only when no identifier exists at all.
+
+    A record with no identifier AND no title gets NO key: it names nothing the
+    fusion can recognize, so it merges with nothing rather than with every
+    other nameless record.
     """
     keys: list[str] = []
     if rec.doi:
         keys.append(f"doi:{rec.doi.lower()}")
     if rec.arxiv_id:
         keys.append(f"arxiv:{rec.arxiv_id.lower()}")
-    return keys or [f"title:{_normalize_title(rec.title)}"]
+    if keys:
+        return keys
+    title = normalize_title(rec.title)
+    return [f"title:{title}"] if title else []
 
 
 def _group_by_identity(records: list[PaperRecord]) -> list[int]:

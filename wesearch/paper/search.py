@@ -17,9 +17,8 @@ Some builds enable additional scraped sources (see :mod:`.providers`); the
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from wesearch.fetch import Transport
 from wesearch.paper.custom_types import PaperRecord
@@ -40,7 +39,27 @@ __all__ = [
 
 Source = Literal["s2", "openalex", "searxng", "fused"]
 
-_SingleBackend = Callable[..., tuple[list[PaperRecord], int]]
+
+class _SingleBackend(Protocol):
+    """One backend's text search.
+
+    A Protocol rather than ``Callable[..., ...]``: the ellipsis form leaves
+    every keyword at the dispatch call site unchecked, so a provider renaming
+    a parameter would type-check clean and fail at runtime.
+    """
+
+    def __call__(
+        self,
+        query: str,
+        *,
+        limit: int | None,
+        year_from: int | None,
+        year_to: int | None,
+        open_access_only: bool,
+        transport: Transport,
+    ) -> tuple[list[PaperRecord], int, bool]:
+        """Return this backend's ``(records, total, complete)``."""
+        ...
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -50,10 +69,13 @@ class SearchResult:
     Attributes:
       records: Ranked paper records (already trimmed to ``limit``).
       total: Backend-reported total match count, or the post-filter count for
-        backends that report none (SearXNG, Google Scholar).
-      complete: False only when a fused search lost a backend to an error (a
-        partial result a caller may decline to cache); single-backend searches
-        are always complete.
+        backends that report none (SearXNG, Google Scholar). For a fused
+        search, the largest of the two backend totals and the pre-trim fused
+        count -- the two overlap unknowably, so this is a lower bound.
+      complete: Whether every match was returned. False when a backend's cursor
+        was cut short (by ``limit`` or a depth ceiling), and, for a fused
+        search, also when a backend was lost to an error -- a partial result a
+        caller may decline to cache.
 
     """
 
@@ -99,7 +121,7 @@ def search(
             open_access_only=open_access_only,
             transport=transport,
         )
-    records, total = _single_backend(source)(
+    records, total, complete = _single_backend(source)(
         query,
         limit=limit,
         year_from=year_from,
@@ -107,7 +129,7 @@ def search(
         open_access_only=open_access_only,
         transport=transport,
     )
-    return SearchResult(records=records, total=total, complete=True)
+    return SearchResult(records=records, total=total, complete=complete)
 
 
 def _s2_search(
@@ -118,8 +140,8 @@ def _s2_search(
     year_to: int | None,
     open_access_only: bool,
     transport: Transport = "auto",
-) -> tuple[list[PaperRecord], int]:
-    """Query Semantic Scholar and return (records, total)."""
+) -> tuple[list[PaperRecord], int, bool]:
+    """Query Semantic Scholar; return ``(records, total, complete)``."""
     params: dict[str, str | int] = {
         "query": query,
         "fields": s2.S2_PAPER_FIELDS_STR,
@@ -131,7 +153,7 @@ def _s2_search(
         params["openAccessPdf"] = ""  # S2 treats it as a presence flag.
     page, total = s2.search_paginate(params, limit=limit, transport=transport)
     records = [s2.paper_record_from(row) for row in page.entries]
-    return records, total
+    return records, total, page.complete
 
 
 def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
@@ -140,7 +162,7 @@ def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
         return None
     lo = str(year_from) if year_from is not None else ""
     hi = str(year_to) if year_to is not None else ""
-    return f"{lo}-{hi}" if lo or hi else None
+    return f"{lo}-{hi}"
 
 
 def _single_backend(source: Source) -> _SingleBackend:
@@ -169,11 +191,12 @@ def _fused(
     s2_hits: list[PaperRecord] = []
     oa_hits: list[PaperRecord] = []
     s2_total = oa_total = 0
+    exhausted = True
     errors: list[str] = []
     answered = 0
 
     try:
-        s2_hits, s2_total = _s2_search(
+        s2_hits, s2_total, s2_complete = _s2_search(
             query,
             limit=limit,
             year_from=year_from,
@@ -181,11 +204,12 @@ def _fused(
             open_access_only=open_access_only,
             transport=transport,
         )
+        exhausted = exhausted and s2_complete
         answered += 1
     except PaperError as e:
         errors.append(f"S2: {e}")
     try:
-        oa_hits, oa_total = openalex.search(
+        oa_hits, oa_total, oa_complete = openalex.search(
             query,
             limit=limit,
             year_from=year_from,
@@ -193,6 +217,7 @@ def _fused(
             open_access_only=open_access_only,
             transport=transport,
         )
+        exhausted = exhausted and oa_complete
         answered += 1
     except PaperError as e:
         errors.append(f"OpenAlex: {e}")
@@ -217,5 +242,7 @@ def _fused(
         # never report fewer than fusion actually found (pre-trim, since the
         # trimmed-away records are matches the caller may still page to).
         total=max(s2_total, oa_total, len(fused)),
-        complete=not errors,
+        # Three ways to be incomplete: a backend errored, a backend's cursor was
+        # cut short, or the trim above dropped a fused record.
+        complete=not errors and exhausted and len(records) == len(fused),
     )
