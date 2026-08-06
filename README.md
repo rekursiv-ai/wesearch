@@ -190,13 +190,15 @@ safe on disk, so no daemon is needed.
 
 ## See also
 
-Sibling libraries in the [rekursiv-ai](https://github.com/rekursiv-ai) family:
+Sibling projects in the [rekursiv-ai](https://github.com/rekursiv-ai) family:
 
 - [sagent](https://github.com/rekursiv-ai/sagent) — The self-mutating multi-provider coding-agent CLI and typed Python library.
 - [trackinizer](https://github.com/rekursiv-ai/trackinizer) — Centralized agent database for tracking inquiries, work, and the evidence behind conclusions.
 - [madcatter](https://github.com/rekursiv-ai/madcatter) — Rich-based Markdown renderer for the terminal; ships the `mdcat` CLI.
 - [priml](https://github.com/rekursiv-ai/priml) — Composable PyTorch building blocks: models, optimizers, losses, and a step-based training loop.
 - [configgle](https://github.com/rekursiv-ai/configgle) — Hierarchical experiment configuration in typed pure-Python dataclasses instead of YAML.
+- [copybarista](https://github.com/rekursiv-ai/copybarista) — Bidirectional source sync for publishing OSS-ready trees from a monorepo.
+- [sudoku](https://github.com/rekursiv-ai/sudoku) — Sudoku-Extreme solved end to end with a 7M-parameter recursive transformer.
 
 ## Citing
 
