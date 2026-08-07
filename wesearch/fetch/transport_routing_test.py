@@ -7,8 +7,8 @@ import pytest
 from wesearch.fetch.transport_routing import (
     remember_zendriver_domain,
     zendriver_domains,
-    zendriver_domains_path,
 )
+from wesearch.lib.userdirs import state_dir
 
 
 def test_default_path_uses_per_user_state(
@@ -16,7 +16,10 @@ def test_default_path_uses_per_user_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    assert zendriver_domains_path() == tmp_path / "loop/web/zendriver-domains.txt"
+    assert (
+        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+        == state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+    )
 
 
 def test_default_remember_does_not_modify_bundled_manifest(
@@ -33,7 +36,9 @@ def test_default_remember_does_not_modify_bundled_manifest(
 
     after = bundled.read_bytes() if bundled.exists() else None
     assert after == before
-    assert zendriver_domains_path().read_text() == "learned.example\n"
+    assert (
+        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+    ).read_text() == "learned.example\n"
     assert "learned.example" in zendriver_domains()
 
 

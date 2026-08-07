@@ -665,7 +665,7 @@ def clear_domain_cooldowns(domain: str, *, state_dir: Path | None = None) -> int
     base = (
         state_dir
         if state_dir is not None
-        else data_dir("loop") / "lib" / "web" / "ratelimit"
+        else data_dir("rekursiv-ai") / "wesearch" / "ratelimit"
     )
     if not base.exists():
         return 0
@@ -712,7 +712,7 @@ def cross_process_limiter(
       per_seconds: Minimum seconds between grants (one token per window).
       state_dir: Directory for the ``{key}_ratelimit.lock`` /
         ``{key}_cooldown.lock`` files. Defaults to
-        ``data_dir("loop") / "lib" / "web" / "ratelimit"``. Created on first
+        ``data_dir("rekursiv-ai") / "wesearch" / "ratelimit"``. Created on first
         write by :class:`FileStore`.
       cooldown_sec: Default seconds a triggered cooldown holds the shared window
         open (a caller may override per :meth:`CooldownRateLimiter.trigger_cooldown`).
@@ -728,7 +728,7 @@ def cross_process_limiter(
     base = (
         state_dir
         if state_dir is not None
-        else data_dir("loop") / "lib" / "web" / "ratelimit"
+        else data_dir("rekursiv-ai") / "wesearch" / "ratelimit"
     )
     clock = SystemClock(source=time.time)
     return CooldownRateLimiter(

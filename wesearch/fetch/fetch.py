@@ -60,6 +60,7 @@ from wesearch.fetch.curl import (
 )
 from wesearch.fetch.stdlib import fetch_stdlib
 from wesearch.lib.custom_json import JSONValue
+from wesearch.lib.userdirs import data_dir
 from wesearch.profile import (
     Profile,
     ProfileStore,
@@ -637,7 +638,7 @@ def _send_via_zendriver(
     browser_url = _url_with_params(request.url, request.params.params)
     result = zendriver_backend.fetch_zendriver(
         browser_url,
-        profile_dir=zendriver_backend.default_profile_dir(),
+        profile_dir=data_dir("rekursiv-ai") / "wesearch" / "fetch-zendriver",
         egress=egress or "",
         timeout_sec=request.params.timeout_sec,
         headers=headers,

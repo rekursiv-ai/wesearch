@@ -104,7 +104,7 @@ class ProfileStore:
 
     Args:
       base_dir: Directory holding the per-key files. Defaults to
-        ``data_dir("web_profiles")``. Created on first write.
+        ``data_dir("rekursiv-ai") / "web_profiles"``. Created on first write.
       ttl_sec: Seconds a profile stays valid after ``created``. Default 12h.
 
     """
@@ -115,7 +115,9 @@ class ProfileStore:
         base_dir: Path | None = None,
         ttl_sec: float = 12 * 3600.0,
     ) -> None:
-        self._base = data_dir("wesearch") if base_dir is None else base_dir
+        self._base = (
+            data_dir("rekursiv-ai") / "wesearch" if base_dir is None else base_dir
+        )
         self._ttl_sec = ttl_sec
         self._lock = threading.Lock()
 
