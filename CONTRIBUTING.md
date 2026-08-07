@@ -29,12 +29,6 @@ uv run python -c "import wesearch"
 uv build
 ```
 
-## Testing notes
-
-Network-touching and browser-driving tests are marked `@pytest.mark.integration`
-and are deselected by default. The unit suite is hermetic: fetches are stubbed
-and the on-disk profile/rate-limit state is redirected to a temp directory.
-
 ## Public contribution flow
 
 The public repository is synchronized with the canonical source tree. Public
@@ -49,5 +43,3 @@ Do not edit generated `wesearch/export/*` branches directly.
 - Include tests for behavior changes.
 - Update README or docs when public behavior changes.
 - Do not include secrets, private credentials, generated caches, or local environment files.
-- Respect target sites: do not add features whose only purpose is evading
-  rate limits, bot protections, or terms of service at scale.
