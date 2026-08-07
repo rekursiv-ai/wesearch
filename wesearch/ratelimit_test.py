@@ -606,7 +606,7 @@ def test_cross_process_limiter_defaults_inside_loop_web(tmp_path: Path) -> None:
     with patch("wesearch.ratelimit.data_dir", return_value=tmp_path):
         limiter = cross_process_limiter("s2", per_seconds=1.0)
         limiter.acquire()
-    assert (tmp_path / "lib" / "web" / "ratelimit" / "s2_ratelimit.lock").exists()
+    assert (tmp_path / "wesearch" / "ratelimit" / "s2_ratelimit.lock").exists()
 
 
 def test_cross_process_limiter_shares_cooldown_across_instances(

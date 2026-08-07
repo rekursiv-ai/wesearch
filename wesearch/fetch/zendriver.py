@@ -56,7 +56,6 @@ else:
 __all__ = [
     "BrowserResult",
     "BrowserUnavailableError",
-    "default_profile_dir",
     "fetch_zendriver",
     "open_instance",
     "shutdown_browsers",
@@ -211,16 +210,6 @@ def _sandbox() -> bool:
     return os.geteuid() != 0
 
 
-def default_profile_dir() -> Path:
-    """The fresh dedicated Chrome ``user_data_dir`` the browser backend uses.
-
-    A per-user directory distinct from the live ``~/.config/google-chrome``
-    (which Chrome singleton-locks while running), seeded once by the
-    ``loop-web-fetch-zendriver`` entrypoint and reused headless thereafter.
-    """
-    return data_dir("loop") / "lib" / "web" / "fetch-zendriver"
-
-
 class BrowserResult(NamedTuple):
     """What a browser fetch yields: the rendered page and the cookies it holds.
 
@@ -318,7 +307,11 @@ def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
         :func:`default_profile_dir`.
 
     """
-    target = default_profile_dir() if profile_dir is None else profile_dir
+    target = (
+        data_dir("rekursiv-ai") / "wesearch" / "fetch-zendriver"
+        if profile_dir is None
+        else profile_dir
+    )
     _request_pool_release(target)
     _pool().run(_open_instance(url, target))
     domain = urlparse(url).hostname
@@ -629,7 +622,8 @@ def _main() -> int:
     )
     args = parser.parse_args()
     print(  # noqa: T201 -- CLI user feedback.
-        f"Opening {args.url} in Chrome on {default_profile_dir()} -- "
+        f"Opening {args.url} in Chrome on "
+        f"{data_dir('rekursiv-ai') / 'wesearch' / 'fetch-zendriver'} -- "
         "close the window when done."
     )
     open_instance(args.url)

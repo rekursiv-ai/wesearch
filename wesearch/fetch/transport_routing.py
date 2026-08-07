@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "remember_zendriver_domain",
     "zendriver_domains",
-    "zendriver_domains_path",
 ]
 
 
@@ -39,11 +38,6 @@ def _write_all(file_descriptor: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
         view = view[os.write(file_descriptor, view) :]
-
-
-def zendriver_domains_path() -> Path:
-    """Return the writable per-user automatic-Zendriver domain list."""
-    return state_dir("loop") / "web" / "zendriver-domains.txt"
 
 
 def _bundled_domains_path() -> Path:
@@ -97,7 +91,7 @@ def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
     if path is not None:
         return _read_domains(path)
     return _read_domains(_bundled_domains_path()) | _read_domains(
-        zendriver_domains_path()
+        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
     )
 
 
@@ -115,7 +109,11 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
     normalized = domain.strip().casefold()
     if not normalized or "\n" in normalized or "\r" in normalized:
         raise ValueError(f"Invalid Zendriver domain: {domain!r}.")
-    target = zendriver_domains_path() if path is None else path
+    target = (
+        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+        if path is None
+        else path
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     file_descriptor = os.open(
         target,
