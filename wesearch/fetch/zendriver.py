@@ -38,6 +38,7 @@ import threading
 import time
 import warnings
 
+from wesearch.fetch.challenge import classify_challenge
 from wesearch.lib.userdirs import data_dir
 from wesearch.ratelimit import clear_domain_cooldowns
 
@@ -388,6 +389,111 @@ async def _navigate_tab(
     return tab
 
 
+def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
+    """Return an Event set whenever the MAIN frame commits a new document.
+
+    Chrome fires ``FrameNavigated`` for every frame, and a challenge page is
+    dense with sub-frames (the Turnstile widget alone accounts for most of the
+    17 events one interstitial emits). Only the main frame -- the one with no
+    parent -- means "the document you are reading was replaced".
+    """
+    navigated = asyncio.Event()
+
+    # Two-arg tolerant on purpose: zendriver calls a handler as
+    # ``callback(event, connection)`` and retries as ``callback(event)`` only
+    # after catching TypeError. A one-arg signature reaches the handler through
+    # that exception path, where a TypeError raised INSIDE the handler is
+    # indistinguishable from the arity mismatch and silently re-runs it.
+    #
+    # ``isinstance`` rather than a bare attribute read: zendriver dispatches on
+    # ``type(event)`` (connection.py), yet a live run delivered a
+    # ``FrameStartedLoading`` here and the handler raised AttributeError inside
+    # zendriver's callback thread. That exception cannot fail the fetch -- it is
+    # logged and swallowed -- so the cost is a silent miss of the wakeup this
+    # exists to deliver, not a crash. Guarding the shape is cheap; the event
+    # this cares about is the one with a frame.
+    def on_navigated(event: object, *_unused: object) -> None:
+        if (
+            isinstance(event, zendriver.cdp.page.FrameNavigated)
+            and event.frame.parent_id is None
+        ):
+            navigated.set()
+
+    # zendriver annotates this parameter as a bare ``Callable`` -- i.e.
+    # ``Callable[..., Unknown]`` -- under a suppression of its own in
+    # connection.py, so the bound method is partially unknown before an argument
+    # is even passed. A stub cannot repair it in place: ``add_handler`` is
+    # inherited from ``Connection``, and a partial ``.pyi`` for that class would
+    # blank its other 66 members. Naming the real contract at this one call site
+    # is the narrowest fix, and it keeps ``event.frame.parent_id`` checked above.
+    event_type = zendriver.cdp.page.FrameNavigated
+    register = cast(
+        "Callable[[type[object], Callable[..., None]], None]", tab.add_handler
+    )
+    register(event_type, on_navigated)
+    return navigated
+
+
+async def _settled_content(tab: zendriver.Tab, *, budget_sec: float) -> str:
+    """Return the tab's HTML once it is no longer a challenge interstitial.
+
+    A single load event is not the end of a challenge-walled fetch. The
+    interstitial is itself a complete document: it reaches ``readyState ==
+    "complete"``, THEN its JS navigates the tab to the real page. Measured on
+    one live URL::
+
+        t=0.00s   5516 bytes  challenge   readyState=complete   <- interstitial
+        t=1.10s    386 bytes  clear       readyState=loading    <- real doc parsing
+        t=2.20s 380404 bytes  clear       readyState=complete   <- the page
+
+    Both intermediate states are traps. Harvesting at the first ``complete``
+    returns the wall; harvesting the moment the challenge markup disappears
+    returns a 386-byte ``<head>`` whose title looks right and whose body is
+    empty. So each iteration waits for a real main-frame navigation and THEN
+    for that new document to finish parsing -- never for a duration.
+
+    This is event-driven rather than polled deliberately: Chrome already knows
+    when it replaced the document, so sampling the DOM on a timer both guesses
+    at an interval and can only ever observe the states its grid lands on (the
+    386-byte phase is exactly such a miss). One wait per real transition, no
+    sampling rate to tune.
+
+    ``on_success_body=True`` is load-bearing: this body came from a browser that
+    rendered the page, so a generic CAPTCHA widget in it is ordinary furniture
+    (a login form's reCAPTCHA), not proof of a wall. Only structural
+    interstitial evidence means "this document is about to replace itself".
+
+    ``budget_sec`` bounds a challenge that never clears -- a real block rather
+    than a delay -- and must stay under the caller's overall fetch timeout, so a
+    walled page surfaces the wall instead of raising ``TimeoutError``. The last
+    body read is returned for the caller's classifier to judge; this layer
+    decides only WHEN the page stopped changing, never what it means.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget_sec
+    navigated = _main_frame_navigations(tab)
+    while True:
+        # Cleared BEFORE the read, never after: a navigation that commits
+        # between reading the body and starting the wait must still count. Clear
+        # afterwards and that wakeup is dropped, so a page that cleared in the
+        # gap blocks for the whole budget -- the classic lost-wakeup.
+        navigated.clear()
+        body = await tab.get_content()
+        if classify_challenge(body, on_success_body=True) is None:
+            return body
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return body
+        try:
+            await asyncio.wait_for(navigated.wait(), timeout=remaining)
+        except TimeoutError:
+            return await tab.get_content()
+        # The navigation only COMMITS the new document; its markup arrives as it
+        # parses. Without this the next read catches the half-built 386-byte
+        # phase above -- right title, empty body.
+        await tab.wait_for_ready_state("complete")
+
+
 async def _navigate(
     url: str,
     *,
@@ -408,8 +514,9 @@ async def _navigate(
     per-fetch tab also isolates concurrent fetches sharing the one browser.
 
     Readiness is Chrome's real load signal (``document.readyState ==
-    "complete"``), not a fixed sleep, bounded by ``timeout_sec``. The transport
-    returns what Chrome rendered without assigning provider semantics to it.
+    "complete"``) plus :func:`_settled_content` for the interstitial that
+    outlives it, bounded by ``timeout_sec``. The transport returns what Chrome
+    rendered without assigning provider semantics to it.
     """
     async with asyncio.timeout(timeout_sec):
         browser = await _pool().browser(egress, profile_dir, headless=headless)
@@ -426,7 +533,10 @@ async def _navigate(
             )
         tab = await _navigate_tab(browser, url, headers=headers)
         try:
-            body = await tab.get_content()
+            # Half the overall budget: the settle poll must be able to give up
+            # and still leave time to harvest cookies and return the wall, so a
+            # blocked page surfaces its BotDetectionError instead of a timeout.
+            body = await _settled_content(tab, budget_sec=timeout_sec / 2)
             final_url = cast("str", await tab.evaluate("document.location.href")) or url
             if on_redirect is not None and final_url != url:
                 on_redirect(final_url)
