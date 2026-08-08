@@ -37,8 +37,7 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
         "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]"
     ) from e
 
-from wesearch.fetch.common import public_host
-from wesearch.fetch.fetch import RequestParams, fetch
+from wesearch.fetch.fetch import fetch
 from wesearch.lib.userdirs import cache_dir
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -48,6 +47,7 @@ from wesearch.paper import (
 )
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.search import search as web_search_fn
+from wesearch.types.params import Policy, RequestParams
 
 
 if TYPE_CHECKING:
@@ -277,12 +277,12 @@ def web_fetch(
     transport: Literal["auto", "curl-then-zendriver"] = (
         "curl-then-zendriver" if browser else "auto"
     )
-    # The URL comes from a language model, so this server is the application
-    # layer that must opt into SSRF pinning -- unpinned, the model reaches
-    # loopback, the metadata endpoint, and every private-range host.
+    # The URL comes from a language model, so it is untrusted -- which is the
+    # default, leaving this call to state only the transport. Under that default
+    # the host is validated to a public address before connecting, keeping the
+    # model off loopback, the metadata endpoint, and every private-range host.
     body, _session = fetch(
-        url,
-        request=RequestParams(transport=transport, validated_hosts=public_host),
+        url, request=RequestParams(policy=Policy(transport=transport))
     )
     soup = BeautifulSoup(body, "html.parser")
     text = "\n".join(line for line in soup.get_text("\n").splitlines() if line.strip())

@@ -30,7 +30,13 @@ import os
 import re
 
 from wesearch.errors import FetchError
-from wesearch.fetch import RequestParams, Transport, ValidatedHosts, fetch
+from wesearch.fetch import (
+    Content,
+    Policy,
+    RequestParams,
+    Retry,
+    fetch,
+)
 
 
 __all__ = [
@@ -74,21 +80,13 @@ def third_party_render_allowed() -> bool:
     )
 
 
-def fetch_reader_proxy(
-    url: str,
-    *,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
-) -> bytes:
+def fetch_reader_proxy(url: str, *, policy: Policy) -> bytes:
     """Render ``url`` through the reader proxy; return its markdown bytes.
 
     Args:
       url: The target URL to render.
-      transport: Retrieval transport for the proxy hop (the proxy host is
-        fetched like any other URL, so a caller's SSRF policy still applies via
-        ``RequestParams``).
-      validated_hosts: Optional SSRF resolver pinning the connect IP per host;
-        ``None`` leaves the proxy hop unpinned.
+      policy: Transport and trust for the proxy hop. The proxy host is fetched
+        like any other URL, so the caller's trust level applies to it.
 
     Returns:
       markdown: The proxy's extracted-markdown response bytes.
@@ -115,10 +113,9 @@ def fetch_reader_proxy(
     body, _session = fetch(
         proxy_url,
         request=RequestParams(
-            headers=headers,
-            timeout_sec=30,
-            transport=transport,
-            validated_hosts=validated_hosts,
+            content=Content(headers=headers),
+            retry=Retry(timeout_sec=30),
+            policy=policy,
         ),
     )
     if _SOFT_FAIL_RE.search(body):

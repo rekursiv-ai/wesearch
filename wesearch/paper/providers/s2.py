@@ -22,7 +22,14 @@ import json
 import os
 
 from wesearch.errors import FetchError
-from wesearch.fetch import RequestParams, Transport, fetch
+from wesearch.fetch import (
+    Content,
+    Policy,
+    RequestParams,
+    Retry,
+    Transport,
+    fetch,
+)
 from wesearch.lib.custom_json import MutableJSON, int_val
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
@@ -199,10 +206,9 @@ def get(
         lambda: fetch(
             url=f"{base}{path}",
             request=RequestParams(
-                params=params,
-                headers=_headers(),
-                timeout_sec=timeout_sec,
-                transport=transport,
+                content=Content(params=params, headers=_headers()),
+                retry=Retry(timeout_sec=timeout_sec),
+                policy=Policy(transport=transport),
             ),
         )[0],
         source=source,
@@ -262,12 +268,14 @@ def batch(
         lambda: fetch(
             url=f"{base}/{endpoint}/batch",
             request=RequestParams(
-                method="POST",
-                params={"fields": fields},
-                json={"ids": ids},
-                headers=_headers(),
-                timeout_sec=timeout_sec,
-                transport=transport,
+                content=Content(
+                    method="POST",
+                    params={"fields": fields},
+                    json={"ids": ids},
+                    headers=_headers(),
+                ),
+                retry=Retry(timeout_sec=timeout_sec),
+                policy=Policy(transport=transport),
             ),
         )[0],
         source=source,

@@ -216,7 +216,7 @@ class TestSearchPaginate:
             page, total = s2.search_paginate({"query": "x"}, limit=None)
         assert total == 1
         assert page.entries == [{"title": "A"}]
-        assert mock.call_args.kwargs["request"].params["limit"] == 100
+        assert mock.call_args.kwargs["request"].content.params["limit"] == 100
 
 
 class TestSearchTotal:

@@ -27,15 +27,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import unquote, urlencode, urlparse
 
 import base64
+import functools
 import ipaddress
 import json as json_lib
 import logging
-import random
 import threading
 import time
 
@@ -49,7 +48,12 @@ from wesearch.chrome.headers import (
 from wesearch.chrome.useragents import draw_user_agent, kind_for_impersonate
 from wesearch.errors import BotDetectionError, FetchError
 from wesearch.fetch import transport_routing
-from wesearch.fetch.common import Observer, ValidatedHosts, origin
+from wesearch.fetch.common import (
+    Observer,
+    default_port,
+    origin,
+    pinned_host,
+)
 from wesearch.fetch.curl import (
     close_curl_session,
     close_curl_sessions_except,
@@ -59,13 +63,13 @@ from wesearch.fetch.curl import (
     set_session_cookies,
 )
 from wesearch.fetch.stdlib import fetch_stdlib
-from wesearch.lib.custom_json import JSONValue
 from wesearch.lib.userdirs import data_dir
-from wesearch.profile import (
-    Profile,
-    ProfileStore,
-    parse_set_cookie,
-    parsedate_to_datetime_or_none,
+from wesearch.profile import Profile, ProfileStore, parse_set_cookie
+from wesearch.types.params import (
+    Content,
+    RequestParams,
+    Retry,
+    Transport,
 )
 
 
@@ -83,8 +87,6 @@ else:
 
 __all__ = [
     "FetchSession",
-    "RequestParams",
-    "Transport",
     "egress_ip",
     "fetch",
     "last_known_egress_ip",
@@ -94,8 +96,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-Transport = Literal["auto", "curl", "curl-then-zendriver", "zendriver", "stdlib"]
 
 
 def resolve_transport(
@@ -197,112 +197,6 @@ class FetchSession:
         )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class RequestParams:
-    """Per-call request parameters for :func:`fetch`.
-
-    Attributes:
-      method: HTTP method.
-      params: Query parameters appended to the URL.
-      data: Form data, sent as application/x-www-form-urlencoded. Mutually
-        exclusive with ``json``.
-      json: JSON-serializable body, sent as application/json. Mutually exclusive
-        with ``data``.
-      headers: Extra headers, merged over the session identity (these win).
-      cookies: Cookies to send, merged over the session jar (these win).
-      raw_headers: Send exactly ``headers`` plus cookies and auth; skip the
-        Chrome identity and the session jar.
-      retries: Retry attempts for transient failures.
-      timeout_sec: Socket timeout in seconds.
-      max_redirects: Maximum redirects to follow; 0 disables.
-      on_redirect: Called with the redirect target URL before following; raise to
-        abort.
-      on_response: Called with ``(status, headers)`` for every received response.
-        Observational; must not raise.
-      body_validator: Called with every final response body before it is accepted.
-        Raise :class:`BotDetectionError` when a provider-specific success body
-        proves browser or human interaction is required; automatic transport
-        fallback then learns the domain.
-      validated_hosts: Resolver returning a validated IP per hostname; receives
-        the bare hostname and must resolve it to the same IP for the call. Browser
-        transports reject this option because Chrome owns its DNS connections.
-      transport: Retrieval transport. ``"auto"`` (default) selects
-        curl-then-Zendriver for eligible GETs and curl for requests a browser
-        cannot replay or requests using ``validated_hosts``. ``"curl"`` is the
-        curl_cffi impersonated path; ``"stdlib"`` is the http.client reference path;
-        ``"zendriver"`` drives a real headless Chrome via
-        :mod:`wesearch.fetch.zendriver` (opt-in, for JS/challenge-walled
-        pages); ``"curl-then-zendriver"`` tries curl first and falls back to zendriver ONLY when
-        curl is bot-blocked (a :class:`BotDetectionError`) -- a non-block failure
-        propagates unchanged. ``"zendriver"`` and ``"curl-then-zendriver"`` are
-        GET-only and reject raw-header mode.
-
-    """
-
-    method: HttpMethod = "GET"
-    params: dict[str, str | int] | None = None
-    data: dict[str, str] | None = None
-    json: JSONValue = None
-    headers: dict[str, str] | None = None
-    cookies: dict[str, str] | None = None
-    raw_headers: bool = False
-    retries: int = 0
-    timeout_sec: float = 30
-    max_redirects: int = 10
-    on_redirect: Callable[[str], None] | None = None
-    on_response: Callable[[int, dict[str, str]], None] | None = None
-    body_validator: Callable[[bytes], None] | None = None
-    validated_hosts: ValidatedHosts | None = None
-    transport: Transport = "auto"
-
-    def __post_init__(self) -> None:
-        """Reject contradictory or out-of-range parameters at construction."""
-        if self.data is not None and self.json is not None:
-            raise ValueError("'data' and 'json' are mutually exclusive.")
-        if self.retries < 0:
-            raise ValueError(f"'retries' must be >= 0, got {self.retries}.")
-        if self.max_redirects < 0:
-            raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")
-        if self.timeout_sec <= 0:
-            raise ValueError(f"'timeout_sec' must be > 0, got {self.timeout_sec}.")
-        if self.transport in ("zendriver", "curl-then-zendriver"):
-            # The browser leg can replay GET navigation, headers, and cookies,
-            # but not a request body or byte-exact raw-header mode.
-            if self.method != "GET":
-                raise ValueError(
-                    f"The {self.transport} backend supports only GET requests."
-                )
-            if self.data is not None or self.json is not None:
-                raise ValueError(
-                    f"The {self.transport} backend cannot send a request body."
-                )
-            if self.raw_headers:
-                raise ValueError(
-                    f"The {self.transport} transport cannot honor 'raw_headers'."
-                )
-
-    def backoff_delay(self, attempt: int, headers: dict[str, str]) -> float:
-        """Retry backoff in seconds for ``attempt``, honoring any ``Retry-After``.
-
-        ``Retry-After`` is delta-seconds OR an HTTP-date (RFC 9110 SS 10.2.3);
-        both forms are honored, capped at 30s. A malformed value falls through to
-        the computed exponential backoff.
-        """
-        # Only the HTTP-status retry path supplies headers; network-error retries
-        # pass an empty mapping and always fall through to the computed backoff.
-        retry_after = headers.get("retry-after")
-        if retry_after is not None:
-            try:
-                return min(float(retry_after), 30)
-            except ValueError:
-                pass
-            when = parsedate_to_datetime_or_none(retry_after.strip())
-            if when is not None:
-                return min(max((when - datetime.now(UTC)).total_seconds(), 0.0), 30)
-        delay = min(1.0 * (2**attempt), 30)
-        return delay + random.uniform(0, delay * 0.5)  # noqa: S311 -- jitter
-
-
 def fetch(
     url: str,
     *,
@@ -399,45 +293,45 @@ class _Request:
         return urlparse(self.url).hostname or ""
 
     def fetch(self) -> tuple[bytes, FetchSession]:
-        """Perform the request; return the body and the updated session."""
+        """Perform the request; return the body and the updated session.
+
+        ``trust`` deliberately takes no part in transport resolution. It used to:
+        an SSRF-validated request was forced onto plain curl, which skipped the
+        learned-domain routing below AND made every browser transport an error,
+        so the one caller that asked for safety lost the browser entirely. Trust
+        is now honored at connect time by whichever transport runs.
+        """
         p = self.params
-        if p.transport == "auto" and p.validated_hosts is not None:
-            resolved: Transport = "curl"
-        else:
-            resolved = resolve_transport(
-                p.transport,
-                method=p.method,
-                raw_headers=p.raw_headers,
-                has_body=p.data is not None or p.json is not None,
-            )
-            # A domain learned to require the browser skips the curl-then-zendriver
-            # probe -- but only when the request is browser-eligible to begin with.
-            # A POST, body, or raw-header request resolves to plain curl, which the
-            # learned hint must NOT override into the GET-only browser leg.
-            if (
-                resolved == "curl-then-zendriver"
-                and self.domain in transport_routing.zendriver_domains()
-            ):
-                resolved = "zendriver"
-        if resolved in ("zendriver", "curl-then-zendriver") and (
-            p.validated_hosts is not None
+        resolved = resolve_transport(
+            p.policy.transport,
+            method=p.content.method,
+            raw_headers=p.content.raw_headers,
+            has_body=p.content.has_body,
+        )
+        # A domain learned to require the browser skips the curl-then-zendriver
+        # probe -- but only when the request is browser-eligible to begin with.
+        # A POST, body, or raw-header request resolves to plain curl, which the
+        # learned hint must NOT override into the GET-only browser leg.
+        if (
+            resolved == "curl-then-zendriver"
+            and self.domain in transport_routing.zendriver_domains()
         ):
-            raise ValueError(
-                f"The {resolved} transport cannot honor 'validated_hosts'."
-            )
-        if resolved != p.transport:
-            p = replace(p, transport=resolved)
-        learner = _ResponseLearner(url=self.url, caller=p.on_response)
+            resolved = "zendriver"
+        if resolved != p.policy.transport:
+            p = replace(p, policy=replace(p.policy, transport=resolved))
+        learner = _ResponseLearner(url=self.url, caller=p.observe.on_response)
         request = replace(self, params=p, observer=learner.observe)
-        seeded_cookies = {**self.session.cookies, **(p.cookies or {})}
-        if p.raw_headers:
+        seeded_cookies = {**self.session.cookies, **(p.content.cookies or {})}
+        if p.content.raw_headers:
             body = request.send(
-                headers=p.headers, cookies=seeded_cookies or None, raw_headers=True
+                headers=p.content.headers,
+                cookies=seeded_cookies or None,
+                raw_headers=True,
             )
         else:
             body = _fetch_with_identity(
                 request,
-                caller_headers=p.headers,
+                caller_headers=p.content.headers,
                 caller_cookies=seeded_cookies or None,
             )
         return body, learner.merge_into(self.session)
@@ -450,6 +344,7 @@ class _Request:
         raw_headers: bool,
         on_response: Observer | None = None,
         curl: cc_requests.Session[Response] | None = None,
+        reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
     ) -> bytes:
         """Perform the request once (with retries) via the raw transport."""
         return _fetch_once(
@@ -462,13 +357,14 @@ class _Request:
             accept_ch=self.session.accept_ch,
             on_response=self.observer if on_response is None else on_response,
             session=curl,
+            reseat=reseat,
         )
 
 
 def _validated_body(request: _Request, body: bytes) -> bytes:
     """Validate and return ``body`` using the caller's provider-specific rule."""
-    if request.params.body_validator is not None:
-        request.params.body_validator(body)
+    if request.params.observe.body_validator is not None:
+        request.params.observe.body_validator(body)
     return body
 
 
@@ -479,7 +375,7 @@ def _fetch_with_identity(
     caller_cookies: dict[str, str] | None,
 ) -> bytes:
     """Send ``request`` under the stored per-``(egress, domain)`` identity."""
-    if request.params.transport == "zendriver":
+    if request.params.policy.transport == "zendriver":
         return _validated_body(
             request,
             _send_via_zendriver(
@@ -488,14 +384,20 @@ def _fetch_with_identity(
                 cookies=caller_cookies,
             ),
         )
-    if request.params.transport == "curl-then-zendriver":
+    if request.params.policy.transport == "curl-then-zendriver":
         # Curl first (fast, cheap); fall back to the real browser ONLY when curl
         # is bot-blocked -- the one case the browser can clear that curl cannot.
         # A non-block failure (404, timeout) propagates: the browser would not
         # help and must not silently pay Chrome's launch cost.
         try:
             return _fetch_with_identity(
-                replace(request, params=replace(request.params, transport="curl")),
+                replace(
+                    request,
+                    params=replace(
+                        request.params,
+                        policy=replace(request.params.policy, transport="curl"),
+                    ),
+                ),
                 caller_headers=caller_headers,
                 caller_cookies=caller_cookies,
             )
@@ -567,7 +469,7 @@ def _send_as(
     # override it and make the two disagree (a bot tell). Let impersonate own the
     # UA on curl; only the stdlib reference path (no impersonation) needs one.
     seeded_headers: dict[str, str] = {**(caller_headers or {})}
-    if request.params.transport == "stdlib":
+    if request.params.policy.transport == "stdlib":
         seeded_headers = {"User-Agent": ua, **seeded_headers}
     captured: dict[str, str] = {}
 
@@ -585,8 +487,15 @@ def _send_as(
             request.observer(status, resp_headers, url)
 
     curl = (
-        curl_session(egress, request.domain, impersonate)
-        if egress is not None and request.params.transport == "curl"
+        curl_session(
+            egress,
+            request.domain,
+            impersonate,
+            pin=pinned_host(request.url, request.params.policy.trust),
+            port=urlparse(request.url).port
+            or default_port(urlparse(request.url).scheme),
+        )
+        if egress is not None and request.params.policy.transport == "curl"
         else None
     )
     # Single cookie source to avoid a duplicated Cookie header: when a curl
@@ -609,6 +518,9 @@ def _send_as(
         raw_headers=False,
         on_response=capture,
         curl=curl,
+        reseat=functools.partial(_reseat, request, egress, impersonate)
+        if curl is not None
+        else None,
     )
     if egress is None:
         return body  # Keyless: nothing to persist.
@@ -633,17 +545,24 @@ def _send_via_zendriver(
     cookies the browser acquired are folded back through the per-hop observer, so
     the :class:`FetchSession` the caller receives is warm and a following curl
     fetch reuses them.
+
+    Under ``"untrusted"`` the host is validated but NOT pinned: Chrome resolves
+    its own DNS and cannot be handed an IP without a proxy in front of it. That
+    leaves a narrow window between validation and Chrome's own resolution --
+    accepted deliberately, because the alternative (a per-request proxy) costs
+    one Chrome process per pin and the measured 32x warm-browser reuse with it.
     """
+    pinned_host(request.url, request.params.policy.trust)
     egress = egress_ip(cache=True) or egress_ip(cache=False)
-    browser_url = _url_with_params(request.url, request.params.params)
+    browser_url = _url_with_params(request.url, request.params.content.params)
     result = zendriver_backend.fetch_zendriver(
         browser_url,
         profile_dir=data_dir("rekursiv-ai") / "wesearch" / "fetch-zendriver",
         egress=egress or "",
-        timeout_sec=request.params.timeout_sec,
+        timeout_sec=request.params.retry.timeout_sec,
         headers=headers,
         cookies=cookies,
-        on_redirect=request.params.on_redirect,
+        on_redirect=request.params.observe.on_redirect,
     )
     if result.cookies and request.observer is not None:
         # Fold the harvested jar into the returned session (and the caller's
@@ -667,6 +586,28 @@ def _send_via_zendriver(
         else:
             store.update_cookies(egress, request.domain, result.cookies)
     return result.body
+
+
+def _reseat(
+    request: _Request, egress: str | None, impersonate: str, url: str
+) -> cc_requests.Session[Response] | None:
+    """Return the pooled Session for a cross-host redirect target.
+
+    A pin is fixed when its Session is built, so following a redirect onto a new
+    host on the old host's Session would connect through the wrong pin. The new
+    host is validated here, exactly as the initial hop was -- a redirect target
+    is attacker-controlled and skipping its check is the classic SSRF bypass.
+    """
+    if egress is None:
+        return None
+    parsed = urlparse(url)
+    return curl_session(
+        egress,
+        parsed.hostname or "",
+        impersonate,
+        pin=pinned_host(url, request.params.policy.trust),
+        port=parsed.port or default_port(parsed.scheme),
+    )
 
 
 _egress_lock = threading.Lock()  # guards egress state, not a tunable
@@ -769,7 +710,8 @@ def egress_ip(
             body, _ = fetch(
                 url,
                 request=RequestParams(
-                    headers={}, raw_headers=True, timeout_sec=timeout_sec
+                    content=Content(headers={}, raw_headers=True),
+                    retry=Retry(timeout_sec=timeout_sec),
                 ),
             )
             ip = body.decode().strip()
@@ -824,6 +766,7 @@ def _fetch_once(
     accept_ch: Mapping[str, frozenset[str]],
     on_response: Observer | None,
     session: cc_requests.Session[Response] | None,
+    reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
 ) -> bytes:
     """Build and send one request (with retries), no profile layer.
 
@@ -838,29 +781,23 @@ def _fetch_once(
     connection), or ``None`` to open a throwaway one.
     """
     url, basic_auth = _split_userinfo(url)
-    url = _url_with_params(url, params.params)
+    url = _url_with_params(url, params.content.params)
     body_bytes: bytes | None = None
     body_content_type: str | None = None
-    if params.data is not None:
-        body_bytes = urlencode(params.data).encode()
+    if params.content.data is not None:
+        body_bytes = urlencode(params.content.data).encode()
         body_content_type = "application/x-www-form-urlencoded"
-    elif params.json is not None:
-        body_bytes = json_lib.dumps(params.json).encode()
+    elif params.content.json is not None:
+        body_bytes = json_lib.dumps(params.content.json).encode()
         body_content_type = "application/json"
     merged = _build_headers(
-        method=params.method,
+        method=params.content.method,
         url=url,
         content_type=body_content_type,
         extra=headers,
         raw_headers=raw_headers,
         impersonate=impersonate,
-        use_curl=params.transport == "curl",
-        # The SSRF-pinned curl path drives a raw ``curl_cffi.Curl`` handle whose
-        # ``impersonate()`` replays only the TLS/HTTP-2 fingerprint, NOT the Chrome
-        # request headers the high-level ``requests`` layer injects. So a pinned
-        # request needs the full hand-built Chrome header set (like stdlib), not
-        # the structural-only set that assumes impersonate supplies UA/Accept/etc.
-        pinned_curl=params.transport == "curl" and params.validated_hosts is not None,
+        use_curl=params.policy.transport == "curl",
         accept_ch=accept_ch,
     )
     if basic_auth is not None:
@@ -876,22 +813,23 @@ def _fetch_once(
         cookie_parts.append("; ".join(f"{k}={v}" for k, v in cookies.items()))
     if cookie_parts:
         merged["Cookie"] = "; ".join(cookie_parts)
-    method = params.method
-    backend = fetch_curl if params.transport == "curl" else fetch_stdlib
-    for attempt in range(1 + params.retries):
+    method = params.content.method
+    backend = fetch_curl if params.policy.transport == "curl" else fetch_stdlib
+    for attempt in range(1 + params.retry.retries):
         try:
             return backend(
                 url,
                 method=method,
                 headers=merged,
                 body=body_bytes,
-                timeout_sec=params.timeout_sec,
-                max_redirects=params.max_redirects,
+                timeout_sec=params.retry.timeout_sec,
+                max_redirects=params.retry.max_redirects,
                 impersonate=impersonate,
-                on_redirect=params.on_redirect,
+                on_redirect=params.observe.on_redirect,
                 on_response=on_response,
-                validated_hosts=params.validated_hosts,
+                trust=params.policy.trust,
                 session=session,
+                reseat=reseat,
             )
         except FetchError as e:
             # status 0 is the transport-failure sentinel (a curl CurlError, or a
@@ -899,9 +837,9 @@ def _fetch_once(
             # OSError below, which the stdlib path raises for the same class of
             # failure. Without this the two transports disagree on `retries=`.
             retryable = e.status in _RETRYABLE_STATUSES or e.status == 0
-            if not retryable or attempt == params.retries:
+            if not retryable or attempt == params.retry.retries:
                 raise
-            delay_sec = params.backoff_delay(attempt, e.headers)
+            delay_sec = params.retry.backoff_delay(attempt, e.headers)
             logger.debug(
                 "fetch %s → %d, retry in %.1fs",
                 url,
@@ -910,9 +848,9 @@ def _fetch_once(
             )
             time.sleep(delay_sec)
         except (OSError, TimeoutError) as e:
-            if attempt == params.retries:
+            if attempt == params.retry.retries:
                 raise
-            delay_sec = params.backoff_delay(attempt, {})
+            delay_sec = params.retry.backoff_delay(attempt, {})
             logger.debug(
                 "fetch %s failed: %s, retry in %.1fs",
                 url,

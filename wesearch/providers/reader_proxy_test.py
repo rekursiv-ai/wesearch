@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from wesearch.errors import FetchError
+from wesearch.fetch import Policy
 from wesearch.providers import reader_proxy
 
 
@@ -20,7 +21,7 @@ class TestThirdPartyConsent:
     def test_refuses_without_consent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("WESEARCH_ALLOW_THIRD_PARTY_RENDER", raising=False)
         with pytest.raises(FetchError, match="third-party egress"):
-            reader_proxy.fetch_reader_proxy("https://x.com/a")
+            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=Policy())
 
     @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
     def test_allows_on_truthy(
@@ -54,11 +55,13 @@ class TestFetch:
 
         def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:
             seen["url"] = url
-            seen["headers"] = request.headers
+            seen["headers"] = request.content.headers
             return b"# rendered", None
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
-            body = reader_proxy.fetch_reader_proxy("https://x.com/user")
+            body = reader_proxy.fetch_reader_proxy(
+                "https://x.com/user", policy=Policy()
+            )
         assert body == b"# rendered"
         assert seen["url"] == "https://r.jina.ai/https://x.com/user"
         assert seen["headers"] is None
@@ -69,11 +72,11 @@ class TestFetch:
 
         def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:
             del url
-            seen["headers"] = request.headers
+            seen["headers"] = request.content.headers
             return b"ok", None
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
-            reader_proxy.fetch_reader_proxy("https://x.com/a")
+            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=Policy())
         assert seen["headers"] == {"Authorization": "Bearer jina_secret"}
 
     def test_soft_fail_sentinel_raises(self) -> None:
@@ -87,7 +90,7 @@ class TestFetch:
             patch.object(reader_proxy, "fetch", fake_fetch),
             pytest.raises(FetchError) as exc,
         ):
-            reader_proxy.fetch_reader_proxy("https://x.com/a")
+            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=Policy())
         assert exc.value.status == 502
 
 
