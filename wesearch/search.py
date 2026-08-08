@@ -332,6 +332,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["science"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[PaperResult]: ...
 
@@ -343,6 +344,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["images"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[ImageResult]: ...
 
@@ -354,6 +356,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["videos"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[VideoResult]: ...
 
@@ -365,6 +368,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["news", "music"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[MediaResult]: ...
 
@@ -376,6 +380,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["map"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[MapResult]: ...
 
@@ -387,6 +392,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["it"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
@@ -398,6 +404,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["files"],
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
@@ -409,6 +416,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: SearxngCategory = ...,
+    timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[SearchResult]: ...
 
@@ -707,6 +715,8 @@ def duckduckgo(
     headers: dict[str, str] | None = None,
     *,
     max_query_chars: int = 499,
+    timeout_sec: float = 30.0,
+    retries: int = 2,
     transport: Transport = "auto",
 ) -> list[SearchResult]:
     """Scrape DuckDuckGo's HTML-only endpoint.
@@ -720,6 +730,11 @@ def duckduckgo(
       headers: Optional override headers forwarded to fetch.
       max_query_chars: Reject a query longer than this. DuckDuckGo's HTML
         endpoint silently drops overlong queries, so fail loudly instead.
+      timeout_sec: HTTP ceiling per attempt.
+      retries: Retry attempts for a transient failure. Multiplies with
+        ``timeout_sec``: an egress that cannot reach the endpoint at all burns
+        ``(retries + 1) * timeout_sec`` before raising, so a caller on a
+        deadline lowers both rather than either alone.
       transport: Retrieval transport; ``"auto"`` applies domain routing.
 
     Returns:
@@ -757,7 +772,7 @@ def duckduckgo(
         f"{_DUCKDUCKGO_URL}?{params}",
         request=RequestParams(
             content=Content(headers=request_headers, raw_headers=True),
-            retry=Retry(retries=2),
+            retry=Retry(retries=retries, timeout_sec=timeout_sec),
             policy=Policy(transport=transport),
         ),
     )
