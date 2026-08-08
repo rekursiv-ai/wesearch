@@ -267,6 +267,10 @@ def _extract_text(body: bytes, *, kind: str, method: HttpMethod) -> str:
         # Cost is ~200-580 chars of front-matter per page against a 400k cap.
         with_metadata=True,
     )
+    # Verifying a change to this call: sagent's WebFetch caches GET results for
+    # 15 minutes per (transport, url), so it replays the pre-change text and a
+    # working fix reads as a failed one. Prove it via fetch_web in a FRESH
+    # process, not by re-running the tool.
     return extracted or content
 
 
