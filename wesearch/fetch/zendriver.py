@@ -303,8 +303,8 @@ def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
     Args:
       url: The page to open -- typically the URL whose headless fetch you are
         debugging.
-      profile_dir: Chrome ``user_data_dir`` to open; defaults to
-        :func:`default_profile_dir`.
+      profile_dir: Chrome ``user_data_dir`` to open; defaults to the
+        ``fetch-zendriver`` profile under the wesearch data directory.
 
     """
     target = (

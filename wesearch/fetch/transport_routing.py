@@ -82,7 +82,8 @@ def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
     """Return domains whose successful fallback established a browser requirement.
 
     Args:
-      path: Domain-list path. Defaults to :func:`zendriver_domains_path`.
+      path: Domain-list path. Defaults to the bundled list plus the per-user
+        ``zendriver-domains.txt`` under the wesearch state directory.
 
     Returns:
       domains: Normalized domains currently routed directly to Zendriver.
@@ -100,7 +101,8 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
 
     Args:
       domain: DNS hostname whose browser fallback succeeded.
-      path: Domain-list path. Defaults to :func:`zendriver_domains_path`.
+      path: Domain-list path. Defaults to the per-user
+        ``zendriver-domains.txt`` under the wesearch state directory.
 
     Raises:
       ValueError: If ``domain`` is empty or not one line.
