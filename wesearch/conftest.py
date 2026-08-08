@@ -8,10 +8,13 @@ through ``wesearch.lib.userdirs``; an unisolated test writes into the developer'
 
 from __future__ import annotations
 
-from wesearch.lib.testing.userdirs_fixture import isolate_user_dirs
+from wesearch.lib.testing.userdirs_fixture import (
+    isolate_user_dirs,
+    pytest_configure,
+)
 
 
 # Re-exported, not merely imported: an autouse fixture reaches only the
 # directory of the conftest that names it, so binding it here is what widens it
 # to the whole package.
-__all__ = ["isolate_user_dirs"]
+__all__ = ["isolate_user_dirs", "pytest_configure"]
