@@ -59,10 +59,21 @@ def _open_connection(
     hostname: str,
     timeout_sec: float,
     *,
+    connect_timeout_sec: float | None = None,
     port: int | None = None,
     resolved_ip: str = "",
 ) -> HTTPConn:
-    """Open a new HTTP/HTTPS connection; pin to ``resolved_ip`` when given."""
+    """Open a new HTTP/HTTPS connection; pin to ``resolved_ip`` when given.
+
+    ``http.client`` keeps ONE timeout for the handshake and every later socket
+    read. The connection is therefore built with the CONNECT budget, and the
+    caller widens the live socket to ``timeout_sec`` once connected
+    (:func:`_widen_after_connect`). Matches curl_cffi's ``(connect, read)``
+    pair, which is what keeps the two backends from disagreeing on ``Retry``.
+    """
+    handshake_sec = (
+        connect_timeout_sec if connect_timeout_sec is not None else timeout_sec
+    )
     connect_host = bracket_ipv6(resolved_ip or hostname)
     if scheme == "https":
         ctx = ssl.create_default_context()
@@ -71,16 +82,28 @@ def _open_connection(
                 connect_host,
                 port=port,
                 server_hostname=hostname,
-                timeout=timeout_sec,
+                timeout=handshake_sec,
                 context=ctx,
             )
         return http.client.HTTPSConnection(
             connect_host,
             port=port,
-            timeout=timeout_sec,
+            timeout=handshake_sec,
             context=ctx,
         )
-    return http.client.HTTPConnection(connect_host, port=port, timeout=timeout_sec)
+    return http.client.HTTPConnection(connect_host, port=port, timeout=handshake_sec)
+
+
+def _widen_after_connect(conn: HTTPConn, timeout_sec: float) -> None:
+    """Restore the full read budget on an already-connected socket.
+
+    The connection was built with the narrower CONNECT budget, which would
+    otherwise also cap every response read -- turning a slow page into a
+    spurious timeout. No-op before the socket exists; ``http.client`` connects
+    lazily, so the caller invokes this right after the first request.
+    """
+    if conn.sock is not None:
+        conn.sock.settimeout(timeout_sec)
 
 
 def fetch_stdlib(
@@ -90,6 +113,7 @@ def fetch_stdlib(
     headers: dict[str, str],
     body: bytes | None,
     timeout_sec: float,
+    connect_timeout_sec: float | None = None,
     max_redirects: int,
     impersonate: str,
     on_redirect: Callable[[str], None] | None,
@@ -107,6 +131,7 @@ def fetch_stdlib(
     header set is instead hand-built upstream, in ``fetch``'s own header assembly.
     """
     del impersonate, session, reseat  # No impersonation or pooling here.
+    # ``connect_timeout_sec`` is honored via _open_connection/_widen_after_connect.
     # The connection is owned entirely here: opened locally and closed in the
     # finally on every exit (success, HTTP error, redirect/decompress failure),
     # so no socket leaks. Nothing escapes to the caller.
@@ -133,13 +158,19 @@ def fetch_stdlib(
         }
 
     raw_conn = _open_connection(
-        scheme, hostname, timeout_sec, port=port, resolved_ip=connect_host
+        scheme,
+        hostname,
+        timeout_sec,
+        connect_timeout_sec=connect_timeout_sec,
+        port=port,
+        resolved_ip=connect_host,
     )
     try:
         current_url = url
         remaining = max_redirects
         while True:
             raw_conn.request(method, path, body=body, headers=request_headers)
+            _widen_after_connect(raw_conn, timeout_sec)
             response = raw_conn.getresponse()
             resp_headers = join_headers(response.getheaders())
             if on_response is not None:
@@ -195,6 +226,7 @@ def fetch_stdlib(
                         scheme,
                         hostname,
                         timeout_sec,
+                        connect_timeout_sec=connect_timeout_sec,
                         port=port,
                         resolved_ip=connect_host,
                     )

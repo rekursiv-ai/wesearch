@@ -291,6 +291,7 @@ def fetch_curl(
     headers: dict[str, str],
     body: bytes | None,
     timeout_sec: float,
+    connect_timeout_sec: float | None = None,
     max_redirects: int,
     impersonate: str,
     on_redirect: Callable[[str], None] | None,
@@ -313,6 +314,8 @@ def fetch_curl(
       headers: Complete request headers, Cookie already merged.
       body: Encoded request body, or ``None``.
       timeout_sec: Per-request timeout.
+      connect_timeout_sec: Ceiling on the handshake alone; ``None`` shares
+        ``timeout_sec``.
       max_redirects: Redirect budget; at 0 the final 3xx body is returned.
       impersonate: curl_cffi TLS-impersonation target.
       on_redirect: Called with each redirect target before it is followed.
@@ -341,6 +344,12 @@ def fetch_curl(
         url=url, method=method, headers=headers, body=body, remaining=max_redirects
     )
     impers = cast("BrowserTypeLiteral", impersonate)
+    # curl_cffi reads a (connect, read) pair; a bare float budgets both together.
+    timeout = (
+        timeout_sec
+        if connect_timeout_sec is None
+        else (connect_timeout_sec, timeout_sec)
+    )
     while True:
         # A keyless request has no pooled session to have been pinned at build
         # time, so it validates here. Validation is per hop: a redirect can
@@ -356,7 +365,7 @@ def fetch_curl(
                     headers=loop.headers,
                     data=loop.body,
                     impersonate=impers,
-                    timeout=timeout_sec,
+                    timeout=timeout,
                     allow_redirects=False,
                 )
                 if session is not None
@@ -366,7 +375,7 @@ def fetch_curl(
                     headers=loop.headers,
                     data=loop.body,
                     impersonate=impers,
-                    timeout=timeout_sec,
+                    timeout=timeout,
                     allow_redirects=False,
                 )
             )

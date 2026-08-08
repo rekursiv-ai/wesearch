@@ -333,6 +333,7 @@ def searxng(
     *,
     categories: Literal["science"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[PaperResult]: ...
 
@@ -345,6 +346,7 @@ def searxng(
     *,
     categories: Literal["images"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[ImageResult]: ...
 
@@ -357,6 +359,7 @@ def searxng(
     *,
     categories: Literal["videos"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[VideoResult]: ...
 
@@ -369,6 +372,7 @@ def searxng(
     *,
     categories: Literal["news", "music"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[MediaResult]: ...
 
@@ -381,6 +385,7 @@ def searxng(
     *,
     categories: Literal["map"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[MapResult]: ...
 
@@ -393,6 +398,7 @@ def searxng(
     *,
     categories: Literal["it"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
@@ -405,6 +411,7 @@ def searxng(
     *,
     categories: Literal["files"],
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
@@ -417,6 +424,7 @@ def searxng(
     *,
     categories: SearxngCategory = ...,
     timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
     transport: Transport = ...,
 ) -> Sequence[SearchResult]: ...
 
@@ -428,6 +436,7 @@ def searxng(
     *,
     categories: SearxngCategory = "general",
     timeout_sec: float = 15.0,
+    connect_timeout_sec: float = 3.0,
     transport: Transport = "auto",
 ) -> Sequence[SearxngResult]:
     """Query a SearXNG instance and return parsed, typed JSON results.
@@ -455,6 +464,11 @@ def searxng(
         multi-engine ``it``/``science`` tabs hit a premature client-side timeout
         mid-aggregation (observed live). 15s clears the common tail while still
         bounding an interactive turn.
+      connect_timeout_sec: Ceiling on the handshake alone. Deliberately NOT
+        scaled up for the fan-out above: SearXNG queries DuckDuckGo and Google
+        server-side, so that cost is a READ on this connection and is already
+        covered by ``timeout_sec``. The handshake is to the instance itself --
+        one hop, however many engines sit behind it.
       transport: Retrieval transport; ``"auto"`` applies domain routing.
 
     Returns:
@@ -472,7 +486,9 @@ def searxng(
         f"{base_url}/search?{params}",
         request=RequestParams(
             content=Content(headers=headers),
-            retry=Retry(timeout_sec=timeout_sec),
+            retry=Retry(
+                timeout_sec=timeout_sec, connect_timeout_sec=connect_timeout_sec
+            ),
             policy=Policy(transport=transport),
         ),
     )
@@ -716,6 +732,7 @@ def duckduckgo(
     *,
     max_query_chars: int = 499,
     timeout_sec: float = 30.0,
+    connect_timeout_sec: float = 3.0,
     retries: int = 2,
     transport: Transport = "auto",
 ) -> list[SearchResult]:
@@ -731,6 +748,13 @@ def duckduckgo(
       max_query_chars: Reject a query longer than this. DuckDuckGo's HTML
         endpoint silently drops overlong queries, so fail loudly instead.
       timeout_sec: HTTP ceiling per attempt.
+      connect_timeout_sec: Ceiling on the handshake alone, so an unroutable
+        egress is detected in a handshake rather than a full request. A dropped
+        SYN draws no RST, so only the clock reports it. Sized against the slow
+        case, not the local one: an intercontinental origin (Zurich) measures
+        165ms RTT and a 0.39s handshake from here, so 3s absorbs that plus a
+        lost SYN (+1s initial RTO) and still fails a black-holed host in 3s
+        rather than the full ``timeout_sec``.
       retries: Retry attempts for a transient failure. Multiplies with
         ``timeout_sec``: an egress that cannot reach the endpoint at all burns
         ``(retries + 1) * timeout_sec`` before raising, so a caller on a
@@ -772,7 +796,11 @@ def duckduckgo(
         f"{_DUCKDUCKGO_URL}?{params}",
         request=RequestParams(
             content=Content(headers=request_headers, raw_headers=True),
-            retry=Retry(retries=retries, timeout_sec=timeout_sec),
+            retry=Retry(
+                retries=retries,
+                timeout_sec=timeout_sec,
+                connect_timeout_sec=connect_timeout_sec,
+            ),
             policy=Policy(transport=transport),
         ),
     )
