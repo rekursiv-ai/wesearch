@@ -823,6 +823,7 @@ def _fetch_once(
                 headers=merged,
                 body=body_bytes,
                 timeout_sec=params.retry.timeout_sec,
+                connect_timeout_sec=params.retry.connect_timeout_sec,
                 max_redirects=params.retry.max_redirects,
                 impersonate=impersonate,
                 on_redirect=params.observe.on_redirect,

@@ -115,13 +115,21 @@ class Retry:
 
     Attributes:
       retries: Retry attempts for transient failures.
-      timeout_sec: Socket timeout in seconds.
+      timeout_sec: Socket timeout in seconds, covering the whole request.
+      connect_timeout_sec: Ceiling on the TCP/TLS handshake alone, before any
+        byte of the response. Separate from ``timeout_sec`` because the two
+        bound different failures: a slow PAGE is worth waiting out, an
+        unreachable HOST is not, and one budget cannot say so. A dropped SYN
+        yields no RST, so the only signal is the clock -- with a single budget
+        an unroutable host costs the full ``timeout_sec`` to learn what the
+        handshake already knew. ``None`` lets it share ``timeout_sec``.
       max_redirects: Maximum redirects to follow; 0 disables.
 
     """
 
     retries: int = 0
     timeout_sec: float = 30
+    connect_timeout_sec: float | None = None
     max_redirects: int = 10
 
     def __post_init__(self) -> None:
@@ -130,6 +138,10 @@ class Retry:
             raise ValueError(f"'retries' must be >= 0, got {self.retries}.")
         if self.timeout_sec <= 0:
             raise ValueError(f"'timeout_sec' must be > 0, got {self.timeout_sec}.")
+        if self.connect_timeout_sec is not None and self.connect_timeout_sec <= 0:
+            raise ValueError(
+                f"'connect_timeout_sec' must be > 0, got {self.connect_timeout_sec}."
+            )
         if self.max_redirects < 0:
             raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")
 
