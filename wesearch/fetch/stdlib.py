@@ -13,15 +13,16 @@ from wesearch.fetch.challenge import classify_http_error
 from wesearch.fetch.common import (
     _REDIRECT_STATUSES,
     Observer,
-    ValidatedHosts,
     apply_redirect,
     bracket_ipv6,
     decompress,
     decompress_error_body,
     host_header,
     join_headers,
+    pinned_host,
     redirect_target,
 )
+from wesearch.types.params import Trust
 
 
 __all__ = ["fetch_stdlib"]
@@ -93,18 +94,19 @@ def fetch_stdlib(
     impersonate: str,
     on_redirect: Callable[[str], None] | None,
     on_response: Observer | None,
-    validated_hosts: ValidatedHosts | None,
+    trust: Trust = "untrusted",
     session: object | None = None,
+    reseat: Callable[[str], object | None] | None = None,
 ) -> bytes:
     """Stdlib transport: http.client with manual redirect following.
 
     A drop-in peer of ``curl.fetch_curl`` with the identical signature, so the
     core dispatcher can select either transport. This backend has no TLS
-    impersonation and no pooled connection, so ``impersonate`` and ``session``
-    are accepted for interface parity and ignored; the coherent Chrome header set
-    is instead hand-built upstream, in ``fetch``'s own header assembly.
+    impersonation and no pooled connection, so ``impersonate``, ``session``, and
+    ``reseat`` are accepted for interface parity and ignored; the coherent Chrome
+    header set is instead hand-built upstream, in ``fetch``'s own header assembly.
     """
-    del impersonate, session  # No impersonation or connection pooling here.
+    del impersonate, session, reseat  # No impersonation or pooling here.
     # The connection is owned entirely here: opened locally and closed in the
     # finally on every exit (success, HTTP error, redirect/decompress failure),
     # so no socket leaks. Nothing escapes to the caller.
@@ -116,7 +118,7 @@ def fetch_stdlib(
     if parsed.query:
         path = f"{path}?{parsed.query}"
 
-    validated = validated_hosts(hostname) if validated_hosts is not None else None
+    validated = pinned_host(url, trust)
     connect_host = validated.ip if validated is not None else ""
     request_headers = headers
     if validated is not None:
@@ -177,11 +179,7 @@ def fetch_stdlib(
                     scheme = redir_scheme
                     hostname = redir_hostname
                     port = redir_port
-                    validated = (
-                        validated_hosts(hostname)
-                        if validated_hosts is not None
-                        else None
-                    )
+                    validated = pinned_host(redirect_url, trust)
                     connect_host = validated.ip if validated is not None else ""
                     # New host: replace the Host header (drop any prior first).
                     # HTTP field names are case-insensitive, so drop any casing.

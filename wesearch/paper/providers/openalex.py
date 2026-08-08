@@ -27,7 +27,14 @@ import os
 import re
 
 from wesearch.errors import FetchError
-from wesearch.fetch import RequestParams, Transport, fetch
+from wesearch.fetch import (
+    Content,
+    Policy,
+    RequestParams,
+    Retry,
+    Transport,
+    fetch,
+)
 from wesearch.lib.custom_json import MutableJSON, int_val
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
@@ -208,10 +215,9 @@ def _get(
         raw, _ = fetch(
             url=f"{base}{path}",
             request=RequestParams(
-                params=params,
-                headers=_headers(),
-                timeout_sec=timeout_sec,
-                transport=transport,
+                content=Content(params=params, headers=_headers()),
+                retry=Retry(timeout_sec=timeout_sec),
+                policy=Policy(transport=transport),
             ),
         )
     except FetchError as e:

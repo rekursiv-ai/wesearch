@@ -19,14 +19,29 @@ from curl_cffi import (
 )
 
 import pytest
-import zstandard
 
 from wesearch.errors import (
     FetchError,
 )
-from wesearch.fetch import RequestParams, ValidatedHost, fetch
-from wesearch.fetch.curl import _registrable_domain, seed_session_jar
-from wesearch.fetch.test_helpers import StubSession, const_curl_session
+from wesearch.fetch import (
+    Content,
+    Observe,
+    Policy,
+    RequestParams,
+    Retry,
+    ValidatedHost,
+    fetch,
+)
+from wesearch.fetch.curl import (
+    _registrable_domain,
+    _SessionKey,
+    seed_session_jar,
+)
+from wesearch.fetch.test_helpers import (
+    StubCookies,
+    StubSession,
+    const_curl_session,
+)
 
 import wesearch.fetch.curl as curl_mod
 
@@ -173,80 +188,95 @@ class TestFetchCurlBackend:
         assert mock_req.call_args.kwargs["impersonate"] == "chrome"
         assert mock_req.call_args.kwargs["allow_redirects"] is False
 
-    def test_ssrf_resolve_pin_and_repin_on_cross_host_redirect(self) -> None:
-        # (a) validated_hosts routes through the low-level Curl handle; each
-        # host is pinned via CurlOpt.RESOLVE as "host:port:ip", and a redirect
-        # to a NEW host re-pins to that host's validated IP.
-        hops = [
-            self._hop(status=302, headers={"location": "https://other.com/final"}),
-            self._hop(status=200, body=b"done"),
-        ]
-        fake_curl, setopts = self._fake_curl_class(hops)
+    def test_ssrf_pin_and_repin_on_cross_host_redirect(self) -> None:
+        # The pin is an option on the POOLED session, so each host gets its own
+        # pool entry: "host:port:ip" for the origin, and a re-pin to the
+        # redirect target's validated IP. Formerly this drove a raw Curl handle,
+        # which cost the request its connection and cookie jar.
+        pins: list[tuple[str, tuple[str, str] | None, int]] = []
 
-        def _vh(hostname: str) -> ValidatedHost:
-            return ValidatedHost(
-                host=hostname,
-                ip="1.2.3.4" if hostname == "example.com" else "5.6.7.8",
-            )
+        def spy(
+            egress: str,
+            domain: str,
+            impersonate: str,
+            *,
+            pin: ValidatedHost | None = None,
+            port: int = 443,
+        ) -> StubSession:
+            del egress, impersonate
+            pins.append((domain, None if pin is None else (pin.host, pin.ip), port))
+            return StubSession()
 
+        redirect = self._mock_response(
+            status=302, headers={"location": "https://other.com/final"}
+        )
+        final = self._mock_response(status=200, content=b"done")
         with (
-            patch("curl_cffi.Curl", fake_curl),
+            patch("curl_cffi.requests.request", side_effect=[redirect, final]),
+            patch.object(fetch_mod, "curl_session", spy),
         ):
             body, _ = fetch(
                 "https://example.com/start",
-                request=RequestParams(validated_hosts=_vh, on_redirect=lambda _u: None),
+                request=RequestParams(
+                    observe=Observe(on_redirect=lambda _u: None),
+                    policy=Policy(transport="curl"),
+                ),
             )
         assert body == b"done"
-        resolves = [v for o, v in setopts if o == int(CurlOpt.RESOLVE)]
-        assert ["example.com:443:1.2.3.4"] in resolves
-        assert ["other.com:443:5.6.7.8"] in resolves
+        assert [domain for domain, _pin, _port in pins] == ["example.com", "other.com"]
+        assert all(pin is not None for _d, pin, _p in pins)
 
-    def test_pinned_curl_brackets_ipv6_resolve_entry(self) -> None:
+    def test_pin_brackets_ipv6_resolve_entry(self) -> None:
         # REV2-002: a v6 pin must be "host:port:[v6]" -- curl mis-parses an
-        # unbracketed IPv6 (colons collide with the host:port delimiters).
-        hops = [self._hop(status=200, body=b"ok")]
-        fake_curl, setopts = self._fake_curl_class(hops)
+        # unbracketed IPv6 (its colons collide with the host:port delimiters).
+        built: list[dict[Any, Any]] = []
 
-        def _vh(hostname: str) -> ValidatedHost:
-            return ValidatedHost(host=hostname, ip="2606:4700:20::1")
+        class _Session:
+            def __init__(self, **kwargs: Any) -> None:
+                built.append(dict(kwargs.get("curl_options") or {}))
+                self.cookies = StubCookies()
 
+            def close(self) -> None:
+                pass
+
+        pool: dict[_SessionKey, cc_requests.Session[Response]] = {}
         with (
-            patch("curl_cffi.Curl", fake_curl),
+            patch.object(curl_mod, "_curl_sessions", pool),
+            patch("curl_cffi.requests.Session", _Session),
         ):
-            fetch(
-                "https://v6.example/x",
-                request=RequestParams(validated_hosts=_vh, transport="curl"),
+            curl_mod.curl_session(
+                "203.0.113.1",
+                "v6.example",
+                "chrome",
+                pin=ValidatedHost(host="v6.example", ip="2606:4700:20::1"),
             )
-        resolves = [v for o, v in setopts if o == int(CurlOpt.RESOLVE)]
+        resolves = [
+            value
+            for options in built
+            for key, value in options.items()
+            if key == CurlOpt.RESOLVE
+        ]
         assert ["v6.example:443:[2606:4700:20::1]"] in resolves
 
     def test_pinned_curl_rewrites_origin_on_cross_host_redirect(self) -> None:
         # REV2-001: a POST that redirects cross-origin must NOT leak the source
         # Origin. Header must be rewritten to the new origin on each hop.
-        hops = [
-            self._hop(status=307, headers={"location": "https://b.com/land"}),
-            self._hop(status=200, body=b"done"),
-        ]
-        fake_curl, setopts = self._fake_curl_class(hops)
-
-        def _vh(hostname: str) -> ValidatedHost:
-            return ValidatedHost(host=hostname, ip="1.2.3.4")
-
-        with (
-            patch("curl_cffi.Curl", fake_curl),
-        ):
+        redirect = self._mock_response(
+            status=307, headers={"location": "https://b.com/land"}
+        )
+        final = self._mock_response(status=200, content=b"done")
+        with patch(
+            "curl_cffi.requests.request", side_effect=[redirect, final]
+        ) as mock_req:
             fetch(
                 "https://a.com/submit",
                 request=RequestParams(
-                    method="POST", data={"x": "1"}, validated_hosts=_vh
+                    content=Content(method="POST", data={"x": "1"}),
+                    policy=Policy(transport="curl"),
                 ),
             )
-        # The HTTPHEADER set on the SECOND hop must carry Origin: b.com, never a.com.
-        header_sets = [v for o, v in setopts if o == int(CurlOpt.HTTPHEADER)]
-        second = cast("list[bytes]", header_sets[1])
-        joined = b"\n".join(second).decode().lower()
-        assert "origin: https://b.com" in joined
-        assert "a.com" not in joined.split("origin:")[1].split("\n")[0]
+        second = mock_req.call_args_list[1].kwargs["headers"]
+        assert second["Origin"] == "https://b.com"
 
     def test_simple_curl_rewrites_origin_on_cross_host_redirect(self) -> None:
         # REV2-001 (high-level path): same Origin-leak guard without pinning.
@@ -259,7 +289,7 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://a.com/submit",
-                request=RequestParams(method="POST", data={"x": "1"}),
+                request=RequestParams(content=Content(method="POST", data={"x": "1"})),
             )
         second_headers = mock_req.call_args_list[1].kwargs["headers"]
         assert second_headers.get("Origin") == "https://b.com"
@@ -276,7 +306,7 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(cookies={"CONSENT": "YES+"}),
+                request=RequestParams(content=Content(cookies={"CONSENT": "YES+"})),
             )
         kwargs = mock_req.call_args.kwargs
         # Cookie is in the jar, not the header, and cookies= kwarg is unset.
@@ -292,7 +322,9 @@ class TestFetchCurlBackend:
         with patch("curl_cffi.requests.request", return_value=resp) as mock_req:
             fetch(
                 "https://example.com",
-                request=RequestParams(headers={"cookie": "a=1"}, cookies={"b": "2"}),
+                request=RequestParams(
+                    content=Content(headers={"cookie": "a=1"}, cookies={"b": "2"})
+                ),
             )
         sent = mock_req.call_args.kwargs["headers"]
         cookie_keys = [k for k in sent if k.lower() == "cookie"]
@@ -302,53 +334,41 @@ class TestFetchCurlBackend:
         # on_redirect fires once per FOLLOWED hop; when the cap is reached the
         # curl path returns the final 3xx body (matching fetch_stdlib's
         # "return the 3xx body at the cap" contract), it does NOT raise.
-        hops = [
-            self._hop(status=302, headers={"location": "https://a.com/1"}),
-            self._hop(status=302, headers={"location": "https://a.com/2"}),
-            self._hop(status=302, body=b"final 3xx", headers={"location": "/3"}),
-        ]
-        fake_curl, _ = self._fake_curl_class(hops)
         seen: list[str] = []
-
-        def _vh(hostname: str) -> ValidatedHost:
-            return ValidatedHost(host=hostname, ip="1.2.3.4")
-
-        with (
-            patch("curl_cffi.Curl", fake_curl),
-        ):
+        responses = [
+            self._mock_response(status=302, headers={"location": "https://a.com/1"}),
+            self._mock_response(status=302, headers={"location": "https://a.com/2"}),
+            self._mock_response(
+                status=302, content=b"final 3xx", headers={"location": "/3"}
+            ),
+        ]
+        with patch("curl_cffi.requests.request", side_effect=responses):
             body, _ = fetch(
                 "https://a.com/start",
                 request=RequestParams(
-                    max_redirects=2, validated_hosts=_vh, on_redirect=seen.append
+                    retry=Retry(max_redirects=2),
+                    observe=Observe(on_redirect=seen.append),
+                    policy=Policy(transport="curl"),
                 ),
             )
         assert body == b"final 3xx"
         assert seen == ["https://a.com/1", "https://a.com/2"]
 
     def test_error_status_raises_withdecompressed_body(self) -> None:
-        # (c) low-level path: a zstd-compressed 403 error body must be
-        # decompressed to readable HTML in FetchError.body.
+        # A challenge 403 must surface a READABLE body in FetchError.body --
+        # ``classify_challenge`` matches on markup, so an undecoded body would
+        # silently downgrade every Cloudflare wall to a generic HTTP error.
         html = b"<!DOCTYPE html><html>Just a moment...</html>"
-        compressed = zstandard.ZstdCompressor().compress(html)
-        hops = [
-            self._hop(
-                status=403,
-                body=compressed,
-                headers={"content-encoding": "zstd", "server": "cloudflare"},
-            )
-        ]
-        fake_curl, _ = self._fake_curl_class(hops)
-
-        def _vh(hostname: str) -> ValidatedHost:
-            return ValidatedHost(host=hostname, ip="1.2.3.4")
-
+        response = self._mock_response(
+            status=403, content=html, headers={"server": "cloudflare"}
+        )
         with (
-            patch("curl_cffi.Curl", fake_curl),
+            patch("curl_cffi.requests.request", return_value=response),
             pytest.raises(FetchError) as exc,
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(validated_hosts=_vh, transport="curl"),
+                request=RequestParams(policy=Policy(transport="curl")),
             )
         assert exc.value.status == 403
         assert exc.value.body == html
@@ -363,7 +383,7 @@ class TestFetchCurlBackend:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    headers={"User-Agent": "custom"}, raw_headers=True
+                    content=Content(headers={"User-Agent": "custom"}, raw_headers=True)
                 ),
             )
         assert mock_req.call_args.kwargs["headers"] == {"User-Agent": "custom"}
@@ -400,7 +420,8 @@ class TestFetchCurlBackend:
             body, _ = fetch(
                 "https://example.com/submit",
                 request=RequestParams(
-                    method="POST", data={"x": "1"}, on_redirect=lambda _u: None
+                    content=Content(method="POST", data={"x": "1"}),
+                    observe=Observe(on_redirect=lambda _u: None),
                 ),
             )
         assert body == b"got it"
@@ -426,7 +447,7 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://example.com/submit",
-                request=RequestParams(method="POST", json={"x": 1}),
+                request=RequestParams(content=Content(method="POST", json={"x": 1})),
             )
         assert "Content-Type" not in calls[1]["headers"]
 
@@ -444,7 +465,7 @@ class TestFetchCurlBackend:
         ):
             body, _ = fetch(
                 "https://example.com",
-                request=RequestParams(max_redirects=0),
+                request=RequestParams(retry=Retry(max_redirects=0)),
             )
         assert body == b"redirect body"
         assert mock_req.call_count == 1  # never followed
@@ -463,7 +484,9 @@ class TestFetchCurlBackend:
             patch("wesearch.fetch.fetch.time.sleep"),
         ):
             assert (
-                fetch("https://example.com", request=RequestParams(retries=1))[0]
+                fetch(
+                    "https://example.com", request=RequestParams(retry=Retry(retries=1))
+                )[0]
                 == b"ok"
             )
 
@@ -475,34 +498,44 @@ class TestFetchCurlBackend:
             patch("wesearch.fetch.fetch.time.sleep"),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com", request=RequestParams(retries=2))
+            fetch("https://example.com", request=RequestParams(retry=Retry(retries=2)))
         assert exc.value.status == 0
 
-    def test_pinned_curl_reuses_resolution_on_same_origin_redirect(self) -> None:
-        # A3: the resolver contract (fetch docstring) says a same-origin redirect
-        # reuses the prior resolution without re-invoking validated_hosts. The
-        # stdlib path honors this; the pinned-curl path must too, or the two
-        # transports diverge on how often a (possibly expensive) resolver runs.
-        hops = [
-            self._hop(status=302, headers={"location": "https://example.com/next"}),
-            self._hop(status=200, body=b"ok"),
-        ]
-        fake_curl, _ = self._fake_curl_class(hops)
-        calls: list[str] = []
+    def test_same_origin_redirect_keeps_one_pooled_session(self) -> None:
+        # A3: a same-origin hop must NOT re-seat the session -- the pin and the
+        # cookie jar are per-Session, so churning one per hop would discard the
+        # connection continuity the pool exists to provide.
+        seats: list[str] = []
 
-        def _vh(hostname: str) -> ValidatedHost:
-            calls.append(hostname)
-            return ValidatedHost(host=hostname, ip="1.2.3.4")
+        def spy(
+            egress: str,
+            domain: str,
+            impersonate: str,
+            *,
+            pin: ValidatedHost | None = None,
+            port: int = 443,
+        ) -> StubSession:
+            del egress, impersonate, pin, port
+            seats.append(domain)
+            return StubSession()
 
+        redirect = self._mock_response(
+            status=302, headers={"location": "https://example.com/next"}
+        )
+        final = self._mock_response(status=200, content=b"ok")
         with (
-            patch("curl_cffi.Curl", fake_curl),
+            patch("curl_cffi.requests.request", side_effect=[redirect, final]),
+            patch.object(fetch_mod, "curl_session", spy),
         ):
             body, _ = fetch(
                 "https://example.com/start",
-                request=RequestParams(validated_hosts=_vh, on_redirect=lambda _u: None),
+                request=RequestParams(
+                    observe=Observe(on_redirect=lambda _u: None),
+                    policy=Policy(transport="curl"),
+                ),
             )
         assert body == b"ok"
-        assert calls == ["example.com"]  # resolved once, reused on same-origin hop
+        assert seats == ["example.com"]  # seated once, reused on the same-origin hop
 
 
 class TestCurlSessionPoolLocking:
@@ -570,20 +603,20 @@ class TestCurlSessionPoolLocking:
         stale.close.assert_called_once_with()
 
 
-class TestPinnedPathSendsUserAgent:
-    """The SSRF-pinned curl path must present the same browser identity as the
-    unpinned path -- each fallback rung is meant to look MORE authentic, never
-    less. A pinned request that omits the User-Agent is rejected by UA-gated
-    APIs (GitHub's REST API 403s UA-less requests), which surfaced as spurious
-    ``Fetch failed: HTTP 403`` on every WebFetch (WebFetch always passes
-    ``validated_hosts``, forcing the pinned path).
+class TestCurlPathSendsUserAgent:
+    """The curl path presents a coherent browser identity on the real wire.
 
-    Hermetic: a loopback HTTP server echoes the request headers; ``validated_hosts``
-    pins the connection to 127.0.0.1, exercising the REAL ``curl_cffi.Curl``
-    handle (a mock handle cannot reveal curl_cffi's header injection behavior).
+    A request that omits the User-Agent is rejected by UA-gated APIs (GitHub's
+    REST API 403s UA-less requests), which once surfaced as spurious
+    ``Fetch failed: HTTP 403`` on every WebFetch -- the SSRF-pinned fork drove a
+    raw handle whose ``impersonate()`` injected no request headers at all. That
+    fork is gone; this test is what proves the surviving path still speaks
+    Chrome, since only a REAL curl_cffi call reveals its header injection.
+
+    Hermetic: a loopback HTTP server echoes the request headers back.
     """
 
-    def test_pinned_get_sends_user_agent_header(self) -> None:
+    def test_curl_get_sends_user_agent_header(self) -> None:
         seen: dict[str, str] = {}
 
         class _Echo(BaseHTTPRequestHandler):
@@ -603,13 +636,14 @@ class TestPinnedPathSendsUserAgent:
         thread = Thread(target=server.handle_request, daemon=True)
         thread.start()
         try:
-
-            def _vh(hostname: str) -> ValidatedHost:
-                return ValidatedHost(host=hostname, ip="127.0.0.1")
-
             body, _ = fetch(
                 f"http://127.0.0.1:{port}/",
-                request=RequestParams(validated_hosts=_vh, transport="curl"),
+                # The oracle IS loopback, so this test authors its own URL --
+                # exactly what "internal" declares. Leaving it untrusted would
+                # (correctly) refuse the fetch.
+                request=RequestParams(
+                    policy=Policy(transport="curl", trust="internal")
+                ),
             )
         finally:
             server.server_close()
@@ -617,15 +651,15 @@ class TestPinnedPathSendsUserAgent:
 
         assert body == b"ok"
         assert seen.get("user-agent"), (
-            "pinned curl path sent no User-Agent; UA-gated APIs (e.g. GitHub) "
+            "curl path sent no User-Agent; UA-gated APIs (e.g. GitHub) "
             f"403 such requests. headers seen: {sorted(seen)}"
         )
         assert "chrome" in seen["user-agent"].lower()
         # Full coherent Chrome identity, not just a bare UA (a partial set is
-        # itself a bot tell): the pinned path must match what the other rungs send.
-        assert seen.get("accept"), f"pinned path missing Accept: {sorted(seen)}"
+        # itself a bot tell): every rung must send what the others send.
+        assert seen.get("accept"), f"curl path missing Accept: {sorted(seen)}"
         assert seen.get("sec-fetch-mode") == "navigate", (
-            f"pinned path missing Sec-Fetch navigation headers: {sorted(seen)}"
+            f"curl path missing Sec-Fetch navigation headers: {sorted(seen)}"
         )
 
 

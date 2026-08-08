@@ -27,9 +27,10 @@ import html
 import re
 
 from wesearch.fetch import (
+    Content,
+    Policy,
     RequestParams,
-    Transport,
-    ValidatedHosts,
+    Retry,
     classify_challenge,
     fetch,
 )
@@ -93,8 +94,7 @@ def fetch_web(
     json_body: JSONValue = None,
     form_body: dict[str, str] | None = None,
     max_chars: int | None = None,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
+    policy: Policy | None = None,
 ) -> WebFetchResult:
     """Fetch a URL and render its response to clean text.
 
@@ -117,10 +117,10 @@ def fetch_web(
         policy, and a hardcoded ceiling here would silently defeat a caller that
         appends its own truncation notice. When set, the text is cut to this
         length and ``truncated`` reports whether the cut occurred.
-      transport: Retrieval transport for the request.
-      validated_hosts: Optional SSRF resolver pinning the connect IP per host;
-        forwarded into every underlying fetch (providers, reader-proxy ladder,
-        and the direct POST path). ``None`` leaves the fetch unpinned.
+      policy: Transport and trust, forwarded into every underlying fetch
+        (providers, reader-proxy ladder, and the direct POST path). Defaults to
+        the safe ``untrusted`` level, which validates each host to a public
+        address before connecting.
 
     Returns:
       result: A :class:`WebFetchResult` with the extracted text, the fetched
@@ -137,8 +137,7 @@ def fetch_web(
         method=method,
         json_body=json_body,
         form_body=form_body,
-        transport=transport,
-        validated_hosts=validated_hosts,
+        policy=policy,
     )
     text = _extract_text(body, kind=kind, method=method)
     if max_chars is None:
@@ -177,8 +176,7 @@ def _fetch_body(
     method: HttpMethod,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
+    policy: Policy | None = None,
 ) -> tuple[bytes, str]:
     """Fetch a URL and classify the response for downstream extraction.
 
@@ -187,8 +185,7 @@ def _fetch_body(
       method: HTTP method (``GET`` or ``POST``).
       json_body: JSON-serializable body for POST requests.
       form_body: Form-encoded body for POST requests.
-      transport: Retrieval transport for this request.
-      validated_hosts: Optional SSRF resolver forwarded into every fetch.
+      policy: Transport and trust forwarded into every fetch.
 
     Returns:
       body: Raw response bytes.
@@ -196,29 +193,21 @@ def _fetch_body(
         in :func:`_extract_text`.
 
     """
+    policy = Policy() if policy is None else policy
     if method == "GET":
         if reddit.matches(url):
-            body, payload = reddit.fetch_reddit(
-                url, transport=transport, validated_hosts=validated_hosts
-            )
+            body, payload = reddit.fetch_reddit(url, policy=policy)
             kind = _REDDIT_PAYLOAD_KINDS[payload]
             _raise_success_challenge(url, body)
             return body, kind
         if google_news.matches(url):
-            body, news_payload = google_news.fetch_google_news(
-                url, transport=transport, validated_hosts=validated_hosts
-            )
+            body, news_payload = google_news.fetch_google_news(url, policy=policy)
             news_kind = _KIND_RSS if news_payload == "rss" else _KIND_HTML
             _raise_success_challenge(url, body)
             return body, news_kind
         if x.matches(url):
-            return (
-                x.fetch_x(url, transport=transport, validated_hosts=validated_hosts),
-                _KIND_MARKDOWN,
-            )
-        body, via_proxy = fetch_with_reader_fallback(
-            url, transport=transport, validated_hosts=validated_hosts
-        )
+            return x.fetch_x(url, policy=policy), _KIND_MARKDOWN
+        body, via_proxy = fetch_with_reader_fallback(url, policy=policy)
         if via_proxy:
             # The proxy already validated its own 200; a challenge would ride
             # the origin path only, which the fallback ladder never reaches.
@@ -228,12 +217,9 @@ def _fetch_body(
     body, _session = fetch(
         url,
         request=RequestParams(
-            method=method,
-            json=json_body,
-            data=form_body,
-            timeout_sec=15,
-            transport=transport,
-            validated_hosts=validated_hosts,
+            content=Content(method=method, json=json_body, data=form_body),
+            retry=Retry(timeout_sec=15),
+            policy=policy,
         ),
     )
     _raise_success_challenge(url, body)

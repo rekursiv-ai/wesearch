@@ -17,7 +17,11 @@ from urllib.parse import urlparse
 
 import re
 
-from wesearch.fetch import RequestParams, Transport, ValidatedHosts, fetch
+from wesearch.fetch import (
+    Policy,
+    RequestParams,
+    fetch,
+)
 
 
 __all__ = [
@@ -38,19 +42,12 @@ def matches(url: str) -> bool:
     return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
 
-def fetch_reddit(
-    url: str,
-    *,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
-) -> tuple[bytes, RedditPayload]:
+def fetch_reddit(url: str, *, policy: Policy) -> tuple[bytes, RedditPayload]:
     """Fetch a Reddit URL; return its bytes and the payload shape.
 
     Args:
       url: A Reddit URL (thread, subreddit, or user page).
-      transport: Retrieval transport forwarded to the HTTP layer.
-      validated_hosts: Optional SSRF resolver pinning the connect IP per host;
-        ``None`` leaves the fetch unpinned.
+      policy: Transport and trust forwarded to the HTTP layer.
 
     Returns:
       body: The raw feed/JSON bytes.
@@ -61,10 +58,7 @@ def fetch_reddit(
       FetchError: On an HTTP failure after any token refresh.
 
     """
-    body, _session = fetch(
-        rss_url(url),
-        request=RequestParams(transport=transport, validated_hosts=validated_hosts),
-    )
+    body, _session = fetch(rss_url(url), request=RequestParams(policy=policy))
     return body, "rss"
 
 

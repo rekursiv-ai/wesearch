@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from wesearch.fetch import Transport, ValidatedHosts
+from wesearch.fetch import Policy
 from wesearch.providers.reader_proxy import fetch_reader_proxy
 
 
@@ -32,19 +32,12 @@ def matches(url: str) -> bool:
     return hostname.endswith((".x.com", ".twitter.com"))
 
 
-def fetch_x(
-    url: str,
-    *,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
-) -> bytes:
+def fetch_x(url: str, *, policy: Policy) -> bytes:
     """Render an X URL through the reader proxy; return its markdown bytes.
 
     Args:
       url: An X/Twitter URL.
-      transport: Retrieval transport for the proxy hop.
-      validated_hosts: Optional SSRF resolver pinning the connect IP per host;
-        forwarded to the reader-proxy hop. ``None`` leaves it unpinned.
+      policy: Transport and trust for the proxy hop.
 
     Returns:
       markdown: The proxy's extracted-markdown bytes.
@@ -54,4 +47,4 @@ def fetch_x(
         fails.
 
     """
-    return fetch_reader_proxy(url, transport=transport, validated_hosts=validated_hosts)
+    return fetch_reader_proxy(url, policy=policy)

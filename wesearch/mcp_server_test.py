@@ -16,7 +16,6 @@ import pytest
 pytest.importorskip("mcp.server")
 
 from wesearch import mcp_server
-from wesearch.fetch import public_host
 from wesearch.paper import (
     authors as paper_authors_mod,
     details as paper_details_mod,
@@ -140,22 +139,25 @@ def test_web_fetch_extracts_and_truncates(monkeypatch: pytest.MonkeyPatch) -> No
     assert text.startswith("Hello")
 
 
-def test_web_fetch_pins_the_resolved_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An agent-supplied URL is the SSRF trust boundary, and this server is the
-    # application layer that must opt into pinning -- unpinned, a model reaches
-    # loopback, link-local, and every private-range host the process can see.
+def test_web_fetch_treats_the_model_url_as_untrusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An agent-supplied URL is the SSRF trust boundary. The server no longer has
+    # to opt in -- "untrusted" is the default -- so what it owes is simply not
+    # opting OUT, which this pins.
     captured: dict[str, object] = {}
 
     def _fake_fetch(url: str, *, request: object) -> tuple[bytes, object]:
         del url
-        captured["validated_hosts"] = getattr(request, "validated_hosts", None)
+        policy = getattr(request, "policy", None)
+        captured["trust"] = getattr(policy, "trust", None)
         return b"<html><body><p>ok</p></body></html>", object()
 
     monkeypatch.setattr(mcp_server, "fetch", _fake_fetch)
     mcp_server.web_fetch("https://e.co")
-    # The resolver's own behavior is pinned in fetch/common_test.py; what this
-    # server owes is opting into it.
-    assert captured["validated_hosts"] is public_host
+    # The validation itself is pinned in fetch/common_test.py; what this server
+    # owes is leaving the safe default alone.
+    assert captured["trust"] == "untrusted"
 
 
 def test_web_fetch_rejects_a_nonpositive_max_chars() -> None:

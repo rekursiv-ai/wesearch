@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Final
 
 from wesearch.errors import FetchError
-from wesearch.fetch import RequestParams, Transport, ValidatedHosts, fetch
+from wesearch.fetch import Policy, RequestParams, fetch
 from wesearch.providers.reader_proxy import fetch_reader_proxy
 
 
@@ -28,21 +28,13 @@ __all__ = ["fetch_with_reader_fallback"]
 _BOT_WALL_STATUSES: Final = frozenset({403, 429, 503})
 
 
-def fetch_with_reader_fallback(
-    url: str,
-    *,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
-) -> tuple[bytes, bool]:
+def fetch_with_reader_fallback(url: str, *, policy: Policy) -> tuple[bytes, bool]:
     """Fetch ``url``; on a bot-wall GET, retry through the reader proxy.
 
     Args:
       url: The target URL (GET only benefits from the fallback).
-      transport: Retrieval transport for both the primary fetch and the proxy
-        hop.
-      validated_hosts: Optional SSRF resolver pinning the connect IP per host;
-        forwarded to both the primary fetch and the reader-proxy fallback.
-        ``None`` leaves both hops unpinned.
+      policy: Transport and trust, applied to both the primary fetch and the
+        proxy hop.
 
     Returns:
       body: The response bytes -- the origin's HTML on the primary path, or the
@@ -56,21 +48,13 @@ def fetch_with_reader_fallback(
 
     """
     try:
-        body, _session = fetch(
-            url,
-            request=RequestParams(transport=transport, validated_hosts=validated_hosts),
-        )
+        body, _session = fetch(url, request=RequestParams(policy=policy))
         return body, False
     except FetchError as e:
         if e.status not in _BOT_WALL_STATUSES:
             raise
         primary = e
     try:
-        return (
-            fetch_reader_proxy(
-                url, transport=transport, validated_hosts=validated_hosts
-            ),
-            True,
-        )
+        return fetch_reader_proxy(url, policy=policy), True
     except (FetchError, ValueError, OSError) as e:
         raise primary from e

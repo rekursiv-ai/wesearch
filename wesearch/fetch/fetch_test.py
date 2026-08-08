@@ -22,7 +22,15 @@ from wesearch.errors import (
     GoogleJavascriptRequiredError,
     PuzzleChallengeError,
 )
-from wesearch.fetch import FetchSession, RequestParams, ValidatedHost, fetch
+from wesearch.fetch import (
+    Content,
+    FetchSession,
+    Observe,
+    Policy,
+    RequestParams,
+    Retry,
+    fetch,
+)
 from wesearch.fetch.fetch import (
     _send_as,
     _split_userinfo,
@@ -60,35 +68,31 @@ def test_fetch_uses_transport_package_layout() -> None:
 
 class TestBackoffDelay:
     def test_exponential_growth(self) -> None:
-        d0 = RequestParams().backoff_delay(0, {})
-        d2 = RequestParams().backoff_delay(2, {})
+        d0 = Retry().backoff_delay(0, {})
+        d2 = Retry().backoff_delay(2, {})
         assert d0 < d2
 
     def test_capped_at_30(self) -> None:
-        assert RequestParams().backoff_delay(100, {}) <= 45  # 30 + 0.5*30
+        assert Retry().backoff_delay(100, {}) <= 45  # 30 + 0.5*30
 
     def test_retry_after_header(self) -> None:
-        assert RequestParams().backoff_delay(0, {"retry-after": "5"}) == 5.0
+        assert Retry().backoff_delay(0, {"retry-after": "5"}) == 5.0
 
     def test_retry_after_capped(self) -> None:
-        assert RequestParams().backoff_delay(0, {"retry-after": "999"}) == 30.0
+        assert Retry().backoff_delay(0, {"retry-after": "999"}) == 30.0
 
     def test_retry_after_http_date_honored(self) -> None:
         # REV2A-007: Retry-After may be an HTTP-date, not just delta-seconds.
         # A near-future date must produce a positive delay (honored), not fall
         # through to exponential backoff.
         future = datetime.now(tz=UTC) + timedelta(seconds=10)
-        delay = RequestParams().backoff_delay(
-            0, {"retry-after": format_datetime(future)}
-        )
+        delay = Retry().backoff_delay(0, {"retry-after": format_datetime(future)})
         assert 5 <= delay <= 30  # ~10s, capped at 30; not the ~1s exp backoff
 
     def test_retry_after_past_date_is_zero(self) -> None:
         # A past HTTP-date means "retry now": non-negative, small.
         assert (
-            RequestParams().backoff_delay(
-                0, {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}
-            )
+            Retry().backoff_delay(0, {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"})
             == 0.0
         )
 
@@ -153,19 +157,24 @@ class TestFetchInputValidation:
         # O-WEB-001: retries=-1 -> range(1+-1)=range(0), the loop never runs and
         # the internal "unreachable" AssertionError leaks. Reject up front.
         with pytest.raises(ValueError, match="retries"):
-            fetch("https://example.com", request=RequestParams(retries=-1))
+            fetch("https://example.com", request=RequestParams(retry=Retry(retries=-1)))
 
     def test_negative_max_redirects_rejected(self) -> None:
         # O-WEB-007: max_redirects=-1 silently behaves like 0 (never follow),
         # but the contract documents only 0 as "disable". Reject the ambiguous -1.
         with pytest.raises(ValueError, match="max_redirects"):
-            fetch("https://example.com", request=RequestParams(max_redirects=-1))
+            fetch(
+                "https://example.com",
+                request=RequestParams(retry=Retry(max_redirects=-1)),
+            )
 
     def test_nonpositive_timeout_rejected(self) -> None:
         # O-WEB-008: timeout_sec=0 means opposite things per transport (curl 0 =
         # no timeout, stdlib 0 = non-blocking). Reject non-positive timeouts.
         with pytest.raises(ValueError, match="timeout_sec"):
-            fetch("https://example.com", request=RequestParams(timeout_sec=0))
+            fetch(
+                "https://example.com", request=RequestParams(retry=Retry(timeout_sec=0))
+            )
 
 
 class TestFetchClassifiesBlockAtBoundary:
@@ -199,7 +208,9 @@ class TestFetchClassifiesBlockAtBoundary:
             patch("curl_cffi.requests.request", return_value=resp),
             pytest.raises(CloudflareChallengeError) as exc,
         ):
-            fetch("https://x.com", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com", request=RequestParams(policy=Policy(transport="curl"))
+            )
         assert isinstance(exc.value, FetchError)
         assert isinstance(exc.value, BotDetectionError)
         assert exc.value.status == 403
@@ -217,7 +228,9 @@ class TestFetchClassifiesBlockAtBoundary:
             patch("curl_cffi.requests.request", return_value=resp),
             pytest.raises(PuzzleChallengeError) as exc,
         ):
-            fetch("https://x.com", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com", request=RequestParams(policy=Policy(transport="curl"))
+            )
         assert exc.value.status == 403
         assert "captcha" in exc.value.guidance.lower()
 
@@ -233,7 +246,9 @@ class TestFetchClassifiesBlockAtBoundary:
             patch("curl_cffi.requests.request", return_value=resp),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://x.com", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com", request=RequestParams(policy=Policy(transport="curl"))
+            )
         assert not isinstance(exc.value, BotDetectionError)
         assert exc.value.status == 404
 
@@ -249,7 +264,10 @@ class TestFetchClassifiesBlockAtBoundary:
             patch("curl_cffi.requests.request", return_value=resp),
         ):
             try:
-                fetch("https://x.com", request=RequestParams(transport="curl"))
+                fetch(
+                    "https://x.com",
+                    request=RequestParams(policy=Policy(transport="curl")),
+                )
             except FetchError as e:
                 caught = e
         assert isinstance(caught, CloudflareChallengeError)
@@ -292,7 +310,9 @@ class TestFetchRetry:
             assert (
                 fetch(
                     "https://example.com",
-                    request=RequestParams(retries=1, transport="stdlib"),
+                    request=RequestParams(
+                        retry=Retry(retries=1), policy=Policy(transport="stdlib")
+                    ),
                 )[0]
                 == b"ok"
             )
@@ -311,7 +331,9 @@ class TestFetchRetry:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(retries=3, transport="stdlib"),
+                request=RequestParams(
+                    retry=Retry(retries=3), policy=Policy(transport="stdlib")
+                ),
             )
 
     def test_error_body_isdecompressed(self) -> None:
@@ -335,7 +357,10 @@ class TestFetchRetry:
             ),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://x.com", request=RequestParams(transport="stdlib"))
+            fetch(
+                "https://x.com",
+                request=RequestParams(policy=Policy(transport="stdlib")),
+            )
         # The caller must receive readable HTML, not the raw zstd frame.
         assert exc.value.body == html
 
@@ -355,7 +380,9 @@ class TestFetchRetry:
             assert (
                 fetch(
                     "https://example.com",
-                    request=RequestParams(retries=1, transport="stdlib"),
+                    request=RequestParams(
+                        retry=Retry(retries=1), policy=Policy(transport="stdlib")
+                    ),
                 )[0]
                 == b"ok"
             )
@@ -390,7 +417,10 @@ class TestHeaderOrder:
         ):
             fetch(
                 "https://example.com/",
-                request=RequestParams(transport="stdlib", **fetch_kwargs),
+                request=RequestParams(
+                    content=Content(**fetch_kwargs),
+                    policy=Policy(transport="stdlib"),
+                ),
             )
         return dict(mock_conn.request.call_args.kwargs["headers"])
 
@@ -400,7 +430,12 @@ class TestHeaderOrder:
         # Priority -- Priority is an HTTP/2 construct a real Chrome omits on
         # HTTP/1.1 (verified against live Chrome via the parity oracle).
         headers = self._capture_headers()
+        # Host leads: trust is honored by default, so the stdlib path pins the
+        # connection and must state Host itself rather than let http.client
+        # auto-generate it. Real Chrome sends Host first too, and servers that
+        # observe header order 403 a trailing one.
         assert list(headers) == [
+            "Host",
             "sec-ch-ua",
             "sec-ch-ua-mobile",
             "sec-ch-ua-platform",
@@ -420,6 +455,7 @@ class TestHeaderOrder:
     def test_post_xhr_order_with_json(self) -> None:
         headers = self._capture_headers(method="POST", json={"q": "x"})
         assert list(headers) == [
+            "Host",
             "sec-ch-ua",
             "sec-ch-ua-mobile",
             "sec-ch-ua-platform",
@@ -468,9 +504,6 @@ class TestHeaderOrder:
         assert list(headers)[-1] == "X-Trace"
 
     def test_validated_hosts_puts_host_first(self) -> None:
-        def _vh(netloc: str) -> ValidatedHost:
-            return ValidatedHost(host=netloc, ip="93.184.216.34")
-
         resp = Mock(spec=http.client.HTTPResponse)
         resp.status = 200
         resp.read.return_value = b"ok"
@@ -485,7 +518,7 @@ class TestHeaderOrder:
         ):
             fetch(
                 "https://example.com/",
-                request=RequestParams(validated_hosts=_vh, transport="stdlib"),
+                request=RequestParams(policy=Policy(transport="stdlib")),
             )
 
         captured = dict(mock_conn.request.call_args.kwargs["headers"])
@@ -520,7 +553,8 @@ class TestOnResponse:
             fetch(
                 "https://x.com",
                 request=RequestParams(
-                    on_response=lambda s, h: seen.append((s, h)), transport="stdlib"
+                    observe=Observe(on_response=lambda s, h: seen.append((s, h))),
+                    policy=Policy(transport="stdlib"),
                 ),
             )
         assert len(seen) == 1
@@ -542,7 +576,8 @@ class TestOnResponse:
             fetch(
                 "https://x.com/1",
                 request=RequestParams(
-                    on_response=lambda s, _h: seen.append(s), transport="stdlib"
+                    observe=Observe(on_response=lambda s, _h: seen.append(s)),
+                    policy=Policy(transport="stdlib"),
                 ),
             )
         assert seen == [302, 200]
@@ -560,7 +595,8 @@ class TestOnResponse:
             fetch(
                 "https://x.com",
                 request=RequestParams(
-                    on_response=lambda s, _h: seen.append(s), transport="stdlib"
+                    observe=Observe(on_response=lambda s, _h: seen.append(s)),
+                    policy=Policy(transport="stdlib"),
                 ),
             )
         assert seen == [404]
@@ -577,7 +613,9 @@ class TestOnResponse:
         ):
             fetch(
                 "https://x.com",
-                request=RequestParams(on_response=lambda s, h: seen.append((s, h))),
+                request=RequestParams(
+                    observe=Observe(on_response=lambda s, h: seen.append((s, h)))
+                ),
             )
         assert len(seen) == 1
         assert seen[0][0] == 200
@@ -593,7 +631,10 @@ class TestTransportConsistency:
     """
 
     def _stdlib_result(
-        self, hops: list[tuple[int, bytes, dict[str, str]]], **kwargs: Any
+        self,
+        hops: list[tuple[int, bytes, dict[str, str]]],
+        *,
+        max_redirects: int = 10,
     ) -> bytes:
         resps: list[Mock] = []
         for status, body, hdrs in hops:
@@ -616,11 +657,17 @@ class TestTransportConsistency:
         ):
             return fetch(
                 "https://a.com/start",
-                request=RequestParams(transport="stdlib", **kwargs),
+                request=RequestParams(
+                    retry=Retry(max_redirects=max_redirects),
+                    policy=Policy(transport="stdlib"),
+                ),
             )[0]
 
     def _curl_result(
-        self, hops: list[tuple[int, bytes, dict[str, str]]], **kwargs: Any
+        self,
+        hops: list[tuple[int, bytes, dict[str, str]]],
+        *,
+        max_redirects: int = 10,
     ) -> bytes:
         resps: list[Mock] = []
         for status, body, hdrs in hops:
@@ -634,7 +681,7 @@ class TestTransportConsistency:
         ):
             return fetch(
                 "https://a.com/start",
-                request=RequestParams(**kwargs),
+                request=RequestParams(retry=Retry(max_redirects=max_redirects)),
             )[0]
 
     def test_cap_returns_3xx_body_identically(self) -> None:
@@ -750,7 +797,10 @@ class TestFetchSession:
             "curl_cffi.requests.request",
             return_value=self._curl_response(headers={}),
         ) as req:
-            fetch("https://x.com/p", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
         sent = req.call_args.kwargs["headers"]
         assert "sec-ch-ua-arch" not in sent
 
@@ -777,7 +827,9 @@ class TestFetchSession:
         ):
             fetch(
                 "https://x.com/p",
-                request=RequestParams(on_response=lambda s, _h: seen.append(s)),
+                request=RequestParams(
+                    observe=Observe(on_response=lambda s, _h: seen.append(s))
+                ),
             )
         assert seen == [200]
 
@@ -842,7 +894,7 @@ class TestRedirectIdentityScoping:
         ):
             fetch(
                 "https://a.com/start",
-                request=RequestParams(method="POST", data={"x": "1"}),
+                request=RequestParams(content=Content(method="POST", data={"x": "1"})),
             )
         # Second hop must be a GET with no body.
         _verb, _url, second_body = calls[1]
@@ -947,7 +999,7 @@ class TestRedirectIdentityScoping:
         def _fixed_egress(**_kw: Any) -> str:
             return "9.9.9.9"
 
-        def _no_pool(*_a: Any) -> None:
+        def _no_pool(*_a: Any, **_kw: Any) -> None:
             return None
 
         monkeypatch.setattr(ProfileStore, "shared", classmethod(lambda _cls: store))
@@ -1018,7 +1070,10 @@ class TestIdentityLayer:
             "curl_cffi.requests.request",
             return_value=self._curl_response(headers={}),
         ) as req:
-            fetch("https://x.com/p", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
         sent = req.call_args.kwargs["headers"]
         assert "User-Agent" not in sent
         assert "Cookie" not in sent  # jar carries the stored cookie, not the header
@@ -1038,7 +1093,9 @@ class TestIdentityLayer:
             fetch(
                 "https://x.com/p",
                 request=RequestParams(
-                    headers={"User-Agent": "Mine/1"}, cookies={"GSP": "caller"}
+                    content=Content(
+                        headers={"User-Agent": "Mine/1"}, cookies={"GSP": "caller"}
+                    )
                 ),
             )
         sent = req.call_args.kwargs["headers"]
@@ -1054,7 +1111,10 @@ class TestIdentityLayer:
             "curl_cffi.requests.request",
             return_value=self._curl_response(headers={}),
         ) as req:
-            fetch("https://x.com/p", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
         assert "User-Agent" not in req.call_args.kwargs["headers"]
 
     def test_set_cookie_is_persisted(self) -> None:
@@ -1064,7 +1124,10 @@ class TestIdentityLayer:
                 headers={"set-cookie": "GSP=minted; Path=/"}
             ),
         ):
-            fetch("https://x.com/p", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
         got = self._store().load(self._EGRESS, "x.com")
         assert got is not None
         assert got.cookies == {"GSP": "minted"}
@@ -1077,7 +1140,9 @@ class TestIdentityLayer:
         ):
             fetch(
                 "https://x.com/p",
-                request=RequestParams(on_response=lambda s, _h: seen.append(s)),
+                request=RequestParams(
+                    observe=Observe(on_response=lambda s, _h: seen.append(s))
+                ),
             )
         assert seen == [200]
 
@@ -1115,7 +1180,10 @@ class TestIdentityLayer:
             patch("curl_cffi.requests.request", return_value=blocked),
             pytest.raises(PuzzleChallengeError),
         ):
-            fetch("https://x.com/p", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
 
     def test_first_contact_burn_does_not_retry(self) -> None:
         blocked = self._curl_response(
@@ -1127,7 +1195,10 @@ class TestIdentityLayer:
             patch("curl_cffi.requests.request", return_value=blocked) as req,
             pytest.raises(PuzzleChallengeError),
         ):
-            fetch("https://x.com/p", request=RequestParams(transport="curl"))
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
         assert req.call_count == 1  # no retry with no known identity
 
     def test_raw_headers_bypasses_identity(self) -> None:
@@ -1140,7 +1211,9 @@ class TestIdentityLayer:
         ) as req:
             fetch(
                 "https://x.com/p",
-                request=RequestParams(headers={"User-Agent": "raw"}, raw_headers=True),
+                request=RequestParams(
+                    content=Content(headers={"User-Agent": "raw"}, raw_headers=True)
+                ),
             )
         sent = req.call_args.kwargs["headers"]
         assert sent == {"User-Agent": "raw"}  # no profile UA, no stored cookie
@@ -1150,19 +1223,7 @@ class TestIdentityLayer:
         request = fetch_mod._Request(
             url="https://x.com/p",
             session=FetchSession(impersonate="chrome"),
-            params=RequestParams(
-                method="GET",
-                params=None,
-                data=None,
-                json=None,
-                retries=0,
-                timeout_sec=30,
-                max_redirects=10,
-                on_redirect=None,
-                on_response=None,
-                validated_hosts=None,
-                transport="curl",
-            ),
+            params=RequestParams(policy=Policy(transport="curl")),
         )
         with patch(
             "curl_cffi.requests.request",
@@ -1281,22 +1342,26 @@ class TestBrowserBackend:
 
     def test_rejects_non_get_method(self) -> None:
         with pytest.raises(ValueError, match="zendriver backend supports only GET"):
-            RequestParams(transport="zendriver", method="POST")
+            RequestParams(
+                content=Content(method="POST"), policy=Policy(transport="zendriver")
+            )
 
     def test_rejects_request_body(self) -> None:
         with pytest.raises(ValueError, match="cannot send a request body"):
-            RequestParams(transport="zendriver", data={"a": "1"})
+            RequestParams(
+                content=Content(data={"a": "1"}), policy=Policy(transport="zendriver")
+            )
 
-    def test_rejects_validated_hosts(self) -> None:
-        params = RequestParams(
-            transport="zendriver",
-            validated_hosts=lambda h: ValidatedHost(host=h, ip="1.2.3.4"),
-        )
-        with pytest.raises(ValueError, match="validated_hosts"):
-            fetch("https://example.com", request=params)
+    def test_accepts_untrusted_trust(self) -> None:
+        # Regression: an SSRF-validated browser request used to be rejected
+        # outright, which cost the only caller that asked for safety its entire
+        # browser path. Chrome owns its DNS, so "untrusted" validates the host
+        # and declines to pin -- it does not refuse the request.
+        params = RequestParams(policy=Policy(transport="zendriver"))
+        assert params.policy.trust == "untrusted"
 
     def test_default_transport_is_auto(self) -> None:
-        assert RequestParams().transport == "auto"
+        assert RequestParams().policy.transport == "auto"
 
     def test_auto_uses_general_curl_then_browser_fallback(self) -> None:
         assert fetch_mod.resolve_transport("auto") == "curl-then-zendriver"
@@ -1310,10 +1375,10 @@ class TestBrowserBackend:
         ) as direct:
             body, _ = fetch(
                 "https://google.com/api",
-                request=RequestParams(json={"query": "value"}),
+                request=RequestParams(content=Content(json={"query": "value"})),
             )
         assert body == b"ok"
-        assert direct.call_args.args[0].params.transport == "curl"
+        assert direct.call_args.args[0].params.policy.transport == "curl"
 
     def test_auto_post_to_learned_domain_uses_curl(self) -> None:
         # A domain learned to require the browser must not override method/body
@@ -1331,10 +1396,10 @@ class TestBrowserBackend:
         ):
             body, _ = fetch(
                 "https://walled.example/api",
-                request=RequestParams(json={"q": "v"}),
+                request=RequestParams(content=Content(json={"q": "v"})),
             )
         assert body == b"ok"
-        assert direct.call_args.args[0].params.transport == "curl"
+        assert direct.call_args.args[0].params.policy.transport == "curl"
 
     def test_browser_fetch_forwards_url_params_headers_and_cookies(self) -> None:
         result = BrowserResult(body=b"ok", cookies={})
@@ -1349,10 +1414,12 @@ class TestBrowserBackend:
                 "https://google.com/search?hl=en",
                 session=FetchSession(cookies={"SID": "session"}),
                 request=RequestParams(
-                    transport="zendriver",
-                    params={"q": "test query"},
-                    headers={"X-Test": "yes"},
-                    cookies={"CONSENT": "YES+"},
+                    content=Content(
+                        params={"q": "test query"},
+                        headers={"X-Test": "yes"},
+                        cookies={"CONSENT": "YES+"},
+                    ),
+                    policy=Policy(transport="zendriver"),
                 ),
             )
         assert via.call_args.args[0] == ("https://google.com/search?hl=en&q=test+query")
@@ -1379,7 +1446,7 @@ class TestBrowserBackend:
         ):
             body, session = fetch(
                 "https://walled.example/x",
-                request=RequestParams(transport="zendriver"),
+                request=RequestParams(policy=Policy(transport="zendriver")),
             )
         assert body == b"<html>rendered</html>"
         assert session.cookies == {"SID": "xyz"}  # session warmed
@@ -1400,7 +1467,7 @@ class TestBrowserBackend:
         ):
             fetch(
                 "https://walled.example/x",
-                request=RequestParams(transport="zendriver"),
+                request=RequestParams(policy=Policy(transport="zendriver")),
             )
         # A fresh (egress, domain) key is saved with the harvested cookies.
         store.save.assert_called_once()
@@ -1418,17 +1485,25 @@ class TestCurlThenZendriverBackend:
         with pytest.raises(
             ValueError, match="curl-then-zendriver backend supports only GET"
         ):
-            RequestParams(transport="curl-then-zendriver", method="POST")
+            RequestParams(
+                content=Content(method="POST"),
+                policy=Policy(transport="curl-then-zendriver"),
+            )
         with pytest.raises(
             ValueError, match="curl-then-zendriver backend cannot send a request"
         ):
-            RequestParams(transport="curl-then-zendriver", data={"a": "1"})
-        params = RequestParams(
-            transport="curl-then-zendriver",
-            validated_hosts=lambda h: ValidatedHost(host=h, ip="1.2.3.4"),
-        )
-        with pytest.raises(ValueError, match="validated_hosts"):
-            fetch("https://example.com", request=params)
+            RequestParams(
+                content=Content(data={"a": "1"}),
+                policy=Policy(transport="curl-then-zendriver"),
+            )
+        with pytest.raises(
+            ValueError,
+            match="curl-then-zendriver transport cannot honor 'raw_headers'",
+        ):
+            RequestParams(
+                content=Content(raw_headers=True),
+                policy=Policy(transport="curl-then-zendriver"),
+            )
 
     def test_curl_then_zendriver_returns_curl_body_without_touching_browser(
         self,
@@ -1441,7 +1516,7 @@ class TestCurlThenZendriverBackend:
         ):
             body, _ = fetch(
                 "https://ok.example/",
-                request=RequestParams(transport="curl-then-zendriver"),
+                request=RequestParams(policy=Policy(transport="curl-then-zendriver")),
             )
         assert body == b"curl body"
         via.assert_not_called()
@@ -1462,7 +1537,7 @@ class TestCurlThenZendriverBackend:
         ):
             body, _ = fetch(
                 "https://walled.example/",
-                request=RequestParams(transport="curl-then-zendriver"),
+                request=RequestParams(policy=Policy(transport="curl-then-zendriver")),
             )
         assert body == b"rendered"
         assert via.call_count == 1
@@ -1489,8 +1564,8 @@ class TestCurlThenZendriverBackend:
             body, _ = fetch(
                 "https://walled.example/",
                 request=RequestParams(
-                    transport="curl-then-zendriver",
-                    body_validator=validate_body,
+                    observe=Observe(body_validator=validate_body),
+                    policy=Policy(transport="curl-then-zendriver"),
                 ),
             )
 
@@ -1513,7 +1588,7 @@ class TestCurlThenZendriverBackend:
         ):
             fetch(
                 "https://walled.example/",
-                request=RequestParams(transport="curl-then-zendriver"),
+                request=RequestParams(policy=Policy(transport="curl-then-zendriver")),
             )
 
         remember.assert_called_once_with("walled.example")
@@ -1561,7 +1636,10 @@ class TestCurlThenZendriverBackend:
             patch("wesearch.fetch.fetch.zendriver_backend.fetch_zendriver") as via,
             pytest.raises(FetchError),
         ):
-            fetch("https://x/", request=RequestParams(transport="curl-then-zendriver"))
+            fetch(
+                "https://x/",
+                request=RequestParams(policy=Policy(transport="curl-then-zendriver")),
+            )
         via.assert_not_called()
 
 

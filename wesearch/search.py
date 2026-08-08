@@ -27,7 +27,14 @@ from wesearch.errors import (
     FetchError,
     PuzzleChallengeError,
 )
-from wesearch.fetch import RequestParams, Transport, fetch
+from wesearch.fetch import (
+    Content,
+    Policy,
+    RequestParams,
+    Retry,
+    Transport,
+    fetch,
+)
 from wesearch.lib.custom_json import (
     datetime_val,
     dict_val,
@@ -456,9 +463,9 @@ def searxng(
     body, _ = fetch(
         f"{base_url}/search?{params}",
         request=RequestParams(
-            headers=headers,
-            timeout_sec=timeout_sec,
-            transport=transport,
+            content=Content(headers=headers),
+            retry=Retry(timeout_sec=timeout_sec),
+            policy=Policy(transport=transport),
         ),
     )
     payload = cast("object", json.loads(body))
@@ -749,10 +756,9 @@ def duckduckgo(
     body, _ = fetch(
         f"{_DUCKDUCKGO_URL}?{params}",
         request=RequestParams(
-            headers=request_headers,
-            raw_headers=True,
-            retries=2,
-            transport=transport,
+            content=Content(headers=request_headers, raw_headers=True),
+            retry=Retry(retries=2),
+            policy=Policy(transport=transport),
         ),
     )
     html = body.decode("utf-8")

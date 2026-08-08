@@ -17,7 +17,7 @@ def lower_headers(kw: dict[str, Any]) -> dict[str, str]:
 def const_curl_session(stub: Any) -> Callable[..., Any]:
     """A ``curl_session`` replacement that always returns ``stub`` (typed)."""
 
-    def factory(*_args: object) -> Any:
+    def factory(*_args: object, **_kwargs: object) -> Any:
         return stub
 
     return factory

@@ -757,13 +757,13 @@ class TestSearchDuckduckgo:
         # The query rides in the URL, not a POST body: a POSTed query is dropped
         # and DDG serves its empty homepage. GET with q= returns real results.
         req = mock.call_args.kwargs["request"]
-        assert req.method == "GET"
-        assert req.data is None
+        assert req.content.method == "GET"
+        assert req.content.data is None
         url = mock.call_args.args[0]
         assert url.startswith("https://html.duckduckgo.com/html/?")
         assert "q=test" in url
         assert "kl=wt-wt" in url
-        assert req.headers == {
+        assert req.content.headers == {
             "User-Agent": "ddg-test-ua NSTNWV",
             "Accept": "*/*",
             "Sec-Fetch-Dest": "document",
@@ -773,11 +773,11 @@ class TestSearchDuckduckgo:
             "Accept-Language": "all,all-ALL;q=0.7",
             "Referer": "https://html.duckduckgo.com/html/",
         }
-        assert not req.cookies
+        assert not req.content.cookies
         # INF-025: the GSA mobile UA must be sent verbatim, without fetch's
         # default desktop Chrome sec-ch-ua headers.
-        assert req.raw_headers is True
-        assert req.retries == 2
+        assert req.content.raw_headers is True
+        assert req.retry.retries == 2
 
     def test_user_agent_is_process_stable_across_queries(self) -> None:
         # DDG's vqd anti-bot token is keyed to (query, UA); a UA that shifts
@@ -787,8 +787,8 @@ class TestSearchDuckduckgo:
         with _patch_fetch(return_value=_NO_RESULTS_DDG.encode()) as mock:
             duckduckgo("alpha")
             duckduckgo("beta")
-        ua_a = mock.call_args_list[0].kwargs["request"].headers["User-Agent"]
-        ua_b = mock.call_args_list[1].kwargs["request"].headers["User-Agent"]
+        ua_a = mock.call_args_list[0].kwargs["request"].content.headers["User-Agent"]
+        ua_b = mock.call_args_list[1].kwargs["request"].content.headers["User-Agent"]
         assert ua_a == ua_b
         assert ua_a.endswith("NSTNWV")
 
@@ -819,7 +819,7 @@ class TestHeadersArg:
     def test_searxng_custom_headers(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q", headers={"User-Agent": "custom/1.0"})
-        assert mock.call_args.kwargs["request"].headers == {
+        assert mock.call_args.kwargs["request"].content.headers == {
             "User-Agent": "custom/1.0",
         }
 
@@ -828,7 +828,7 @@ class TestHeadersArg:
             return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("q", headers={"User-Agent": "x"})
-        assert mock.call_args.kwargs["request"].headers == {
+        assert mock.call_args.kwargs["request"].content.headers == {
             "User-Agent": "x",
             "Accept": "*/*",
             "Sec-Fetch-Dest": "document",

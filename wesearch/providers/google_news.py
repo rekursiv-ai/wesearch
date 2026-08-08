@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Final, Literal
 from urllib.parse import urlparse
 
-from wesearch.fetch import RequestParams, Transport, ValidatedHosts, fetch
+from wesearch.fetch import Policy, RequestParams, fetch
 
 
 __all__ = [
@@ -37,19 +37,12 @@ def matches(url: str) -> bool:
     return urlparse(url).hostname == "news.google.com"
 
 
-def fetch_google_news(
-    url: str,
-    *,
-    transport: Transport = "auto",
-    validated_hosts: ValidatedHosts | None = None,
-) -> tuple[bytes, NewsPayload]:
+def fetch_google_news(url: str, *, policy: Policy) -> tuple[bytes, NewsPayload]:
     """Fetch a Google News URL via RSS when the path has a rewrite, else HTML.
 
     Args:
       url: A ``news.google.com`` URL.
-      transport: Retrieval transport forwarded to the HTTP layer.
-      validated_hosts: Optional SSRF resolver pinning the connect IP per host;
-        ``None`` leaves the fetch unpinned.
+      policy: Transport and trust forwarded to the HTTP layer.
 
     Returns:
       body: The RSS XML or the raw HTML bytes.
@@ -57,10 +50,7 @@ def fetch_google_news(
 
     """
     target = _rewrite(url) or url
-    body, _session = fetch(
-        target,
-        request=RequestParams(transport=transport, validated_hosts=validated_hosts),
-    )
+    body, _session = fetch(target, request=RequestParams(policy=policy))
     payload: NewsPayload = "rss" if urlparse(target).path.startswith("/rss") else "html"
     return body, payload
 

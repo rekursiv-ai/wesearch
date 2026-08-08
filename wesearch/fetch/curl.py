@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 from urllib.parse import urlparse
 
-import io
 import threading
 
 from wesearch.errors import FetchError
@@ -16,15 +15,12 @@ from wesearch.fetch.common import (
     _REDIRECT_STATUSES,
     Observer,
     ValidatedHost,
-    ValidatedHosts,
     apply_redirect,
     bracket_ipv6,
-    decompress,
-    decompress_error_body,
-    default_port,
-    join_headers,
+    pinned_host,
     redirect_target,
 )
+from wesearch.types.params import Trust
 
 
 if TYPE_CHECKING:
@@ -49,17 +45,30 @@ __all__ = [
     "set_session_cookies",
 ]
 
+# Pool identity: egress, registrable domain, impersonation target, SSRF pin,
+# and the port that pin applies to. The pin participates because
+# ``CurlOpt.RESOLVE`` is fixed when the Session is built.
+_SessionKey: TypeAlias = tuple[  # noqa: UP040 -- forward ref in a type alias
+    str, str, str, "ValidatedHost | None", int
+]
+
 # Live curl_cffi Sessions keyed by identity, so a session reuses one connection
 # across requests -- the connection continuity a real browser has, and which a
-# per-call request() (fresh TLS each time) lacks. Keyed on impersonate too.
+# per-call request() (fresh TLS each time) lacks. Keyed on impersonate and on
+# the SSRF pin, since both are fixed at construction.
 # A live pool of open connections, not a tunable.
-_curl_sessions: dict[tuple[str, str, str], cc_requests.Session[Response]] = {}
+_curl_sessions: dict[_SessionKey, cc_requests.Session[Response]] = {}
 # Guards every mutation of the live curl session pool.
 _curl_lock = threading.Lock()
 
 
 def curl_session(
-    egress: str, domain: str, impersonate: str
+    egress: str,
+    domain: str,
+    impersonate: str,
+    *,
+    pin: ValidatedHost | None = None,
+    port: int = 443,
 ) -> cc_requests.Session[Response]:
     """Return the pooled curl_cffi Session for an identity, creating it once.
 
@@ -70,15 +79,49 @@ def curl_session(
     so a warm-up GET to the apex carries its TLS handshake and Set-Cookie into a
     later request to the subdomain (a cold second connection is a bot tell that
     Scholar, in particular, budgets against).
+
+    ``pin`` fixes the connect IP via ``CurlOpt.RESOLVE``, so a validated host
+    cannot be re-resolved to a private address before the socket opens. It is
+    passed as a Session-level ``curl_options`` entry rather than set on
+    ``session.curl``: curl_cffi hands each thread its own handle by default, so
+    a handle-level pin is invisible to the worker thread that performs the
+    request (measured -- an off-thread request fails DNS outright), while
+    ``use_thread_local_curl=False`` shares one handle and breaks under
+    concurrency ("easy handle already used"). ``curl_options`` is applied per
+    request, so it is the only form that is both thread- and concurrency-safe.
+
+    Args:
+      egress: Public egress IP the identity is keyed to.
+      domain: Request hostname; coalesced to its registrable domain.
+      impersonate: curl_cffi TLS-impersonation target.
+      pin: Validated host/IP to pin the connection to, or ``None`` to let curl
+        resolve. A pinned session is pooled separately from an unpinned one --
+        the option cannot be changed on a live session without racing its
+        concurrent users.
+      port: Port the pin applies to; ``RESOLVE`` entries are per host:port.
+
+    Returns:
+      session: The pooled Session for this identity and pin.
+
     """
-    key = (egress, _registrable_domain(domain), impersonate)
+    key = (egress, _registrable_domain(domain), impersonate, pin, port)
     with _curl_lock:
         session = _curl_sessions.get(key)
         if session is None:
+            options = (
+                {
+                    curl_cffi.CurlOpt.RESOLVE: [
+                        f"{pin.host}:{port}:{bracket_ipv6(pin.ip)}"
+                    ]
+                }
+                if pin is not None
+                else {}
+            )
             session = cast(
                 "cc_requests.Session[Response]",
                 curl_cffi.requests.Session(
-                    impersonate=cast("BrowserTypeLiteral", impersonate)
+                    impersonate=cast("BrowserTypeLiteral", impersonate),
+                    curl_options=options,
                 ),
             )
             _curl_sessions[key] = session
@@ -157,12 +200,20 @@ def _registrable_domain(host: str) -> str:
 
 
 def close_curl_session(egress: str, domain: str, impersonate: str) -> None:
-    """Close and drop an identity's pooled Session (a burn ends the connection)."""
-    key = (egress, _registrable_domain(domain), impersonate)
+    """Close and drop an identity's pooled Sessions (a burn ends the connection).
+
+    Every pin and port for the identity is dropped, not one exact key: the pin
+    participates in the pool key, so matching on a single tuple would leave the
+    burned identity's other pinned sessions alive and the caller would keep
+    presenting the cookies that just got it blocked.
+    """
+    prefix = (egress, _registrable_domain(domain), impersonate)
     with _curl_lock:
-        session = _curl_sessions.pop(key, None)
-    if session is not None:
-        session.close()  # I/O outside the lock; the pop already removed it.
+        sessions = [
+            _curl_sessions.pop(key) for key in list(_curl_sessions) if key[:3] == prefix
+        ]
+    for session in sessions:
+        session.close()  # I/O outside the lock; the pops already removed them.
 
 
 def close_curl_sessions_except(egress: str | None) -> None:
@@ -244,52 +295,45 @@ def fetch_curl(
     impersonate: str,
     on_redirect: Callable[[str], None] | None,
     on_response: Observer | None,
-    validated_hosts: ValidatedHosts | None,
+    trust: Trust = "untrusted",
     session: cc_requests.Session[Response] | None = None,
+    reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
 ) -> bytes:
-    """Dispatch to the SSRF-pinned curl handle, or the plain one if unvalidated."""
-    if validated_hosts is not None:
-        # The pinned path owns a raw Curl handle for SSRF; no Session reuse.
-        return _fetch_curl_pinned(
-            url,
-            method=method,
-            headers=headers,
-            body=body,
-            timeout_sec=timeout_sec,
-            max_redirects=max_redirects,
-            impersonate=impersonate,
-            on_redirect=on_redirect,
-            on_response=on_response,
-            validated_hosts=validated_hosts,
-        )
-    return _fetch_curl_simple(
-        url,
-        method=method,
-        headers=headers,
-        body=body,
-        timeout_sec=timeout_sec,
-        max_redirects=max_redirects,
-        impersonate=impersonate,
-        on_redirect=on_redirect,
-        on_response=on_response,
-        session=session,
-    )
+    """Perform a curl request, following redirects manually.
 
+    ONE implementation for every request. SSRF pinning used to fork this into a
+    second raw-handle path that took no Session -- so choosing pinning silently
+    forfeited the pooled connection and its cookie jar, and the fork drifted
+    from this one twice (headers, then cookies). Pinning is now an option on the
+    pooled Session (see :func:`curl_session`), so there is nothing to diverge.
 
-def _fetch_curl_simple(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: Observer | None,
-    session: cc_requests.Session[Response] | None = None,
-) -> bytes:
-    """High-level curl path: ``requests.request`` with manual redirects."""
+    Args:
+      url: Fully-qualified URL.
+      method: HTTP method.
+      headers: Complete request headers, Cookie already merged.
+      body: Encoded request body, or ``None``.
+      timeout_sec: Per-request timeout.
+      max_redirects: Redirect budget; at 0 the final 3xx body is returned.
+      impersonate: curl_cffi TLS-impersonation target.
+      on_redirect: Called with each redirect target before it is followed.
+      on_response: Called with ``(status, headers, url)`` per hop.
+      trust: Provenance of the URL. Under ``"untrusted"`` a one-shot request
+        (no pooled ``session``) validates the host to a public address before
+        connecting; a pooled session was already validated and pinned when the
+        pool built it.
+      session: Pooled Session to reuse, or ``None`` for a one-shot request.
+      reseat: Called with the next hop's URL when a redirect crosses hosts,
+        returning the Session for that host. A pin is fixed per Session, so a
+        cross-host hop needs the pool entry for the NEW host; ``None`` keeps the
+        current session for every hop.
+
+    Returns:
+      content: The decoded response body.
+
+    Raises:
+      FetchError: On a non-success status, or a transport failure (status 0).
+
+    """
     # requests auto-decompresses .content, so no decompress call is needed.
     # Cookies are already in headers["Cookie"], so NO cookies= kwarg is passed
     # (curl would emit a second Cookie source -- verified both are sent).
@@ -298,6 +342,11 @@ def _fetch_curl_simple(
     )
     impers = cast("BrowserTypeLiteral", impersonate)
     while True:
+        # A keyless request has no pooled session to have been pinned at build
+        # time, so it validates here. Validation is per hop: a redirect can
+        # point at a private address, which is the classic SSRF bypass.
+        if session is None:
+            pinned_host(loop.url, trust)
         try:
             verb = cast("HttpMethod", loop.method)  # curl types verb as a Literal.
             resp = (
@@ -340,118 +389,15 @@ def _fetch_curl_simple(
         if loop.follow(
             status, resp_headers, on_response=on_response, on_redirect=on_redirect
         ):
+            # A pin is fixed per Session, so a hop onto a different host must
+            # move to that host's pool entry -- otherwise the new host would be
+            # fetched through the previous host's pin and fail to resolve.
+            if (
+                reseat is not None
+                and urlparse(loop.url).hostname != urlparse(current_url).hostname
+            ):
+                session = reseat(loop.url)
             continue
         if status >= 400:
             raise classify_http_error(current_url, status, resp_headers, content)
         return content
-
-
-def _fetch_curl_pinned(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: Observer | None,
-    validated_hosts: ValidatedHosts,
-) -> bytes:
-    """Low-level curl path: SSRF-pinned ``Curl`` handle, manual redirects."""
-    # The connect IP is pinned to validated_hosts(host).ip via CurlOpt.RESOLVE
-    # ("host:port:ip") so the socket hits exactly the validated address
-    # regardless of DNS, re-pinned on a cross-host redirect. Bodies arrive raw
-    # (no auto-decompression at this layer), so they are decompressed here.
-    # Bind the lazy curl_cffi symbols once at entry (materializes the module).
-    Curl, CurlError, CurlInfo, CurlOpt = (
-        curl_cffi.Curl,
-        curl_cffi.CurlError,
-        curl_cffi.CurlInfo,
-        curl_cffi.CurlOpt,
-    )
-    handle = Curl()
-    try:
-        loop = _CurlLoop(
-            url=url, method=method, headers=headers, body=body, remaining=max_redirects
-        )
-        # Cache the last resolution: a same-origin redirect must reuse it without
-        # re-invoking the resolver (the resolver contract, honored by the stdlib
-        # path). Keyed on (hostname, port) so only an origin change re-resolves.
-        resolved_key: tuple[str, int] | None = None
-        validated: ValidatedHost | None = None
-        while True:
-            parsed = urlparse(loop.url)
-            hostname = parsed.hostname or parsed.netloc
-            port = parsed.port or default_port(parsed.scheme)
-            if resolved_key != (hostname, port):
-                validated = validated_hosts(hostname)
-                resolved_key = (hostname, port)
-            assert validated is not None
-            write_buf = io.BytesIO()
-            header_buf = io.BytesIO()
-            handle.reset()
-            handle.setopt(CurlOpt.URL, loop.url.encode())
-            handle.setopt(CurlOpt.CUSTOMREQUEST, loop.method.encode())
-            handle.setopt(CurlOpt.TIMEOUT_MS, int(timeout_sec * 1000))
-            # Bracket a v6 pin: curl's RESOLVE is "host:port:ip" and an
-            # unbracketed IPv6 collides with those colon delimiters.
-            handle.setopt(
-                CurlOpt.RESOLVE,
-                [f"{hostname}:{port}:{bracket_ipv6(validated.ip)}"],
-            )
-            handle.setopt(
-                CurlOpt.HTTPHEADER,
-                [f"{k}: {v}".encode() for k, v in loop.headers.items()],
-            )
-            if loop.body is not None:
-                handle.setopt(CurlOpt.POSTFIELDS, loop.body)
-                handle.setopt(CurlOpt.POSTFIELDSIZE, len(loop.body))
-            handle.setopt(CurlOpt.WRITEDATA, write_buf)
-            handle.setopt(CurlOpt.HEADERDATA, header_buf)
-            handle.impersonate(impersonate)
-            try:
-                handle.perform()
-            except CurlError as e:
-                raise FetchError(loop.url, 0, {}, str(e).encode()) from e
-            status = int(_curl_response_code(handle, CurlInfo.RESPONSE_CODE))
-            resp_headers = _parse_raw_headers(header_buf.getvalue())
-            raw_body = write_buf.getvalue()
-            current_url = loop.url
-            if loop.follow(
-                status, resp_headers, on_response=on_response, on_redirect=on_redirect
-            ):
-                continue
-            if status >= 400:
-                raise classify_http_error(
-                    current_url,
-                    status,
-                    resp_headers,
-                    decompress_error_body(raw_body, resp_headers),
-                )
-            return decompress(
-                raw_body, resp_headers.get("content-encoding", "identity")
-            )
-    finally:
-        handle.close()
-
-
-def _curl_response_code(handle: object, info: object) -> int:
-    """Read an integer ``CurlInfo`` (e.g. response code) off a ``Curl`` handle."""
-    assert isinstance(handle, curl_cffi.Curl)
-    assert isinstance(info, curl_cffi.CurlInfo)
-    value = handle.getinfo(info)
-    assert isinstance(value, int)
-    return value
-
-
-def _parse_raw_headers(block: bytes) -> dict[str, str]:
-    """Parse a raw CRLF response-header block into a merged lowercase dict."""
-    pairs: list[tuple[str, str]] = []
-    for line in block.split(b"\r\n"):
-        if not line or b":" not in line:
-            continue
-        k, _, v = line.partition(b":")
-        pairs.append((k.decode("latin-1").strip(), v.decode("latin-1").strip()))
-    return join_headers(pairs)

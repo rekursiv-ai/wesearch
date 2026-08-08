@@ -75,28 +75,28 @@ class TestSearch:
 
     def test_query_sanitizes_comma_and_pipe(self) -> None:
         fetch = _search("deep, learning | attention")
-        flt = fetch.call_args.kwargs["request"].params["filter"]
+        flt = fetch.call_args.kwargs["request"].content.params["filter"]
         assert "title_and_abstract.search:deep  learning   attention" in flt
         assert "," not in flt.split("title_and_abstract.search:")[1]
         assert "|" not in flt
 
     def test_limit_caps_at_per_page_max(self) -> None:
         fetch = _search(limit=500)
-        assert fetch.call_args.kwargs["request"].params["per-page"] == 200
+        assert fetch.call_args.kwargs["request"].content.params["per-page"] == 200
 
     def test_limit_below_max_passthrough(self) -> None:
         fetch = _search(limit=10)
-        assert fetch.call_args.kwargs["request"].params["per-page"] == 10
+        assert fetch.call_args.kwargs["request"].content.params["per-page"] == 10
 
     def test_limit_none_requests_full_page(self) -> None:
         # With no limit the walker fetches one full page (the ceiling), not a
         # bare default page -- so ``per-page`` is present and equals the max.
         fetch = _search(limit=None)
-        assert fetch.call_args.kwargs["request"].params["per-page"] == 200
+        assert fetch.call_args.kwargs["request"].content.params["per-page"] == 200
 
     def test_filter_year_bounds_and_open_access(self) -> None:
         fetch = _search(year_from=2020, year_to=2023, open_access_only=True)
-        flt = fetch.call_args.kwargs["request"].params["filter"]
+        flt = fetch.call_args.kwargs["request"].content.params["filter"]
         assert "from_publication_date:2020-01-01" in flt
         assert "to_publication_date:2023-12-31" in flt
         assert "open_access.is_oa:true" in flt
@@ -106,14 +106,14 @@ class TestSearch:
     ) -> None:
         monkeypatch.setenv("OPENALEX_API_KEY", "secret")
         fetch = _search()
-        assert fetch.call_args.kwargs["request"].params["api_key"] == "secret"
+        assert fetch.call_args.kwargs["request"].content.params["api_key"] == "secret"
 
     def test_api_key_absent_when_env_unset(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
         fetch = _search()
-        assert "api_key" not in fetch.call_args.kwargs["request"].params
+        assert "api_key" not in fetch.call_args.kwargs["request"].content.params
 
 
 class TestHeaders:
@@ -389,7 +389,10 @@ class TestReferences:
         assert [r.title for r in records] == ["ref-a", "ref-b"]
         assert complete
         # Second call resolves the referenced ids via the ``openalex:`` filter.
-        assert "openalex:W10|W11" in fetch.call_args.kwargs["request"].params["filter"]
+        assert (
+            "openalex:W10|W11"
+            in fetch.call_args.kwargs["request"].content.params["filter"]
+        )
 
     def test_unresolved_ref_ids_mark_incomplete(self) -> None:
         # B1: the seed cites 2 works, but the batch resolve returns only 1 (the
@@ -476,7 +479,9 @@ class TestReferences:
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=1)
         assert not complete  # 3 referenced, only 1 requested
-        assert fetch.call_args.kwargs["request"].params["filter"] == "openalex:W10"
+        assert (
+            fetch.call_args.kwargs["request"].content.params["filter"] == "openalex:W10"
+        )
 
     def test_arxiv_seed_rejected(self) -> None:
         with pytest.raises(BackendError, match="DOIs only"):
@@ -512,7 +517,7 @@ class TestCitations:
         assert [r.title for r in records] == ["citer"]
         assert total == 500
         assert not complete  # 1 of 500 -> more remain
-        assert fetch.call_args.kwargs["request"].params["filter"] == "cites:W1"
+        assert fetch.call_args.kwargs["request"].content.params["filter"] == "cites:W1"
 
     def test_year_from_added_to_filter(self) -> None:
         resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
@@ -525,7 +530,7 @@ class TestCitations:
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             openalex.citations("doi", "10.1/x", limit=None, year_from=2020)
-        flt = fetch.call_args.kwargs["request"].params["filter"]
+        flt = fetch.call_args.kwargs["request"].content.params["filter"]
         assert "cites:W1" in flt
         assert "from_publication_date:2020-01-01" in flt
 
@@ -559,7 +564,7 @@ class TestCitations:
         assert total == 500
         assert not complete
         for call in fetch.call_args_list:
-            per_page = call.kwargs["request"].params.get("per-page")
+            per_page = call.kwargs["request"].content.params.get("per-page")
             assert per_page is None or per_page <= 200
 
     def test_limit_none_reports_honest_completeness(self) -> None:

@@ -17,6 +17,7 @@ import zstandard
 
 from wesearch.chrome.headers import chrome_client_hints
 from wesearch.errors import FetchError
+from wesearch.types.params import Trust
 
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "host_header",
     "join_headers",
     "origin",
+    "pinned_host",
     "public_host",
     "redirect_target",
     "rewrite_origin",
@@ -104,6 +106,40 @@ def public_host(hostname: str) -> ValidatedHost:
     # turns a servable page into a connection failure -- unlike an unpinned
     # client, which Happy-Eyeballs to v4.
     return ValidatedHost(host=host, ip=next((a for a in ips if ":" not in a), ips[0]))
+
+
+def pinned_host(url: str, trust: Trust) -> ValidatedHost | None:
+    """Resolve ``url``'s host under ``trust``; return the IP to pin, or ``None``.
+
+    The ONE place a trust level is interpreted, so no transport can decide for
+    itself what "untrusted" means. Under ``"untrusted"`` the host must resolve
+    to a public address (raising otherwise) and the resolved IP is returned so
+    the connection can be pinned to it -- a name that passes validation cannot
+    then be re-resolved to a private one before the socket opens. ``"internal"``
+    is the caller's explicit statement that it authored the URL, so no check and
+    no pin.
+
+    Args:
+      url: The URL whose host is being connected to. A redirect target is a URL
+        like any other and must be re-checked; skipping that is the classic SSRF
+        bypass.
+      trust: Provenance of the URL.
+
+    Returns:
+      pin: The validated host and the single public IP to connect to, or
+        ``None`` when the caller declared the URL internal.
+
+    Raises:
+      ValueError: When ``trust`` is ``"untrusted"`` and the host is missing,
+        unresolvable, or resolves to any non-public address.
+
+    """
+    if trust == "internal":
+        return None
+    hostname = urlparse(url).hostname
+    if not hostname:
+        raise ValueError(f"URL has no host: {url!r}.")
+    return public_host(hostname)
 
 
 # Internal per-hop response sink: (status, response headers, responding URL).
