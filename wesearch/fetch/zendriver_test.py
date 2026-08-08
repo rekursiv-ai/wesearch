@@ -61,13 +61,83 @@ class _FakeCookieJar:
         self.seeded = cookies
 
 
+def _main_frame_navigated() -> zendriver.cdp.page.FrameNavigated:
+    """A real ``FrameNavigated`` for the MAIN frame (``parent_id is None``).
+
+    The genuine CDP dataclass, not a look-alike: the transport guards on
+    ``isinstance`` (a live run delivered a foreign event type to the handler),
+    so a stand-in would satisfy the fake and be rejected in production -- the
+    exact direction a test must never fail in. Only the two fields the transport
+    reads carry meaning; the rest are the shape the class requires.
+    """
+    frame = zendriver.cdp.page.Frame(
+        id_=zendriver.cdp.page.FrameId("main"),
+        loader_id=zendriver.cdp.network.LoaderId("loader"),
+        url="https://walled.example/",
+        domain_and_registry="walled.example",
+        security_origin="https://walled.example",
+        mime_type="text/html",
+        secure_context_type=zendriver.cdp.page.SecureContextType.SECURE,
+        cross_origin_isolated_context_type=(
+            zendriver.cdp.page.CrossOriginIsolatedContextType.NOT_ISOLATED
+        ),
+        gated_api_features=[],
+        parent_id=None,
+    )
+    return zendriver.cdp.page.FrameNavigated(
+        frame=frame, type_=zendriver.cdp.page.NavigationType.NAVIGATION
+    )
+
+
 class _FakeTab:
-    def __init__(self, *, content: str, href: str) -> None:
-        self._content = content
+    """A tab that replays a scripted document sequence, driven by navigations.
+
+    ``documents`` is the measured Cloudflare handoff, one entry per main-frame
+    navigation, the last repeating forever. Live capture of one walled URL::
+
+        nav 1:   5516 bytes  challenge  <- the interstitial, fully loaded
+        (the interstitial's JS navigates)
+        nav 2: 380404 bytes  clear      <- the real page
+
+    The 386-byte ``readyState == "loading"`` phase between them is modelled by
+    ``parsing``: the body a read catches when it lands after the navigation
+    commits but before the document parses. A transport that harvests there
+    returns a ``<head>`` with the right title and no body, so the fake must be
+    able to hand that out or no test can catch it.
+    """
+
+    def __init__(
+        self,
+        *,
+        content: str,
+        href: str,
+        documents: list[str] | None = None,
+        parsing: str | None = None,
+    ) -> None:
+        self._documents = documents if documents is not None else [content]
+        self._parsing = parsing
         self._href = href
         self.closed = False
         self.navigations: list[str] = []
         self.commands: list[Any] = []
+        self.handlers: list[Any] = []
+        self.content_reads = 0
+        self._index = 0
+        # True between a navigation and its ready-state wait -- the window in
+        # which the new document exists but has not parsed.
+        self._is_parsing = False
+
+    def add_handler(self, event_type: Any, handler: Any) -> None:
+        del event_type
+        self.handlers.append(handler)
+
+    def _navigate_main_frame(self) -> None:
+        """Advance to the next document and notify the transport's handler."""
+        if self._index + 1 < len(self._documents):
+            self._index += 1
+        self._is_parsing = self._parsing is not None
+        for handler in self.handlers:
+            handler(_main_frame_navigated())
 
     async def send(self, command: Any) -> None:
         self.commands.append(command)
@@ -84,6 +154,7 @@ class _FakeTab:
         timeout: int = 10,  # noqa: ASYNC109 -- mirrors zendriver's Tab API.
     ) -> bool:
         del until, timeout
+        self._is_parsing = False  # Parsing finished; the full document is up.
         return True
 
     async def evaluate(self, expr: str) -> str:
@@ -91,7 +162,15 @@ class _FakeTab:
         return self._href
 
     async def get_content(self) -> str:
-        return self._content
+        self.content_reads += 1
+        if self._is_parsing and self._parsing is not None:
+            return self._parsing
+        body = self._documents[self._index]
+        # A challenge document replaces itself: schedule the handoff the way
+        # Chrome does, right after the wall has been observed once.
+        if self._index + 1 < len(self._documents):
+            self._navigate_main_frame()
+        return body
 
     async def close(self) -> None:
         self.closed = True
@@ -106,9 +185,13 @@ class _FakeBrowser:
         content: str = "<html>ok</html>",
         href: str = "",
         cookies: list[_FakeCookie] | None = None,
+        documents: list[str] | None = None,
+        parsing: str | None = None,
     ) -> None:
         self._content = content
         self._href = href
+        self._documents = documents
+        self._parsing = parsing
         self.cookies = _FakeCookieJar(cookies or [])
         self.stopped = False
         self.gets: list[str] = []
@@ -118,7 +201,12 @@ class _FakeBrowser:
     async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
         del new_tab
         self.gets.append(url)
-        self.last_tab = _FakeTab(content=self._content, href=self._href)
+        self.last_tab = _FakeTab(
+            content=self._content,
+            href=self._href,
+            documents=self._documents,
+            parsing=self._parsing,
+        )
         return self.last_tab
 
     async def stop(self) -> None:
@@ -469,13 +557,132 @@ def test_navigate_returns_rendered_page_without_semantic_classification(
             "https://example.com/",
             profile_dir=_PROFILE,
             egress="e",
-            timeout_sec=5.0,
+            # Small: this body IS challenge markup, so the settle poll waits out
+            # its whole budget (half the timeout) before giving up. The exact
+            # budget is irrelevant to what this asserts -- that the transport
+            # returns the page rather than classifying it -- so keep it cheap.
+            timeout_sec=0.2,
             headless=True,
             on_redirect=None,
         )
     )
 
     assert result.body == body.encode()
+
+
+def test_navigate_waits_out_a_cloudflare_interstitial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of the browser transport is clearing a JS challenge, and
+    # it captured the challenge instead. The interstitial reaches readyState
+    # "complete" on its own -- it IS a loaded document -- and only then does its
+    # JS navigate to the real page. Harvesting at the first "complete" returns
+    # the 5KB "Just a moment..." wall every time, so every Cloudflare-walled
+    # site failed through the one transport meant to clear it (measured live:
+    # 5516 bytes at complete, 380404 bytes after the handoff).
+    real = "<html><title>Real Page</title>body</html>"
+    browser = _FakeBrowser(
+        documents=["<html><title>Just a moment...</title></html>", real],
+    )
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://walled.example/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=30.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert result.body == real.encode(), (
+        "browser transport returned the Cloudflare interstitial, not the page "
+        "it exists to unwrap"
+    )
+
+
+def test_navigate_waits_for_the_new_document_to_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The second trap, and the subtler one. A main-frame navigation COMMITS the
+    # new document before it parses, so a read taken right after the event sees
+    # a bare <head>: challenge markup gone, correct <title>, no body. Live that
+    # was 386 bytes between the 5516-byte wall and the 380404-byte page -- and
+    # it looks like success, which is exactly why it needs its own test.
+    real = "<html><title>Real Page</title>the whole body</html>"
+    browser = _FakeBrowser(
+        documents=["<html><title>Just a moment...</title></html>", real],
+        parsing="<html><title>Real Page</title></html>",
+    )
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://walled.example/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=30.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert result.body == real.encode(), (
+        "harvested the document mid-parse: right title, empty body"
+    )
+
+
+def test_navigate_returns_promptly_when_no_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The settle wait must cost an unchallenged page nothing: a plain document
+    # is harvested on the FIRST read, with no re-poll. Otherwise every fetch
+    # pays the challenge budget.
+    browser = _FakeBrowser(content="<html><title>Plain</title>ok</html>")
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://example.com/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=30.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert result.body == b"<html><title>Plain</title>ok</html>"
+    assert browser.last_tab is not None
+    assert browser.last_tab.content_reads == 1
+
+
+def test_navigate_gives_up_on_an_unclearable_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A challenge that never clears (a real block, not an interstitial) must
+    # return what Chrome rendered so the caller's classifier raises its specific
+    # BotDetectionError -- never hang until the fetch timeout.
+    walled = "<html><title>Just a moment...</title></html>"
+    browser = _FakeBrowser(content=walled)
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://walled.example/",
+            profile_dir=_PROFILE,
+            egress="e",
+            # Deliberately small: giving up is what this asserts, and the budget
+            # is real time. A production-sized 30s would sleep 15s per run.
+            timeout_sec=0.2,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert result.body == walled.encode()
 
 
 def test_navigate_allows_embedded_captcha_on_rendered_page(
@@ -508,7 +715,7 @@ def test_navigate_closes_tab_after_returning_rendered_page(
             "https://walled.example/",
             profile_dir=_PROFILE,
             egress="e",
-            timeout_sec=5.0,
+            timeout_sec=0.2,  # An unclearable wall; see the note above.
             headless=True,
             on_redirect=None,
         )

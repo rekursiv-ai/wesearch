@@ -248,6 +248,24 @@ def _extract_text(body: bytes, *, kind: str, method: HttpMethod) -> str:
         content,
         include_links=True,
         include_tables=True,
+        # Emits a YAML front-matter block (title, url, description, date,
+        # license) ahead of the body. Two reasons, neither cosmetic:
+        #
+        # 1. It recovers substance the body extraction drops. trafilatura scores
+        #    article-shaped prose, so a page whose content is a short fragment
+        #    loses it -- every Merriam-Webster entry returned the subscription
+        #    advert and discarded the definition, which the page states verbatim
+        #    in its meta description. Since that advert is non-empty, the
+        #    ``or content`` fallback below never fired: the tool reported success
+        #    on the wrong text. Eight other option combinations were measured
+        #    (bare defaults, favor_recall, no_fallback, prune_xpath=None, ...);
+        #    this is the only one that recovers it.
+        # 2. It supplies the page URL, so relative links resolve absolute
+        #    (``](#comment37161)`` -> ``](https://host#comment37161)``) instead
+        #    of emitting fragments no reader can follow.
+        #
+        # Cost is ~200-580 chars of front-matter per page against a 400k cap.
+        with_metadata=True,
     )
     return extracted or content
 
