@@ -5,6 +5,18 @@ All notable wesearch changes are documented here. This project follows
 
 ## Unreleased
 
+### Added
+
+- `fetch-zendriver URL` console script. A blocked fetch already told the user
+  to run it; now a default install has it.
+
+### Removed
+
+- The `extract` extra. Article extraction (trafilatura) and RSS/Atom parsing
+  (defusedxml) are core dependencies, so a plain `pip install wesearch` now
+  gets them. `wesearch[extract]` still installs -- an unknown extra is ignored,
+  not an error -- but names nothing; drop the suffix.
+
 ## 0.1.8 - 2026-08-04
 
 ### Added
