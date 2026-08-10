@@ -1,6 +1,6 @@
 [project]
 name = "wesearch"
-version = "0.1.9"
+version = "0.1.10"
 description = "Web search, fetch, and paper-research toolkit."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,25 +23,29 @@ dependencies = [
     # web client / scraping
     "beautifulsoup4",
     "curl-cffi>=0.15.0",
+    "defusedxml>=0.7.1",
+    "html2text>=2025.4.15",
+    "markdownify>=1.2.3",
+    "trafilatura",
     "zendriver>=0.15.5",
+    # containers
+    "wrapt",
     # compression (Content-Encoding decode)
     "brotli",
     "zstandard",
-    # lazy imports
-    "wrapt",
 ]
 
 [project.optional-dependencies]
-# Article-text extraction (trafilatura) and RSS/Atom parsing (defusedxml) that
-# web_fetch uses. A separate extra so a consumer wanting the fetch/extract
-# capability (e.g. sagent) pulls it WITHOUT the MCP server dependency.
-extract = ["trafilatura", "defusedxml>=0.7.1"]
-# The MCP server (wesearch-mcp) exposes wesearch tools to agent clients; its
-# web_fetch tool needs extraction, so mcp includes the extract extra.
-mcp = ["mcp>=2.0.0", "wesearch[extract]"]
+# The MCP server (wesearch-mcp) exposes wesearch tools to agent clients. The SDK
+# is the only thing it adds; everything its tools call is a core dependency.
+mcp = ["mcp>=2.0.0"]
 
 [project.scripts]
 wesearch-mcp = "wesearch.mcp_server:main"
+# BotDetectionError.recovery tells the user to run `fetch-zendriver <url>`; that
+# guidance ships, so the command must exist in a default install. zendriver is a
+# core dependency, so this needs no extra.
+fetch-zendriver = "wesearch.fetch.transport.zendriver:main"
 
 [dependency-groups]
 # uv sync --all-groups
@@ -55,6 +59,9 @@ lint = [
     "pre-commit>=4.6",
     "ruff",
 ]
+stubs = [
+    "lxml-stubs>=0.5.1",
+]
 test = [
     "pytest-testmon>=2.1",
     "pytest-timeout>=2.4.0",
@@ -67,6 +74,7 @@ typecheck = [
 ]
 "pre-commit" = [
     {include-group = "lint"},
+    {include-group = "stubs"},
     {include-group = "test"},
     {include-group = "typecheck"},
 ]
