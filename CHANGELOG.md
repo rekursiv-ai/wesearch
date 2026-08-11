@@ -5,13 +5,44 @@ All notable wesearch changes are documented here. This project follows
 
 ## Unreleased
 
+## 0.1.10 - 2026-08-11
+
 ### Added
 
+- Selectable HTML extractors. `Policy.extractor` picks `trafilatura` (the
+  default, article body only), `html2text` (every text node), `markdownify`
+  (the document's elements, keeping nested structure), or `raw`. The
+  article-shaped assumption behind trafilatura is wrong for a dictionary
+  entry or a Q&A thread, where it returned plausible output with the
+  substance missing.
 - `fetch-zendriver URL` console script. A blocked fetch already told the user
   to run it; now a default install has it.
+- `wesearch.paper.render`: one rendering of a paper or author record, text and
+  structured. The tool and MCP surfaces each had their own, and they drifted.
+
+### Changed
+
+- Modules are grouped by what they do, so several import paths moved:
+  `wesearch.errors` to `wesearch.types.errors`, `wesearch.search` to a package
+  (`wesearch.search.search`, `.searxng`, `.duckduckgo`, `.custom_types`),
+  `wesearch.providers` to `wesearch.fetch.providers`, the transports to
+  `wesearch.fetch.transport`, and `wesearch.mcp_server` to
+  `wesearch.mcp.server`.
+- The cookie jar is per-origin rather than flat, so a redirect no longer
+  leaks the first host's cookies to the second.
+
+### Fixed
+
+- `Retry` rejects a non-finite `timeout_sec`. NaN failed every comparison and
+  so passed the range check, then reached the socket and browser timeout APIs
+  and removed the ceiling the class exists to impose.
+- `abstract_chars=0` -- the plainest way to ask for no abstract -- raises
+  instead of returning the full one.
 
 ### Removed
 
+- `search_web` from `wesearch.web`. Call `wesearch.search.search` directly;
+  the wrapper only flattened typed results to dicts.
 - The `extract` extra. Article extraction (trafilatura) and RSS/Atom parsing
   (defusedxml) are core dependencies, so a plain `pip install wesearch` now
   gets them. `wesearch[extract]` still installs -- an unknown extra is ignored,
