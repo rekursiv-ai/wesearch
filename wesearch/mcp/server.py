@@ -46,7 +46,9 @@ from wesearch.paper import (
 )
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
+from wesearch.search.custom_types import SearchBackends
 from wesearch.search.search import search as web_search_fn
+from wesearch.search.searxng import SearxngCategory
 from wesearch.types.params import Extractor, Policy, Transport
 from wesearch.web import fetch_web
 
@@ -217,16 +219,27 @@ def author_papers(
 def web_search(
     query: str,
     num_results: int = 10,
-    backend: Literal["duckduckgo", "searxng"] | None = None,
+    backend: SearchBackends | None = None,
+    categories: SearxngCategory = "general",
+    transport: Transport = "auto",
 ) -> list[dict[str, str]]:
     """Web search. Omitting ``backend`` takes this build's default, which is
     DuckDuckGo in the public package. Pass ``backend="searxng"`` explicitly for
     a SearXNG instance; it reads ``SEARXNG_URL`` and fails without it.
+    ``categories`` selects a SearXNG result tab (science/images/videos/news/
+    map/music/it/files) and requires the SearXNG backend. ``transport`` picks
+    the retrieval path; see the ``web_fetch`` tool for the values.
     """
     # Deliberately not env-sniffing here: nothing in the dispatch path inspects
     # SEARXNG_URL, so a docstring promising "SearXNG when configured" described
     # a behavior no build had.
-    results = web_search_fn(query, backend=backend, num_results=num_results)
+    results = web_search_fn(
+        query,
+        backend=backend,
+        num_results=num_results,
+        categories=categories,
+        transport=transport,
+    )
     return [{"url": r.url, "title": r.title, "snippet": r.snippet} for r in results]
 
 
@@ -234,20 +247,24 @@ def web_search(
 def web_fetch(
     url: str,
     max_chars: int = 8000,
-    browser: bool = False,
-    extractor: Extractor = "html2text",
+    transport: Transport = "auto",
+    extractor: Extractor = "trafilatura",
 ) -> dict[str, object]:
-    """Fetch a page and return its extracted text. Set browser=true to route
-    through headless Chrome when a site blocks plain HTTP clients (slower;
-    needs a local Chrome/Chromium). ``extractor`` picks how the page becomes
-    text: ``html2text`` (default) keeps every text node, ``markdownify``
-    converts the document's elements instead (keeping nested lists and tables),
-    ``trafilatura`` returns only the scored article body, ``raw`` the HTML
-    source.
+    """Fetch a page and return its extracted text. ``transport`` picks the
+    retrieval path: ``auto`` (default) tries curl and escalates to headless
+    Chrome when a site bot-blocks it, ``curl`` the impersonated HTTP client,
+    ``zendriver`` a real browser (slower; needs a local Chrome/Chromium),
+    ``curl-then-zendriver`` the explicit ladder, ``stdlib`` the reference
+    client. ``extractor`` picks how the page becomes text: ``trafilatura``
+    (default) returns only the scored article body -- smallest, but it drops
+    the substance of any page that is not article-shaped (a dictionary entry,
+    a Q&A thread) -- ``html2text`` keeps every text node, ``markdownify``
+    converts the document's elements instead (keeping nested lists and
+    tables), and ``raw`` the HTML source. Re-fetch with ``html2text`` when the
+    answer you expected is missing.
     """
     if max_chars < 1:
         raise ValueError(f"'max_chars' must be >= 1, got {max_chars}.")
-    transport: Transport = "curl-then-zendriver" if browser else "auto"
     # Through fetch_web, not fetch: this tool hand-rolled a BeautifulSoup text
     # dump for a while, which meant the MCP surface silently missed the provider
     # dispatch (Reddit/Google News/X), RSS and Atom rendering, the reader-proxy

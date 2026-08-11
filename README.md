@@ -79,9 +79,9 @@ wesearch/
 │   │   ├── zendriver.py opt-in real-Chrome backend for JS-gated pages
 │   │   └── transport_routing.py  per-domain transport selection
 │   ├── extractor/   how a fetched page becomes text
-│   │   ├── html2text.py   every text node as Markdown (the default)
+│   │   ├── html2text.py   every text node as Markdown
 │   │   ├── markdownify.py the document's elements as Markdown
-│   │   ├── trafilatura.py the scored article body only
+│   │   ├── trafilatura.py the scored article body only (the default)
 │   │   └── raw.py         the source, untouched
 │   ├── providers/   per-site fetch strategies (reddit, google_news, x, ...)
 │   └── challenge.py bot-challenge detection and classification

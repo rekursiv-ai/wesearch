@@ -46,7 +46,10 @@ def test_fetch_web_html_path_extracts() -> None:
     ):
         result = fetch_web("https://example.com")
     assert isinstance(result, WebFetchResult)
-    assert result.text.strip() == "Hi"
+    # Containment, not equality: the default trafilatura prepends a YAML
+    # metadata block, and this test is about the dispatch route, not the
+    # extractor's output shape.
+    assert "Hi" in result.text
     assert result.kind == _KIND_HTML
     assert result.url == "https://example.com"
     assert not result.truncated
@@ -65,7 +68,7 @@ def test_empty_extraction_does_not_fall_back_to_raw_markup() -> None:
             "wesearch.web.fetch_with_reader_fallback",
             return_value=(b"<html><body>raw fallback</body></html>", False),
         ),
-        patch.dict("wesearch.web._EXTRACTORS", {"html2text": _extract_nothing}),
+        patch.dict("wesearch.web._EXTRACTORS", {"trafilatura": _extract_nothing}),
     ):
         result = fetch_web("https://example.com")
     assert result.text == ""
@@ -188,7 +191,7 @@ def test_fetch_web_google_news_html_payload() -> None:
     ):
         result = fetch_web("https://news.google.com/articles/xyz")
     assert result.kind == _KIND_HTML
-    assert result.text.strip() == "article"
+    assert "article" in result.text
 
 
 def test_fetch_web_x_routes_to_markdown() -> None:
@@ -318,7 +321,7 @@ def test_fetch_body_post_maps_to_html_kind() -> None:
 def test_extract_text_markdown_kind_returns_as_is() -> None:
     """Markdown kind (reader-proxy output) skips extraction entirely."""
     md = b"# Title\n\nReader proxy returned this verbatim.\n"
-    with patch.dict("wesearch.web._EXTRACTORS", {"html2text": _extract_wrong}):
+    with patch.dict("wesearch.web._EXTRACTORS", {"trafilatura": _extract_wrong}):
         out = _extract_text(md, kind=_KIND_MARKDOWN)
     assert "# Title" in out
     assert "WRONG" not in out

@@ -264,7 +264,7 @@ class Policy:
     """
 
     transport: Transport = "auto"
-    extractor: Extractor = "html2text"
+    extractor: Extractor = "trafilatura"
     trust: Trust = "untrusted"
 
 

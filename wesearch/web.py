@@ -114,7 +114,7 @@ def fetch_web(
     POST bodies go through a direct :func:`wesearch.fetch.fetch`. The bytes
     are then rendered by kind: an RSS/Atom feed to markdown, reader-proxy
     markdown as-is, Reddit JSON via the comment/listing formatters, and HTML via
-    ``policy.extractor`` (``html2text`` by default).
+    ``policy.extractor`` (``trafilatura`` by default).
 
     Args:
       url: Target URL to fetch.
@@ -129,7 +129,7 @@ def fetch_web(
       policy: Transport, extractor, and trust, forwarded into every underlying
         fetch (providers, reader-proxy ladder, and the direct POST path).
         Defaults to the safe ``untrusted`` level, which validates each host to a
-        public address before connecting, and to the ``html2text`` extractor.
+        public address before connecting, and to the ``trafilatura`` extractor.
 
     Returns:
       result: A :class:`WebFetchResult` with the extracted text, the fetched
@@ -223,7 +223,7 @@ def _extract_text(
     *,
     kind: str,
     url: str = "",
-    extractor: Extractor = "html2text",
+    extractor: Extractor = "trafilatura",
 ) -> str:
     """Extract result text from a response body (unbounded; caller caps).
 
