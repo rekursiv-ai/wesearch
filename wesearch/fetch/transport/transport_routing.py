@@ -137,11 +137,21 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
     )
     try:
         fcntl.flock(file_descriptor, fcntl.LOCK_EX)
-        # A corrupt cache is discarded and rewritten rather than raising. The
-        # read path already degrades to empty on non-UTF-8, so raising here
-        # would leave one bad byte permanently blocking every future write with
-        # no way back except deleting the file by hand.
-        existing = _read_all(file_descriptor).decode(errors="replace")
+        # A corrupt cache is DISCARDED and rewritten rather than raising: the
+        # read path degrades to empty on non-UTF-8, so raising here would leave
+        # one bad byte permanently blocking every future write with no way back
+        # except deleting the file by hand.
+        #
+        # Discarded whole, not per-line: decoding with errors="replace" turned
+        # bad bytes into U+FFFD and then PERSISTED those as domains, so the file
+        # accumulated junk the read path would have rejected outright.
+        try:
+            existing = _read_all(file_descriptor).decode()
+        except UnicodeDecodeError:
+            logger.warning(
+                "Discarding undecodable Zendriver domain list at %s.", target
+            )
+            existing = ""
         domains = {
             value for line in existing.splitlines() if (value := _normalize(line))
         }

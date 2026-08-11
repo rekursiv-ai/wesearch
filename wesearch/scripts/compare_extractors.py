@@ -10,8 +10,10 @@ Compare HTML-to-text converters on real pages: how much they cut, what they lose
 is small AND keeps the words. Those pull in opposite directions, and one number
 hides which one a change traded away -- so every converter is scored twice:
 
-  compression: output characters over the page's full visible text. Lower is
-    cheaper. A converter that returns everything scores 1.0.
+  compression: output characters over the RAW page. Lower is cheaper. The raw
+    page is the denominator because that is what a caller pays to send, and
+    because it is independent of every candidate -- scoring against the visible
+    text made the text dump its own contestant, unbeatable by construction.
   recall: share of the page's visible word 5-grams the output still contains.
     Lower means content was dropped. This is the honest cost of compression.
 
@@ -100,7 +102,11 @@ class Score:
         every real n-gram was in there somewhere. Precision alone rewards
         returning one correct sentence and nothing else. Reported as ``1 - F1``
         so this column and ``compression`` both read smaller-is-better.
-      missing_probes: Required strings absent from the output.
+      missing_probes: Required strings absent from the output. Hand-picked
+        CONTENT, so this is the one fidelity signal blind to boilerplate: the
+        n-gram distortion above counts dropping a nav menu as loss, which
+        flatters a converter that keeps chrome and punishes an extractor for
+        doing its job. A converter is only trustworthy when this is empty.
       seconds: Wall-clock conversion time.
 
     """
@@ -122,42 +128,84 @@ CORPUS: tuple[Page, ...] = (
     Page(
         url="https://www.merriam-webster.com/dictionary/agent",
         transport="zendriver",
-        probes=("\u02c8\u0101-j\u0259nt", "one that acts or exerts power"),
+        probes=(
+            "\u02c8\u0101-j\u0259nt",
+            "one that acts or exerts power",
+            "an oxidizing agent",
+            "a theatrical agent",
+            "crown agent",
+            "a means or instrument by which a guiding intelligence",
+        ),
     ),
     Page(
         url="https://www.britannica.com/dictionary/agent",
         transport="zendriver",
-        probes=("e\u026a\u02a4\u0259nt", "a person who does business for another"),
+        probes=(
+            "e\u026a\u02a4\u0259nt",
+            "a person who does business for another",
+            "real estate agent",
+            "a person who tries",
+        ),
     ),
     Page(
         url="https://en.wikipedia.org/wiki/Transformer_(deep_learning_architecture)",
-        probes=("attention mechanism", "feedforward"),
+        probes=("attention mechanism", "feedforward", "RMSNorm", "LayerNorm"),
     ),
     Page(
         url="https://peps.python.org/pep-0008/",
-        probes=("Use 4 spaces per indentation level",),
+        probes=(
+            "Use 4 spaces per indentation level",
+            "Limit all lines to a maximum of 79 characters",
+            "no attribute is really private",
+        ),
     ),
-    Page(url="https://arxiv.org/abs/1706.03762", probes=("Attention Is All You Need",)),
+    Page(
+        url="https://arxiv.org/abs/1706.03762",
+        probes=(
+            "Attention Is All You Need",
+            "dominant sequence transduction models",
+            "15 pages, 5 figures",
+        ),
+    ),
     Page(
         url=(
             "https://stackoverflow.com/questions/11227809/"
             "why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array"
         ),
-        probes=("branch predictor", "Answers"),
+        probes=(
+            "branch predictor",
+            "Answers",
+            "Bit shifting is",
+            "The processor will get its",
+        ),
     ),
-    Page(url="https://x.com/elonmusk", transport="zendriver", probes=("Followers",)),
+    Page(
+        url="https://x.com/elonmusk",
+        transport="zendriver",
+        probes=("Followers", "Terafab", "Joined June 2009"),
+    ),
     Page(
         url="https://www.reddit.com/r/Python/top/?t=year",
         transport="zendriver",
-        probes=("r/Python",),
+        probes=("r/Python", "Pycon US 2025"),
     ),
     Page(
         url="https://www.amazon.com/Echo-Dot-5th-Gen-Charcoal/dp/B09B8V1LZ3",
         transport="zendriver",
-        probes=("Echo Dot", "Alexa"),
+        probes=("Echo Dot", "Alexa", "About this item"),
     ),
-    Page(url="https://blog.pragmaticengineer.com/", probes=()),
-    Page(url="https://news.ycombinator.com/item?id=1", probes=("Y Combinator",)),
+    Page(
+        url="https://blog.pragmaticengineer.com/",
+        probes=("The Pragmatic Engineer", "Section 174"),
+    ),
+    Page(
+        url="https://news.ycombinator.com/item?id=1",
+        probes=(
+            "Y Combinator",
+            "the rising star of venture capital",
+            "Sandhill Road",
+        ),
+    ),
 )
 
 
@@ -269,6 +317,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     """
     args = _parse_args(argv)
+    # Validated before any fetch: an unrecognized name used to filter down to
+    # nothing, fetch the whole corpus anyway, print an empty table, and exit 0
+    # -- a typo read as "every converter is perfect".
+    unknown = sorted(set(args.converter) - set(converters()))
+    if unknown:
+        print(f"Unknown converter(s): {', '.join(unknown)}.")  # noqa: T201 -- CLI.
+        print(f"Available: {', '.join(converters())}.")  # noqa: T201 -- CLI.
+        return 2
+    missing_urls = sorted(set(args.url) - {p.url for p in CORPUS})
+    if missing_urls:
+        print(f"URL(s) not in the corpus: {', '.join(missing_urls)}.")  # noqa: T201 -- CLI.
+        return 2
     pages = [p for p in CORPUS if not args.url or p.url in args.url]
     names = [n for n in converters() if not args.converter or n in args.converter]
     rows: list[tuple[Page, list[Score]]] = []
@@ -341,17 +401,23 @@ def _print_table(
     is only good when its column is low in BOTH halves; either half alone ranks
     an extractor that returned nothing first.
     """
-    header = ["page", *(f"{n} c" for n in names), *(f"{n} d" for n in names)]
+    header = [
+        "page",
+        *(f"{n} c" for n in names),
+        *(f"{n} d" for n in names),
+        *(f"{n} p" for n in names),
+    ]
     print("| " + " | ".join(header) + " |")  # noqa: T201 -- CLI output.
     print("|" + "|".join(["---"] * len(header)) + "|")  # noqa: T201 -- CLI output.
     for page, scores in rows:
         by_name = {s.name: s for s in scores}
         cells = [_page_label(page)]
         cells += [f"{by_name[n].compression:.2f}" for n in names]
+        cells += [f"{by_name[n].distortion:.2f}" for n in names]
         cells += [
-            f"**{by_name[n].distortion:.2f}**"
+            f"**{len(by_name[n].missing_probes)}/{len(page.probes)}**"
             if by_name[n].missing_probes
-            else f"{by_name[n].distortion:.2f}"
+            else f"0/{len(page.probes)}"
             for n in names
         ]
         print("| " + " | ".join(cells) + " |")  # noqa: T201 -- CLI output.
@@ -360,7 +426,9 @@ def _print_table(
         f"`d` = distortion: `1 - F1` of word 5-grams against the page's visible\n"
         f"text; lower is truer. `traf-txt` IS that text, so its `d` is 0.00 by\n"
         f"construction -- it is the yardstick, not a contestant.\n"
-        f"**bold** marks a converter that dropped a required probe string.\n"
+        f"`p` = content probes LOST over probes checked; **bold** = any loss.\n"
+        f"Prefer `p` over `d` when they disagree: `d` cannot tell a dropped nav\n"
+        f"menu from a dropped paragraph, and the probes are hand-picked content.\n"
         f"{len(rows)} pages, {len(names)} converters.\n"
         f"\n**These numbers do not decide anything on their own. READ THE OUTPUT.**\n"
         f"Every converter's text is in `{samples}`\n"

@@ -752,11 +752,10 @@ class TestFetchSession:
     def test_defaults_are_empty_and_frozen(self) -> None:
         session = FetchSession()
         assert session.impersonate == "chrome"
-        assert session.egress_ip == ""
         assert dict(session.cookies) == {}
         assert dict(session.accept_ch) == {}
         with pytest.raises(AttributeError):
-            session.egress_ip = "1.2.3.4"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]
+            session.impersonate = "firefox"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_with_cookies_returns_a_merged_copy(self) -> None:
         base = FetchSession(cookies={"https://x.com": {"a": "1"}})
@@ -782,11 +781,6 @@ class TestFetchSession:
             "https://x.com", frozenset({"sec-ch-ua-arch"})
         )
         assert session.accept_ch["https://x.com"] == frozenset({"sec-ch-ua-arch"})
-
-    def test_with_egress_pins_and_is_idempotent(self) -> None:
-        session = FetchSession().with_egress("9.9.9.9")
-        assert session.egress_ip == "9.9.9.9"
-        assert session.with_egress("9.9.9.9") is session
 
     def test_fetch_session_returns_body_and_session(self) -> None:
         with patch(
@@ -1004,6 +998,39 @@ class TestRedirectIdentityScoping:
             )
         next_headers = next(h for url, h in sent if url == "https://a.com/next")
         assert next_headers.get("cookie") == "SID=secret"
+
+    def test_cross_origin_redirect_cookies_land_on_their_own_origin(self) -> None:
+        """A redirect target's Set-Cookie warms THAT origin, not the requester's.
+
+        They were discarded outright while the jar was flat, because the only
+        alternative then was mis-attributing them to the requesting origin. The
+        per-origin jar can express the browser behaviour, so it should.
+        """
+
+        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+            del kw
+            resp = Mock()
+            if url == "https://a.com/start":
+                resp.status_code = 302
+                resp.headers = {"location": "https://b.com/next"}
+                resp.content = b""
+            else:
+                resp.status_code = 200
+                resp.headers = {"set-cookie": "B=1; Path=/"}
+                resp.content = b"done"
+            resp.url = url
+            return resp
+
+        with (
+            patch("curl_cffi.requests.request", side_effect=fake_request),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+        ):
+            _body, session = fetch(
+                "https://a.com/start",
+                request=RequestParams(policy=Policy(transport="curl")),
+            )
+        assert session.cookies_for("https://b.com/x") == {"B": "1"}
+        assert session.cookies_for("https://a.com/x") == {}
 
     def test_cross_origin_redirect_drops_extended_hints(self) -> None:
         # a.com's opted-in extended client hints must NOT leak to b.com.

@@ -35,7 +35,7 @@ import pytest
 
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.lib.userdirs import state_dir
-from wesearch.search.search import (
+from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
     ImageResult,
@@ -44,12 +44,11 @@ from wesearch.search.search import (
     PackageResult,
     PaperResult,
     SearchResult,
-    SearxngCategory,
     TorrentResult,
     VideoResult,
-    duckduckgo,
-    searxng,
 )
+from wesearch.search.duckduckgo import duckduckgo
+from wesearch.search.searxng import SearxngCategory, searxng
 from wesearch.types.errors import BotDetectionError, FetchError
 
 

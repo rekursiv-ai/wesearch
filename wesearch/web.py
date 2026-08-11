@@ -151,7 +151,6 @@ def fetch_web(
     text = _extract_text(
         body,
         kind=kind,
-        method=method,
         url=url,
         extractor=(policy or Policy()).extractor,
     )
@@ -223,7 +222,6 @@ def _extract_text(
     body: bytes,
     *,
     kind: str,
-    method: HttpMethod,
     url: str = "",
     extractor: Extractor = "html2text",
 ) -> str:
@@ -233,8 +231,10 @@ def _extract_text(
       - ``_KIND_RSS``: parse as RSS 2.0 / Atom XML and format as markdown.
       - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already rendered
         to markdown; re-extracting it would strip structure).
-      - ``_KIND_HTML``: the ``extractor`` named by the policy, with a
-        raw-content fallback when it returns nothing.
+      - ``_KIND_HTML``: the ``extractor`` named by the policy. Its output is
+        returned even when empty: ``Extract`` permits that, and substituting the
+        raw markup would hand a model a page of HTML in place of the text it
+        asked for.
     """
     content = body.decode("utf-8", errors="replace")
 
@@ -242,13 +242,17 @@ def _extract_text(
         return _format_rss(body)
     if kind == _KIND_MARKDOWN:
         return content
-    if method == "POST" or content.lstrip().startswith(("{", "[")):
+    # A JSON body is returned verbatim -- it is already structured text, and an
+    # HTML extractor would mangle it. The METHOD does not decide this: a POST
+    # that answers with HTML gets the same extraction a GET would, since the
+    # caller asked for a page rendered as text either way.
+    if content.lstrip().startswith(("{", "[")):
         return content
     # Verifying a change to this call: sagent's WebFetch caches GET results for
-    # 15 minutes per (transport, url), so it replays the pre-change text and a
-    # working fix reads as a failed one. Prove it via fetch_web in a FRESH
-    # process, not by re-running the tool.
-    return _EXTRACTORS[extractor](content, url=url) or content
+    # 15 minutes per (transport, url, extractor), so it replays the pre-change
+    # text and a working fix reads as a failed one. Prove it via fetch_web in a
+    # FRESH process, not by re-running the tool.
+    return _EXTRACTORS[extractor](content, url=url)
 
 
 def _raise_success_challenge(url: str, body: bytes) -> None:
@@ -349,9 +353,21 @@ def _atom_link(entry: Element[str]) -> str:
 
 
 def _atom_content(entry: Element[str]) -> str:
-    """Return cleaned Atom content or summary text."""
-    raw = _child_text(entry, "content") or _child_text(entry, "summary") or ""
+    """Return cleaned Atom content or summary text.
+
+    Reads the element's whole subtree, not just its direct ``.text``: Atom's
+    ``type="xhtml"`` form nests the body in a ``<div>``, so the entry has NO
+    direct text and a ``.text``-only read returned an empty body for a
+    perfectly ordinary feed.
+    """
+    raw = _element_text(entry, "content") or _element_text(entry, "summary") or ""
     return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(raw)).split())
+
+
+def _element_text(parent: Element[str], name: str) -> str:
+    """Return the full text of the first ``name`` child, descendants included."""
+    child = _child(parent, name)
+    return "".join(child.itertext()) if child is not None else ""
 
 
 def _append_rss_item(item: Element[str], lines: list[str]) -> None:

@@ -19,6 +19,18 @@ Two layers, split by where a real Chrome sends them:
   ``x-browser-validation`` is the reverse-engineered integrity token:
   ``base64(sha1(platform_api_key + UA))``.
 
+These values go stale as Chrome ships. To resync them against a real browser::
+
+    # 1. What does a real Chrome actually send?
+    uv run --frozen pytest -m integration wesearch/chrome/
+
+The parity test drives a headless Chrome through
+:func:`wesearch.chrome.capture.capture_chrome_request` and asserts our
+request carries the same headers in the same order. When it fails, Chrome moved:
+read the captured names/values out of the failure and update the tables here.
+That test is the only thing keeping this file honest -- nothing else can tell
+you a hand-maintained fingerprint has drifted.
+
 References:
     https://github.com/dsekz/chrome-x-browser-validation-header
         Reverse engineering of Chrome's ``x-browser-validation`` header.

@@ -143,6 +143,22 @@ def test_corrupt_cache_is_rewritten_rather_than_blocking_writes(
     assert "fresh.example" in zendriver_domains(path=path)
 
 
+def test_corrupt_cache_is_discarded_whole_not_mangled(tmp_path: Path) -> None:
+    """Undecodable bytes must not be persisted as replacement-character domains.
+
+    Decoding with ``errors="replace"`` kept the junk as U+FFFD "domains" and
+    wrote them back, so the file accumulated entries the read path would have
+    rejected outright.
+    """
+    path = tmp_path / "domains.txt"
+    path.write_bytes(b"good.example\n\xff\xfe junk\n")
+
+    remember_zendriver_domain("fresh.example", path=path)
+
+    assert zendriver_domains(path=path) == frozenset({"fresh.example"})
+    assert "\ufffd" not in path.read_text()
+
+
 if __name__ == "__main__":
     from wesearch.lib.testing.main import test_main
 

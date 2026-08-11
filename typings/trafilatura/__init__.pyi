@@ -1,0 +1,29 @@
+"""Typed overrides for the ``trafilatura`` symbols this repo calls.
+
+trafilatura ships no ``py.typed``, so every symbol resolves to Unknown and
+poisons anything derived from it. Only the members used here are declared:
+adding a local stub SHADOWS the package, so a member that is missing from this
+file is missing from the checker's view of it entirely -- add rather than
+assume a fallback.
+"""
+
+def extract(
+    filecontent: str | bytes,
+    url: str | None = ...,
+    *,
+    output_format: str = ...,
+    include_comments: bool = ...,
+    include_tables: bool = ...,
+    include_images: bool = ...,
+    include_formatting: bool | None = ...,
+    include_links: bool = ...,
+    favor_precision: bool = ...,
+    favor_recall: bool = ...,
+    fast: bool = ...,
+    deduplicate: bool = ...,
+    with_metadata: bool = ...,
+    only_with_metadata: bool = ...,
+    target_language: str | None = ...,
+    prune_xpath: str | list[str] | None = ...,
+    **kwargs: object,
+) -> str | None: ...

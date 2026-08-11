@@ -162,11 +162,20 @@ class Retry:
         """Reject out-of-range patience values."""
         if self.retries < 0:
             raise ValueError(f"'retries' must be >= 0, got {self.retries}.")
-        if self.timeout_sec <= 0:
-            raise ValueError(f"'timeout_sec' must be > 0, got {self.timeout_sec}.")
-        if self.connect_timeout_sec is not None and self.connect_timeout_sec <= 0:
+        # Finite, not merely positive: NaN fails every comparison so it slipped
+        # through as "in range", and infinity passed outright -- both then reach
+        # socket and browser timeout APIs, removing the ceiling this class
+        # exists to impose.
+        if not math.isfinite(self.timeout_sec) or self.timeout_sec <= 0:
             raise ValueError(
-                f"'connect_timeout_sec' must be > 0, got {self.connect_timeout_sec}."
+                f"'timeout_sec' must be a finite number > 0, got {self.timeout_sec}."
+            )
+        if self.connect_timeout_sec is not None and (
+            not math.isfinite(self.connect_timeout_sec) or self.connect_timeout_sec <= 0
+        ):
+            raise ValueError(
+                "'connect_timeout_sec' must be a finite number > 0,"
+                f" got {self.connect_timeout_sec}."
             )
         if self.max_redirects < 0:
             raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")

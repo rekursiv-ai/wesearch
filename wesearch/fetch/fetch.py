@@ -127,20 +127,26 @@ class FetchSession:
     Attributes:
       impersonate: The curl_cffi TLS-impersonation target; the User-Agent and
         client hints are derived from it.
-      egress_ip: The public egress the session is keyed to; empty until observed.
       cookies: The cookie jar, keyed by origin (``scheme://host``) then cookie
         name, and updated from ``Set-Cookie``. Scoped like
         :class:`wesearch.profile.ProfileStore`, which keys by
         ``(egress_ip, domain)``: a flat ``name -> value`` jar sent a cookie
         ``a.example`` set to ``b.example`` on the next call, which no browser
         does and which leaks a session identifier to an unrelated host.
+
+        Origin is the ONLY scope kept. ``Path``, ``Domain``, and ``SameSite``
+        are dropped by :func:`wesearch.profile.parse_set_cookie` -- we are
+        a client deciding what to send back, not a browser enforcing a security
+        boundary, and over-sending within one origin costs a header rather than
+        an identity. The prefixes where that is NOT true (``__Host-``,
+        ``__Secure-``) are enforced in the curl jar's ``_jar_set``, because RFC
+        6265bis makes them a correctness requirement rather than a preference.
       accept_ch: Per-origin (``scheme://host``) sets of extended client-hint
         header names the origin requested via ``Accept-CH``.
 
     """
 
     impersonate: str = "chrome"
-    egress_ip: str = ""
     cookies: Mapping[str, Mapping[str, str]] = field(
         default_factory=dict[str, Mapping[str, str]]
     )
@@ -166,16 +172,11 @@ class FetchSession:
             return self
         return replace(self, accept_ch={**self.accept_ch, origin: hints})
 
-    def with_egress(self, ip: str) -> FetchSession:
-        """Return a copy pinned to egress ``ip`` (unchanged if already pinned)."""
-        return self if ip == self.egress_ip else replace(self, egress_ip=ip)
-
     def serialize(self) -> dict[str, object]:
         """Return a JSON-serializable dict of this session's state.
 
         Returns:
-          data: A dict with ``impersonate``, ``egress_ip``, ``cookies``, and
-            ``accept_ch``. Each hint set is emitted as a sorted list purely for a
+          data: A dict with ``impersonate``, ``cookies``, and ``accept_ch``. Each hint set is emitted as a sorted list purely for a
             deterministic serialized form; the hints are an unordered set (the
             outgoing request emits them in Chrome's own client-hint order, not
             this one), and :meth:`deserialize` rebuilds a ``frozenset``.
@@ -183,7 +184,6 @@ class FetchSession:
         """
         return {
             "impersonate": self.impersonate,
-            "egress_ip": self.egress_ip,
             "cookies": {org: dict(jar) for org, jar in self.cookies.items()},
             "accept_ch": {
                 origin: sorted(hints) for origin, hints in self.accept_ch.items()
@@ -205,7 +205,6 @@ class FetchSession:
         jars = cast("Mapping[str, Mapping[str, str]]", data.get("cookies", {}))
         return cls(
             impersonate=cast("str", data.get("impersonate", "chrome")),
-            egress_ip=cast("str", data.get("egress_ip", "")),
             cookies={org: dict(jar) for org, jar in jars.items()},
             accept_ch={origin: frozenset(hints) for origin, hints in accept_ch.items()},
         )
@@ -256,22 +255,24 @@ class _ResponseLearner:
     ) -> None:
         self._url = url
         self._caller = caller
-        self._cookies: dict[str, str] = {}
+        self._cookies: dict[str, dict[str, str]] = {}
         self._accept_ch: dict[str, frozenset[str]] = {}
 
     def observe(self, status: int, resp_headers: dict[str, str], url: str) -> None:
         """Record cookies + Accept-CH from a hop; forward to the caller.
 
-        Cookies are absorbed into the session jar only when the responding
-        ``url`` shares the request's origin -- a redirect target on a foreign
-        origin sets ITS cookies, which must not be attributed to this session's
-        identity. Accept-CH opt-ins are keyed by the responding origin, so a
-        cross-origin hop's hints attach to that origin, never this one.
+        Cookies are filed under the RESPONDING origin, so a redirect target's
+        ``Set-Cookie`` warms that origin's jar rather than this request's -- a
+        browser following ``a -> b`` learns b's cookies, and the per-origin jar
+        can now express that. They were discarded outright while the jar was
+        flat, because the only alternative then was mis-attributing them to the
+        requesting origin. Accept-CH opt-ins are keyed the same way.
         """
-        if origin(url) == origin(self._url):
-            set_cookie = resp_headers.get("set-cookie")
-            if set_cookie:
-                self._cookies.update(parse_set_cookie(set_cookie))
+        set_cookie = resp_headers.get("set-cookie")
+        if set_cookie:
+            self._cookies.setdefault(origin(url), {}).update(
+                parse_set_cookie(set_cookie)
+            )
         hints = _accept_ch_hints(resp_headers)
         if hints:
             self._accept_ch[origin(url)] = hints
@@ -280,9 +281,9 @@ class _ResponseLearner:
 
     def merge_into(self, session: FetchSession) -> FetchSession:
         """Return ``session`` updated with the observed cookies + opt-ins."""
-        # ``observe`` already discarded any cross-origin hop's cookies, so these
-        # belong to this request's own origin.
-        updated = session.with_cookies(self._url, self._cookies)
+        updated = session
+        for org, jar in self._cookies.items():
+            updated = updated.with_cookies(org, jar)
         for org, hints in self._accept_ch.items():
             updated = updated.with_accept_ch(org, hints)
         return updated
@@ -715,8 +716,9 @@ def egress_ip(
 
     Args:
       cache: When true (default), return the last-known value if set, probing
-        only to fill it. False always probes live.
-      ipv6: Resolve the IPv6 egress instead of IPv4.
+        only to fill it. False always probes live. Ignored when ``ipv6`` is set:
+        the cache holds the v4 egress that keys the identity layer's profiles.
+      ipv6: Resolve the IPv6 egress instead of IPv4. Always probes.
       v4_echoes: v4-only echo hosts tried in order.
       v6_echoes: v6-only echo hosts tried in order.
       timeout_sec: Per-request HTTP timeout.
@@ -726,7 +728,10 @@ def egress_ip(
         resolves (offline, or no egress of that family).
 
     """
-    if cache and (cached := last_known_egress_ip()) is not None:
+    # The cache holds ONE address, and the identity layer keys profiles by it,
+    # so it is the v4 egress. A v6 lookup must not read it -- returning a cached
+    # v4 for ipv6=True answered a different question than the caller asked.
+    if cache and not ipv6 and (cached := last_known_egress_ip()) is not None:
         return cached
     echoes = v6_echoes if ipv6 else v4_echoes
     for url in echoes:

@@ -16,7 +16,7 @@ import bs4
 import pytest
 
 from wesearch.fetch import FetchSession
-from wesearch.search.search import (
+from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
     ImageResult,
@@ -28,18 +28,19 @@ from wesearch.search.search import (
     SearchResult,
     TorrentResult,
     VideoResult,
+    gsa_headers_for_query,
+    strip_scripts,
+)
+from wesearch.search.duckduckgo import (
     _duckduckgo_check_captcha,
     _duckduckgo_extract_url,
     _duckduckgo_parse,
     _duckduckgo_quote_bangs,
-    _duckduckgo_user_agent,
-    _searxng_url,
-    _strip_scripts,
+    _duckduckgo_validate_body,
     duckduckgo,
-    gsa_headers_for_query,
-    search,
-    searxng,
 )
+from wesearch.search.search import search
+from wesearch.search.searxng import _searxng_url, searxng
 from wesearch.types.errors import (
     BotDetectionError,
     FetchError,
@@ -50,6 +51,8 @@ from wesearch.types.errors import (
 def _patch_fetch(
     return_value: bytes = b"{}",
     side_effect: Any = None,
+    *,
+    module: str = "search",
 ) -> Any:
     # fetch returns (body, session); wrap the byte-valued test inputs so the
     # mock matches that shape (an exception side_effect still raises).
@@ -58,7 +61,7 @@ def _patch_fetch(
         kwargs["side_effect"] = _tuple_side_effect(side_effect)
     else:
         kwargs["return_value"] = (return_value, FetchSession())
-    return patch("wesearch.search.search.fetch", **kwargs)
+    return patch(f"wesearch.search.{module}.fetch", **kwargs)
 
 
 def _tuple_side_effect(side_effect: Any) -> Any:
@@ -80,7 +83,7 @@ def _patch_searxng_fetch(payload: dict[str, Any]) -> Generator[MagicMock]:
             os.environ,
             {"SEARXNG_URL": "https://search.example.test/"},
         ),
-        _patch_fetch(return_value=body) as mock,
+        _patch_fetch(module="searxng", return_value=body) as mock,
     ):
         yield mock
 
@@ -91,7 +94,7 @@ class TestStripScripts:
             "<div><p>Keep</p><script>remove()</script></div>",
             "html.parser",
         )
-        _strip_scripts(soup)
+        strip_scripts(soup)
         assert "remove" not in soup.get_text()
         assert "Keep" in soup.get_text()
 
@@ -100,7 +103,7 @@ class TestSearchDispatch:
     def test_network_error_normalized(self) -> None:
         err = urllib.error.URLError(ConnectionResetError(104, "reset"))
         with (
-            _patch_fetch(side_effect=err),
+            _patch_fetch(module="duckduckgo", side_effect=err),
             pytest.raises(SearchError, match="duckduckgo"),
         ):
             search("cats", backend="duckduckgo")
@@ -110,7 +113,7 @@ class TestSearchDispatch:
         # SearchError, not escape raw to the caller.
         err = FetchError("https://duckduckgo.com", 503, {}, b"unavailable")
         with (
-            _patch_fetch(side_effect=err),
+            _patch_fetch(module="duckduckgo", side_effect=err),
             pytest.raises(SearchError, match="duckduckgo"),
         ):
             search("cats", backend="duckduckgo")
@@ -122,7 +125,7 @@ class TestSearchDispatch:
         # so a caller can tell "solve captcha / rotate IP" from a plain failure.
         err = PuzzleChallengeError("DuckDuckGo returned a challenge form.")
         with (
-            _patch_fetch(side_effect=err),
+            _patch_fetch(module="duckduckgo", side_effect=err),
             pytest.raises(BotDetectionError) as exc,
         ):
             search("cats", backend="duckduckgo")
@@ -150,7 +153,7 @@ class TestSearchDispatch:
 class TestGsaHeaders:
     def test_query_selects_stable_user_agent(self) -> None:
         with patch(
-            "wesearch.search.search.user_agent_pool",
+            "wesearch.search.custom_types.user_agent_pool",
             return_value=("ua0", "ua1", "ua2"),
         ):
             assert gsa_headers_for_query("same") == gsa_headers_for_query("same")
@@ -210,7 +213,7 @@ class TestSearchSearxng:
         # AttributeError on ``.get`` -- it yields an empty result.
         with (
             patch.dict(os.environ, {"SEARXNG_URL": "https://search.example.test/"}),
-            _patch_fetch(return_value=b"[]"),
+            _patch_fetch(module="searxng", return_value=b"[]"),
         ):
             assert searxng("test") == []
 
@@ -247,7 +250,7 @@ class TestSearchSearxng:
                 os.environ,
                 {"SEARXNG_URL": "https://search.example.test/"},
             ),
-            _patch_fetch(side_effect=err),
+            _patch_fetch(module="searxng", side_effect=err),
             pytest.raises(FetchError),
         ):
             searxng("test")
@@ -737,21 +740,39 @@ class TestParseDdg:
         assert _duckduckgo_parse(html, 10) == []
 
 
+class TestDuckduckgoChallengeReachesFallback:
+    def test_challenge_is_a_body_validator_not_a_post_hoc_check(self) -> None:
+        """The challenge must be detected INSIDE fetch, not after it returns.
+
+        DuckDuckGo serves its puzzle with HTTP 200. Checked on the returned
+        body, the error is raised past fetch's own ``except BotDetectionError``
+        -- the hook that learns the domain and retries through Zendriver -- so
+        an automatic-transport caller just failed instead of escalating.
+        """
+        challenge = b'<html><body><form id="challenge-form"></form></body></html>'
+        with pytest.raises(PuzzleChallengeError):
+            _duckduckgo_validate_body(challenge)
+
+    def test_a_normal_body_passes_the_validator(self) -> None:
+        _duckduckgo_validate_body(b"<html><body><div>results</div></body></html>")
+
+
 class TestSearchDuckduckgo:
     def test_delegates_to_parse(self) -> None:
-        with _patch_fetch(return_value=_SINGLE_DDG.encode()):
+        with _patch_fetch(module="duckduckgo", return_value=_SINGLE_DDG.encode()):
             results = duckduckgo("test query")
         assert len(results) == 1
         assert results[0].title == "Example Title"
 
     def test_uses_normal_browser_request_contract(self) -> None:
-        _duckduckgo_user_agent.cache_clear()  # so the patched pool is drawn from
         with (
             patch(
-                "wesearch.search.search.user_agent_pool",
+                "wesearch.search.duckduckgo.user_agent_pool",
                 return_value=("ddg-test-ua",),
             ),
-            _patch_fetch(return_value=_NO_RESULTS_DDG.encode()) as mock,
+            _patch_fetch(
+                module="duckduckgo", return_value=_NO_RESULTS_DDG.encode()
+            ) as mock,
         ):
             duckduckgo("test")
         # The query rides in the URL, not a POST body: a POSTed query is dropped
@@ -783,8 +804,9 @@ class TestSearchDuckduckgo:
         # DDG's vqd anti-bot token is keyed to (query, UA); a UA that shifts
         # between requests is read as a bot. Unlike the per-query Google UA, the
         # DDG UA must be the SAME for every query in the process.
-        _duckduckgo_user_agent.cache_clear()
-        with _patch_fetch(return_value=_NO_RESULTS_DDG.encode()) as mock:
+        with _patch_fetch(
+            module="duckduckgo", return_value=_NO_RESULTS_DDG.encode()
+        ) as mock:
             duckduckgo("alpha")
             duckduckgo("beta")
         ua_a = mock.call_args_list[0].kwargs["request"].content.headers["User-Agent"]
@@ -794,6 +816,7 @@ class TestSearchDuckduckgo:
 
     def test_quotes_bangs_before_request(self) -> None:
         with _patch_fetch(
+            module="duckduckgo",
             return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("!w python")
@@ -802,14 +825,17 @@ class TestSearchDuckduckgo:
 
     def test_rejects_too_long_query(self) -> None:
         # INF-026: an over-length query must raise, not silently return [].
-        with _patch_fetch() as mock, pytest.raises(SearchError, match="exceeds"):
+        with (
+            _patch_fetch(module="duckduckgo") as mock,
+            pytest.raises(SearchError, match="exceeds"),
+        ):
             duckduckgo("x" * 500)
         mock.assert_not_called()
 
     def test_fetch_error_propagates(self) -> None:
         err = FetchError("https://x.com", 500, {}, b"")
         with (
-            _patch_fetch(side_effect=err),
+            _patch_fetch(module="duckduckgo", side_effect=err),
             pytest.raises(FetchError),
         ):
             duckduckgo("test")
@@ -825,6 +851,7 @@ class TestHeadersArg:
 
     def test_ddg_custom_headers_merge_with_defaults(self) -> None:
         with _patch_fetch(
+            module="duckduckgo",
             return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("q", headers={"User-Agent": "x"})
