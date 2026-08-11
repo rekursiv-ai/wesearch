@@ -6,12 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from wesearch.errors import FetchError
 from wesearch.fetch import FetchSession
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper import fetch as fetch_mod
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.providers import s2
+from wesearch.types.errors import FetchError
 
 
 _PDF = b"%PDF-1.5" + b"0" * 200

@@ -1,6 +1,6 @@
 """Functional library for scholarly-paper lookup over multiple backends.
 
-The paper analogue of :mod:`wesearch.search`: sync, backend-agnostic
+The paper analogue of :mod:`wesearch.search.search`: sync, backend-agnostic
 functions over Semantic Scholar, OpenAlex, SearXNG, and (internal build only)
 Google Scholar. Per-source cross-process rate limiting is built in (each backend
 paces through :func:`wesearch.ratelimit.cross_process_limiter`). A coroutine call
@@ -8,7 +8,7 @@ site lifts any function into a thread with ``asyncio.to_thread``.
 
 Import each name from the submodule that defines it (this package's
 ``__init__`` re-exports nothing), exactly as ``wesearch`` is used
-(``from wesearch.search import search``):
+(``from wesearch.search.search import search``):
 
 - :mod:`.search` -- ``search`` + ``SearchResult`` / ``Source``.
 - :mod:`.details` -- ``metadata``, ``metadata_batch``, ``references``,

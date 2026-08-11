@@ -12,7 +12,7 @@ from wesearch.fetch.common import ValidatedHost
 from wesearch.fetch.test_helpers import StubSession
 from wesearch.profile import ProfileStore
 
-import wesearch.fetch.curl as curl_mod
+import wesearch.fetch.transport.curl as curl_mod
 
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")

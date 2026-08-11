@@ -18,6 +18,7 @@ from wesearch.fetch.fetch import (
 )
 from wesearch.types.params import (
     Content,
+    Extractor,
     Observe,
     Policy,
     RequestParams,
@@ -29,6 +30,7 @@ from wesearch.types.params import (
 
 __all__ = [
     "Content",
+    "Extractor",
     "FetchSession",
     "Observe",
     "Policy",

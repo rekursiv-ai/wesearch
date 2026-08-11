@@ -11,17 +11,11 @@ from unittest.mock import Mock, patch
 import base64
 import http.client
 import importlib
+import math
 
 import pytest
 import zstandard
 
-from wesearch.errors import (
-    BotDetectionError,
-    CloudflareChallengeError,
-    FetchError,
-    GoogleJavascriptRequiredError,
-    PuzzleChallengeError,
-)
 from wesearch.fetch import (
     Content,
     FetchSession,
@@ -43,8 +37,15 @@ from wesearch.fetch.test_helpers import (
     const_curl_session,
     lower_headers,
 )
-from wesearch.fetch.zendriver import BrowserResult
+from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
+from wesearch.types.errors import (
+    BotDetectionError,
+    CloudflareChallengeError,
+    FetchError,
+    GoogleJavascriptRequiredError,
+    PuzzleChallengeError,
+)
 
 import wesearch.fetch as fetch_package
 
@@ -56,14 +57,26 @@ def test_fetch_uses_transport_package_layout() -> None:
     assert fetch_package.__file__ is not None
     assert fetch_package.__file__.endswith("/fetch/__init__.py")
     assert callable(fetch_package.fetch)
-    for module in (
-        "common",
-        "curl",
-        "fetch",
-        "stdlib",
-        "zendriver",
-    ):
+    for module in ("common", "fetch"):
         importlib.import_module(f"wesearch.fetch.{module}")
+    for module in ("curl", "stdlib", "zendriver", "transport_routing"):
+        importlib.import_module(f"wesearch.fetch.transport.{module}")
+
+
+class TestUrlWithParams:
+    def test_params_precede_a_fragment(self) -> None:
+        # A fragment ends the URL and is never sent to the server, so appending
+        # the query after it silently dropped every parameter from the wire.
+        assert (
+            fetch_mod._url_with_params("https://e/p#section", {"q": "x"})
+            == "https://e/p?q=x#section"
+        )
+
+    def test_params_merge_into_an_existing_query(self) -> None:
+        assert (
+            fetch_mod._url_with_params("https://e/p?a=1#s", {"q": "x"})
+            == "https://e/p?a=1&q=x#s"
+        )
 
 
 class TestBackoffDelay:
@@ -95,6 +108,15 @@ class TestBackoffDelay:
             Retry().backoff_delay(0, {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"})
             == 0.0
         )
+
+    @pytest.mark.parametrize("value", ["-1", "nan", "-inf"])
+    def test_retry_after_hostile_numeric_stays_sleepable(self, value: str) -> None:
+        # The delay goes straight to time.sleep, which raises ValueError on a
+        # negative and never wakes on a NaN -- either turns a retryable response
+        # into a crash that masks the underlying FetchError.
+        delay = Retry().backoff_delay(0, {"retry-after": value})
+        assert math.isfinite(delay)
+        assert delay >= 0.0
 
 
 class TestSplitUserinfo:
@@ -302,7 +324,7 @@ class TestFetchRetry:
 
         with (
             patch(
-                "wesearch.fetch.stdlib._open_connection",
+                "wesearch.fetch.transport.stdlib._open_connection",
                 return_value=mock_conn,
             ),
             patch("wesearch.fetch.fetch.time.sleep"),
@@ -324,7 +346,7 @@ class TestFetchRetry:
         mock_conn.getresponse.return_value = resp
         with (
             patch(
-                "wesearch.fetch.stdlib._open_connection",
+                "wesearch.fetch.transport.stdlib._open_connection",
                 return_value=mock_conn,
             ),
             pytest.raises(FetchError, match="404"),
@@ -352,7 +374,7 @@ class TestFetchRetry:
         mock_conn.getresponse.return_value = resp
         with (
             patch(
-                "wesearch.fetch.stdlib._open_connection",
+                "wesearch.fetch.transport.stdlib._open_connection",
                 return_value=mock_conn,
             ),
             pytest.raises(FetchError) as exc,
@@ -372,7 +394,7 @@ class TestFetchRetry:
 
         with (
             patch(
-                "wesearch.fetch.stdlib._open_connection",
+                "wesearch.fetch.transport.stdlib._open_connection",
                 return_value=mock_conn,
             ),
             patch("wesearch.fetch.fetch.time.sleep"),
@@ -412,7 +434,7 @@ class TestHeaderOrder:
         mock_conn.getresponse.return_value = resp
 
         with patch(
-            "wesearch.fetch.stdlib._open_connection",
+            "wesearch.fetch.transport.stdlib._open_connection",
             return_value=mock_conn,
         ):
             fetch(
@@ -513,7 +535,7 @@ class TestHeaderOrder:
         mock_conn.getresponse.return_value = resp
 
         with patch(
-            "wesearch.fetch.stdlib._open_connection",
+            "wesearch.fetch.transport.stdlib._open_connection",
             return_value=mock_conn,
         ):
             fetch(
@@ -548,7 +570,10 @@ class TestOnResponse:
         )
         seen: list[tuple[int, dict[str, str]]] = []
         with (
-            patch("wesearch.fetch.stdlib._open_connection", return_value=conn),
+            patch(
+                "wesearch.fetch.transport.stdlib._open_connection",
+                return_value=conn,
+            ),
         ):
             fetch(
                 "https://x.com",
@@ -571,7 +596,10 @@ class TestOnResponse:
         conn.getresponse.side_effect = [redir, final]
         seen: list[int] = []
         with (
-            patch("wesearch.fetch.stdlib._open_connection", return_value=conn),
+            patch(
+                "wesearch.fetch.transport.stdlib._open_connection",
+                return_value=conn,
+            ),
         ):
             fetch(
                 "https://x.com/1",
@@ -589,7 +617,10 @@ class TestOnResponse:
         )
         seen: list[int] = []
         with (
-            patch("wesearch.fetch.stdlib._open_connection", return_value=conn),
+            patch(
+                "wesearch.fetch.transport.stdlib._open_connection",
+                return_value=conn,
+            ),
             pytest.raises(FetchError),
         ):
             fetch(
@@ -651,7 +682,7 @@ class TestTransportConsistency:
         mock_conn.getresponse.side_effect = resps
         with (
             patch(
-                "wesearch.fetch.stdlib._open_connection",
+                "wesearch.fetch.transport.stdlib._open_connection",
                 return_value=mock_conn,
             ),
         ):
@@ -728,10 +759,23 @@ class TestFetchSession:
             session.egress_ip = "1.2.3.4"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_with_cookies_returns_a_merged_copy(self) -> None:
-        base = FetchSession(cookies={"a": "1"})
-        updated = base.with_cookies({"b": "2"})
-        assert dict(updated.cookies) == {"a": "1", "b": "2"}
-        assert dict(base.cookies) == {"a": "1"}  # original unchanged
+        base = FetchSession(cookies={"https://x.com": {"a": "1"}})
+        updated = base.with_cookies("https://x.com/p", {"b": "2"})
+        assert updated.cookies_for("https://x.com/q") == {"a": "1", "b": "2"}
+        assert base.cookies_for("https://x.com/q") == {"a": "1"}  # original unchanged
+
+    def test_cookies_are_scoped_to_the_setting_origin(self) -> None:
+        # A flat name->value jar sent a cookie one host set to the NEXT host
+        # fetched with the same session, leaking a session id across origins.
+        session = FetchSession().with_cookies("https://a.example/", {"SID": "secret"})
+        assert session.cookies_for("https://a.example/other") == {"SID": "secret"}
+        assert session.cookies_for("https://b.example/") == {}
+
+    def test_scoped_jar_survives_serialization(self) -> None:
+        session = FetchSession().with_cookies("https://a.example/", {"SID": "s"})
+        restored = FetchSession.deserialize(session.serialize())
+        assert restored.cookies_for("https://a.example/") == {"SID": "s"}
+        assert restored.cookies_for("https://b.example/") == {}
 
     def test_with_accept_ch_records_origin_opt_in(self) -> None:
         session = FetchSession().with_accept_ch(
@@ -759,7 +803,7 @@ class TestFetchSession:
             return_value=self._curl_response(headers={"set-cookie": "GSP=z; Path=/"}),
         ):
             _body, session = fetch("https://x.com/p")
-        assert session.cookies["GSP"] == "z"
+        assert session.cookies_for("https://x.com/p")["GSP"] == "z"
 
     def test_session_learns_accept_ch(self) -> None:
         with patch(
@@ -807,7 +851,7 @@ class TestFetchSession:
     def test_threaded_session_seeds_prior_cookies(self) -> None:
         # Prior session cookies are loaded into the pooled jar (the single cookie
         # source on the curl path), not the Cookie header.
-        prior = FetchSession(cookies={"SID": "abc"})
+        prior = FetchSession(cookies={"https://x.com": {"SID": "abc"}})
         stub = StubSession()
         with (
             patch(
@@ -926,7 +970,7 @@ class TestRedirectIdentityScoping:
         ):
             fetch(
                 "https://a.com/start",
-                session=FetchSession(cookies={"SID": "secret"}),
+                session=FetchSession(cookies={"https://a.com": {"SID": "secret"}}),
             )
         b_headers = next(h for url, h in sent if url == "https://b.com/next")
         assert "cookie" not in b_headers
@@ -956,7 +1000,7 @@ class TestRedirectIdentityScoping:
         ):
             fetch(
                 "https://a.com/start",
-                session=FetchSession(cookies={"SID": "secret"}),
+                session=FetchSession(cookies={"https://a.com": {"SID": "secret"}}),
             )
         next_headers = next(h for url, h in sent if url == "https://a.com/next")
         assert next_headers.get("cookie") == "SID=secret"
@@ -1401,6 +1445,27 @@ class TestBrowserBackend:
         assert body == b"ok"
         assert direct.call_args.args[0].params.policy.transport == "curl"
 
+    def test_browser_fetch_observes_a_cookie_free_response(self) -> None:
+        # Observe.on_response promises a callback for EVERY response; gating it
+        # on a non-empty jar meant a successful cookie-free browser fetch told
+        # the caller nothing at all.
+        seen: list[tuple[int, dict[str, str]]] = []
+        with (
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch(
+                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                return_value=BrowserResult(body=b"ok", cookies={}),
+            ),
+        ):
+            fetch(
+                "https://walled.example/x",
+                request=RequestParams(
+                    observe=Observe(on_response=lambda s, h: seen.append((s, h))),
+                    policy=Policy(transport="zendriver"),
+                ),
+            )
+        assert len(seen) == 1
+
     def test_browser_fetch_forwards_url_params_headers_and_cookies(self) -> None:
         result = BrowserResult(body=b"ok", cookies={})
         with (
@@ -1412,7 +1477,9 @@ class TestBrowserBackend:
         ):
             fetch(
                 "https://google.com/search?hl=en",
-                session=FetchSession(cookies={"SID": "session"}),
+                session=FetchSession(
+                    cookies={"https://google.com": {"SID": "session"}}
+                ),
                 request=RequestParams(
                     content=Content(
                         params={"q": "test query"},
@@ -1449,7 +1516,8 @@ class TestBrowserBackend:
                 request=RequestParams(policy=Policy(transport="zendriver")),
             )
         assert body == b"<html>rendered</html>"
-        assert session.cookies == {"SID": "xyz"}  # session warmed
+        # Session warmed, and scoped to the origin that set the cookie.
+        assert session.cookies_for("https://walled.example/x") == {"SID": "xyz"}
         assert via.call_count == 1
         store.save.assert_not_called()
 

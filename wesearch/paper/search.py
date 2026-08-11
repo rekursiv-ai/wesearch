@@ -1,6 +1,6 @@
 """Scholarly-literature search over multiple backends.
 
-The paper analogue of :func:`wesearch.search.search`: sync, backend-agnostic
+The paper analogue of :func:`wesearch.search.search.search`: sync, backend-agnostic
 text search. ``source`` selects a backend or ``"fused"`` (reciprocal-rank-fuse
 Semantic Scholar + OpenAlex, resilient to either being down). Sync by design --
 a coroutine call site lifts it into a thread with ``asyncio.to_thread``.

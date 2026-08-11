@@ -17,9 +17,9 @@ re-exports nothing, matching :mod:`wesearch.paper`):
 Usage::
 
     from wesearch.fetch import fetch
-    from wesearch.errors import FetchError, BotDetectionError
+    from wesearch.types.errors import FetchError, BotDetectionError
     from wesearch.scrape import get_element_content
-    from wesearch.search import search, SearchResult
+    from wesearch.search.search import search, SearchResult
 """
 
 from __future__ import annotations

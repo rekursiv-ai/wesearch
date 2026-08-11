@@ -16,7 +16,7 @@ import brotli
 import zstandard
 
 from wesearch.chrome.headers import chrome_client_hints
-from wesearch.errors import FetchError
+from wesearch.types.errors import FetchError
 from wesearch.types.params import Trust
 
 

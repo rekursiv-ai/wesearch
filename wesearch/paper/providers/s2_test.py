@@ -9,11 +9,11 @@ import json
 
 import pytest
 
-from wesearch.errors import FetchError
 from wesearch.fetch import FetchSession
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
 from wesearch.paper.providers import s2
+from wesearch.types.errors import FetchError
 
 
 @pytest.fixture(autouse=True)

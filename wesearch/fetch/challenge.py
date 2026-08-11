@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from wesearch.errors import (
+from wesearch.types.errors import (
     BotDetectionError,
     CloudflareChallengeError,
     FetchError,

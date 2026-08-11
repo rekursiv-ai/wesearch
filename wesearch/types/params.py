@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
+import math
 import random
 
 from wesearch.lib.custom_json import JSONValue
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Content",
+    "Extractor",
     "Observe",
     "Policy",
     "RequestParams",
@@ -71,6 +73,24 @@ Transport: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
 # browser transports for it.
 Trust: TypeAlias = Literal["untrusted", "internal"]  # noqa: UP040 -- get_args()
 
+# How a fetched HTML page becomes text. ``"html2text"`` renders every text node
+# as Markdown; ``"markdownify"`` converts the document's elements instead, which
+# keeps nested structure a text walk flattens; ``"trafilatura"`` scores blocks
+# and returns only what it judges to be the article; ``"raw"`` returns the
+# source untouched.
+#
+# They are not ranked versions of one idea -- they answer different questions,
+# and the article-shaped assumption behind ``"trafilatura"`` is wrong for a
+# dictionary entry, a Q&A thread, or a profile timeline, where it returns
+# plausible-looking output with the substance missing (a StackOverflow thread
+# minus every answer). ``wesearch/scripts/compare_extractors.py`` measures
+# all of them against a corpus of those shapes.
+#
+# A ``Literal`` for the same reason as ``Transport`` above.
+Extractor: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
+    "html2text", "markdownify", "trafilatura", "raw"
+]
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Content:
@@ -84,7 +104,13 @@ class Content:
       json: JSON-serializable body, sent as application/json. Mutually exclusive
         with ``data``.
       headers: Extra headers, merged over the session identity (these win).
-      cookies: Cookies to send, merged over the session jar (these win).
+      cookies: Cookies to send, merged over the session jar (these win). On the
+        curl path these are written INTO the pooled jar, which outlives the
+        call, so a per-call override persists to later requests on the same
+        ``(egress, domain)`` pool until it is overwritten or the pool closes.
+        Deliberate: the jar must stay the single cookie source on that path,
+        because sending a caller cookie via a header too would duplicate a name
+        the jar already holds -- a bot tell.
       raw_headers: Send exactly ``headers`` plus cookies and auth; skip the
         Chrome identity and the session jar.
 
@@ -164,9 +190,15 @@ class Retry:
         retry_after = headers.get("retry-after")
         if retry_after is not None:
             try:
-                return min(float(retry_after), 30)
+                seconds = float(retry_after)
             except ValueError:
-                pass
+                seconds = math.nan
+            # A hostile or broken origin can send "-1" or "nan"; both reach
+            # time.sleep, which raises ValueError on a negative and never wakes
+            # on a NaN. Either turns a retryable response into a crash that
+            # masks the underlying FetchError.
+            if math.isfinite(seconds):
+                return min(max(seconds, 0.0), 30)
             when = parsedate_to_datetime_or_none(retry_after.strip())
             if when is not None:
                 return min(max((when - datetime.now(UTC)).total_seconds(), 0.0), 30)
@@ -182,9 +214,11 @@ class Observe:
       on_redirect: Called with the redirect target URL before following; raise to
         abort.
       on_response: Called with ``(status, headers)`` for every received response.
-        Observational; must not raise.
+        Observational; must not raise. The browser transport cannot see the
+        navigation response, so it synthesizes ``200`` and reports only the
+        cookies Chrome harvested.
       body_validator: Called with every final response body before it is accepted.
-        Raise :class:`~wesearch.errors.BotDetectionError` when a
+        Raise :class:`~wesearch.types.errors.BotDetectionError` when a
         provider-specific success body proves browser or human interaction is
         required; automatic transport fallback then learns the domain.
 
@@ -197,7 +231,7 @@ class Observe:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Policy:
-    """Transport and trust: the application's decision, not the request's.
+    """Transport, extractor, and trust: the application's decision, not the request's.
 
     Constant for an application's lifetime -- sagent's URLs are always
     agent-supplied, a test oracle's are always its own -- so it is threaded as
@@ -209,13 +243,19 @@ class Policy:
     and cannot be handed an IP without a proxy). Conflating the two is what made
     a security choice disable the browser.
 
+    ``extractor`` sits here rather than in :class:`Content` because it is the
+    application's rendering choice and nothing a server ever sees -- the same
+    test that puts ``transport`` here.
+
     Attributes:
       transport: Retrieval transport; see :data:`Transport`.
+      extractor: HTML-to-text extractor; see :data:`Extractor`.
       trust: Provenance of the URL; see :data:`Trust`.
 
     """
 
     transport: Transport = "auto"
+    extractor: Extractor = "html2text"
     trust: Trust = "untrusted"
 
 

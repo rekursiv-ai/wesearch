@@ -41,7 +41,7 @@ dependencies = [
 mcp = ["mcp>=2.0.0"]
 
 [project.scripts]
-wesearch-mcp = "wesearch.mcp_server:main"
+wesearch-mcp = "wesearch.mcp.server:main"
 # BotDetectionError.recovery tells the user to run `fetch-zendriver <url>`; that
 # guidance ships, so the command must exist in a default install. zendriver is a
 # core dependency, so this needs no extra.

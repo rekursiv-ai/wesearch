@@ -34,7 +34,7 @@ in the common case.
 ## Example
 
 ```python
-from wesearch.search import search
+from wesearch.search.search import search
 from wesearch.fetch import RequestParams, fetch
 from wesearch.scrape import get_element_content
 
@@ -66,28 +66,43 @@ nothing.
 
 ```
 wesearch/
-├── search.py        search(...) over DuckDuckGo (+ configured backends);
-│                      SearchResult / PaperResult / ImageResult
+├── types/           the vocabulary every layer shares; imports nothing internal
+│   ├── params.py    RequestParams + Content/Retry/Observe/Policy; Transport,
+│   │                  Extractor, Trust
+│   ├── extractor.py the Extract protocol each extractor satisfies
+│   └── errors.py    FetchError, BotDetectionError + subclasses
 ├── fetch/           the sole HTTP egress
 │   ├── fetch.py     fetch(url, request=RequestParams(...)) -> (body, session)
-│   ├── curl.py      curl-cffi transport (TLS/JA3 browser impersonation)
-│   ├── stdlib.py    dependency-free urllib transport
-│   ├── zendriver.py opt-in real-Chrome backend for JS-gated pages
-│   ├── transport_routing.py  per-domain transport selection
+│   ├── transport/   how bytes are retrieved
+│   │   ├── curl.py      curl-cffi transport (TLS/JA3 browser impersonation)
+│   │   ├── stdlib.py    dependency-free urllib transport
+│   │   ├── zendriver.py opt-in real-Chrome backend for JS-gated pages
+│   │   └── transport_routing.py  per-domain transport selection
+│   ├── extractor/   how a fetched page becomes text
+│   │   ├── html2text.py   every text node as Markdown (the default)
+│   │   ├── markdownify.py the document's elements as Markdown
+│   │   ├── trafilatura.py the scored article body only
+│   │   └── raw.py         the source, untouched
+│   ├── providers/   per-site fetch strategies (reddit, google_news, x, ...)
 │   └── challenge.py bot-challenge detection and classification
+├── search/          web search over pluggable backends
+│   └── search.py    search(...) over SearXNG / DuckDuckGo / Google;
+│                      SearchResult / PaperResult / ImageResult
+├── paper/           scholarly-paper lookup
+│   ├── search.py    search(...) across Semantic Scholar, OpenAlex, SearXNG
+│   ├── details.py   metadata / references / citations
+│   ├── authors.py   author search and publication lists
+│   ├── fetch.py     PDF download cascade
+│   └── providers/   per-source backends (openalex, s2, searxng)
+├── mcp/             the MCP surface; the only place the mcp SDK is imported
+│   └── server.py    wesearch-mcp, one tool per public function
 ├── chrome/          real-browser fingerprints
 │   ├── headers.py   Chrome request headers (incl. x-browser-validation)
 │   └── useragents.py  vendored, refreshable User-Agent pools
+├── web.py           fetch_web(...): fetch + provider dispatch + extraction
 ├── profile.py       cross-process per-(egress_ip, domain) cookie + UA jar
 ├── ratelimit.py     cross-process, per-domain rate limiting
-├── scrape.py        get_element_content(html, selector)
-├── errors.py        FetchError, BotDetectionError + subclasses
-└── paper/           scholarly-paper lookup
-    ├── search.py    search(...) across Semantic Scholar, OpenAlex, SearXNG
-    ├── details.py   metadata / references / citations
-    ├── authors.py   author search and publication lists
-    ├── fetch.py     PDF download cascade
-    └── providers/   per-source backends (openalex, s2, searxng)
+└── scrape.py        get_element_content(html, selector)
 ```
 
 ## Transports
