@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import base64
 import functools
@@ -46,15 +46,14 @@ from wesearch.chrome.headers import (
     is_google_property,
 )
 from wesearch.chrome.useragents import draw_user_agent, kind_for_impersonate
-from wesearch.errors import BotDetectionError, FetchError
-from wesearch.fetch import transport_routing
 from wesearch.fetch.common import (
     Observer,
     default_port,
     origin,
     pinned_host,
 )
-from wesearch.fetch.curl import (
+from wesearch.fetch.transport import transport_routing
+from wesearch.fetch.transport.curl import (
     close_curl_session,
     close_curl_sessions_except,
     curl_session,
@@ -62,9 +61,10 @@ from wesearch.fetch.curl import (
     seed_session_jar,
     set_session_cookies,
 )
-from wesearch.fetch.stdlib import fetch_stdlib
+from wesearch.fetch.transport.stdlib import fetch_stdlib
 from wesearch.lib.userdirs import data_dir
 from wesearch.profile import Profile, ProfileStore, parse_set_cookie
+from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.types.params import (
     Content,
     RequestParams,
@@ -78,11 +78,11 @@ if TYPE_CHECKING:
     from curl_cffi.requests import Response
     from curl_cffi.requests.session import HttpMethod
 
-    import wesearch.fetch.zendriver as zendriver_backend
+    import wesearch.fetch.transport.zendriver as zendriver_backend
 else:
     from wrapt import lazy_import
 
-    zendriver_backend = lazy_import("wesearch.fetch.zendriver")
+    zendriver_backend = lazy_import("wesearch.fetch.transport.zendriver")
 
 
 __all__ = [
@@ -128,7 +128,12 @@ class FetchSession:
       impersonate: The curl_cffi TLS-impersonation target; the User-Agent and
         client hints are derived from it.
       egress_ip: The public egress the session is keyed to; empty until observed.
-      cookies: The cookie jar (``name -> value``), updated from ``Set-Cookie``.
+      cookies: The cookie jar, keyed by origin (``scheme://host``) then cookie
+        name, and updated from ``Set-Cookie``. Scoped like
+        :class:`wesearch.profile.ProfileStore`, which keys by
+        ``(egress_ip, domain)``: a flat ``name -> value`` jar sent a cookie
+        ``a.example`` set to ``b.example`` on the next call, which no browser
+        does and which leaks a session identifier to an unrelated host.
       accept_ch: Per-origin (``scheme://host``) sets of extended client-hint
         header names the origin requested via ``Accept-CH``.
 
@@ -136,16 +141,24 @@ class FetchSession:
 
     impersonate: str = "chrome"
     egress_ip: str = ""
-    cookies: Mapping[str, str] = field(default_factory=dict[str, str])
+    cookies: Mapping[str, Mapping[str, str]] = field(
+        default_factory=dict[str, Mapping[str, str]]
+    )
     accept_ch: Mapping[str, frozenset[str]] = field(
         default_factory=dict[str, frozenset[str]]
     )
 
-    def with_cookies(self, updates: Mapping[str, str]) -> FetchSession:
-        """Return a copy whose jar is merged with ``updates`` (new values win)."""
+    def cookies_for(self, url: str) -> dict[str, str]:
+        """Return the cookies this session may send to ``url``'s origin."""
+        return dict(self.cookies.get(origin(url), {}))
+
+    def with_cookies(self, url: str, updates: Mapping[str, str]) -> FetchSession:
+        """Return a copy whose jar for ``url``'s origin is merged with ``updates``."""
         if not updates:
             return self
-        return replace(self, cookies={**self.cookies, **updates})
+        key = origin(url)
+        merged = {**self.cookies.get(key, {}), **updates}
+        return replace(self, cookies={**self.cookies, key: merged})
 
     def with_accept_ch(self, origin: str, hints: frozenset[str]) -> FetchSession:
         """Return a copy recording ``origin``'s ``hints`` (unchanged if same)."""
@@ -171,7 +184,7 @@ class FetchSession:
         return {
             "impersonate": self.impersonate,
             "egress_ip": self.egress_ip,
-            "cookies": dict(self.cookies),
+            "cookies": {org: dict(jar) for org, jar in self.cookies.items()},
             "accept_ch": {
                 origin: sorted(hints) for origin, hints in self.accept_ch.items()
             },
@@ -189,10 +202,11 @@ class FetchSession:
 
         """
         accept_ch = cast("Mapping[str, list[str]]", data.get("accept_ch", {}))
+        jars = cast("Mapping[str, Mapping[str, str]]", data.get("cookies", {}))
         return cls(
             impersonate=cast("str", data.get("impersonate", "chrome")),
             egress_ip=cast("str", data.get("egress_ip", "")),
-            cookies=dict(cast("Mapping[str, str]", data.get("cookies", {}))),
+            cookies={org: dict(jar) for org, jar in jars.items()},
             accept_ch={origin: frozenset(hints) for origin, hints in accept_ch.items()},
         )
 
@@ -266,7 +280,9 @@ class _ResponseLearner:
 
     def merge_into(self, session: FetchSession) -> FetchSession:
         """Return ``session`` updated with the observed cookies + opt-ins."""
-        updated = session.with_cookies(self._cookies)
+        # ``observe`` already discarded any cross-origin hop's cookies, so these
+        # belong to this request's own origin.
+        updated = session.with_cookies(self._url, self._cookies)
         for org, hints in self._accept_ch.items():
             updated = updated.with_accept_ch(org, hints)
         return updated
@@ -321,7 +337,10 @@ class _Request:
             p = replace(p, policy=replace(p.policy, transport=resolved))
         learner = _ResponseLearner(url=self.url, caller=p.observe.on_response)
         request = replace(self, params=p, observer=learner.observe)
-        seeded_cookies = {**self.session.cookies, **(p.content.cookies or {})}
+        seeded_cookies = {
+            **self.session.cookies_for(self.url),
+            **(p.content.cookies or {}),
+        }
         if p.content.raw_headers:
             body = request.send(
                 headers=p.content.headers,
@@ -564,12 +583,20 @@ def _send_via_zendriver(
         cookies=cookies,
         on_redirect=request.params.observe.on_redirect,
     )
-    if result.cookies and request.observer is not None:
+    if request.observer is not None:
         # Fold the harvested jar into the returned session (and the caller's
         # on_response) as a synthesized Set-Cookie for this origin, so the
         # session warms exactly as a header-level backend's would.
+        #
+        # Called even with an empty jar: Observe.on_response promises a callback
+        # for every response, and gating on cookies meant a successful
+        # cookie-free browser fetch notified the caller of nothing at all.
+        # Status and headers are synthesized because Chrome does not surface the
+        # navigation response to this layer.
         synthesized = "\n".join(f"{k}={v}" for k, v in result.cookies.items())
-        request.observer(200, {"set-cookie": synthesized}, request.url)
+        request.observer(
+            200, {"set-cookie": synthesized} if result.cookies else {}, request.url
+        )
     if egress is not None and request.domain and result.cookies:
         store = ProfileStore.shared()
         if store.load(egress, request.domain) is None:
@@ -736,11 +763,18 @@ def _url_with_params(
     url: str,
     params: Mapping[str, str | int] | None,
 ) -> str:
-    """Return ``url`` with encoded query parameters appended."""
+    """Return ``url`` with encoded query parameters merged into its query.
+
+    Split rather than concatenated: a fragment ends the URL, so appending to the
+    raw string put the query AFTER it (``https://e/p#section?q=x``). Fragments
+    are never sent to a server, so those parameters silently vanished from the
+    wire.
+    """
     if not params:
         return url
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}{urlencode(params)}"
+    parts = urlsplit(url)
+    query = f"{parts.query}&{urlencode(params)}" if parts.query else urlencode(params)
+    return urlunsplit(parts._replace(query=query))
 
 
 def _split_userinfo(url: str) -> tuple[str, str | None]:
@@ -873,7 +907,6 @@ def _build_headers(
     raw_headers: bool,
     impersonate: str,
     use_curl: bool,
-    pinned_curl: bool = False,
     accept_ch: Mapping[str, frozenset[str]],
 ) -> dict[str, str]:
     """Build canonical-order Chrome request headers.
@@ -885,20 +918,13 @@ def _build_headers(
     so that path emits ONLY the structural headers curl does not set
     (Origin/Content-Type on a POST), the extended client hints an origin opted
     into via ``Accept-CH``, and caller extras.
-
-    The SSRF-pinned curl path (``pinned_curl``) drives a RAW ``curl_cffi.Curl``
-    handle whose ``impersonate()`` replays the TLS/HTTP-2 fingerprint but injects
-    NONE of those request headers (only the high-level ``requests`` layer does).
-    So it -- like the stdlib path -- must reproduce the full hand-built Chrome
-    set, or it sends a header-less request (no User-Agent) that UA-gated APIs
-    (e.g. GitHub) reject with 403.
     """
     # Host and Content-Length are omitted: http.client auto-adds both first on
     # the wire (the connection path overrides Host when validated_hosts splits
     # SNI/IP); curl adds them itself.
     if raw_headers:
         return dict(extra or {})
-    if use_curl and not pinned_curl:
+    if use_curl:
         return _curl_structural_headers(
             method=method,
             url=url,
@@ -907,11 +933,11 @@ def _build_headers(
             impersonate=impersonate,
             accept_ch=accept_ch,
         )
-    # The stdlib path and the SSRF-pinned raw-handle curl path get no
-    # impersonation-injected request headers, so both reproduce the full Chrome
-    # header set by hand -- from the SAME source (chrome_navigation_headers,
-    # matched to the impersonate target) the high-level curl path's fingerprint
-    # uses, so every transport presents one coherent identity, not drifting ones.
+    # The stdlib path gets no impersonation-injected request headers, so it
+    # reproduces the full Chrome header set by hand -- from the SAME source
+    # (chrome_navigation_headers, matched to the impersonate target) the
+    # high-level curl path's fingerprint uses, so every transport presents one
+    # coherent identity, not drifting ones.
     parsed = urlparse(url)
     major, platform = impersonate_version_platform(impersonate)
     h = chrome_navigation_headers(
@@ -920,10 +946,9 @@ def _build_headers(
         method=method,
         content_type=content_type or "",
         origin=f"{parsed.scheme}://{parsed.netloc}",
-        # The pinned-curl raw handle rides HTTP/2 (impersonate's fingerprint), so
-        # it carries the HTTP/2-only Priority header; the stdlib path is HTTP/1.1
-        # and must omit it to match a real Chrome on that protocol.
-        http2=pinned_curl,
+        # This branch is reached only by the stdlib path, which is HTTP/1.1; a
+        # real Chrome omits the HTTP/2-only Priority header there.
+        http2=False,
     )
     h.update(_google_headers(url, impersonate))
     if extra:

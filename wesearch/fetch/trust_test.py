@@ -19,16 +19,16 @@ import inspect
 
 import pytest
 
-from wesearch.errors import CloudflareChallengeError
 from wesearch.fetch.common import ValidatedHost
-from wesearch.fetch.zendriver import BrowserResult
+from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
+from wesearch.types.errors import CloudflareChallengeError
 from wesearch.types.params import Policy, RequestParams, Transport, Trust
 
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
-curl_mod = importlib.import_module("wesearch.fetch.curl")
-stdlib_mod = importlib.import_module("wesearch.fetch.stdlib")
+curl_mod = importlib.import_module("wesearch.fetch.transport.curl")
+stdlib_mod = importlib.import_module("wesearch.fetch.transport.stdlib")
 
 
 class _Echo(BaseHTTPRequestHandler):

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from wesearch.errors import FetchError
 from wesearch.paper.errors import (
     BackendError,
     NotFoundError,
     RateLimitError,
     translate_http_error,
 )
+from wesearch.types.errors import FetchError
 
 
 def _err(status: int, body: bytes = b"x") -> FetchError:

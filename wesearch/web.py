@@ -1,20 +1,16 @@
-"""Fetch a URL to clean text, and search the web -- sagent-independent.
+"""Fetch a URL to clean text -- sagent-independent.
 
-The two public entry points return plain data (no tool-framework types):
+:func:`fetch_web` returns plain data (no tool-framework types): it fetches a URL
+(GET or POST) and renders the response to clean text, dispatching GET to the
+site-specific providers (Reddit, Google News, X) and falling back to a
+reader-proxy-aware ladder, then extracting the body by kind (RSS/Atom feed,
+reader-proxy markdown, or HTML via the extractor named by
+:class:`wesearch.types.params.Policy`).
 
-  - :func:`fetch_web` fetches a URL (GET or POST) and renders the response to
-    clean text, dispatching GET to the site-specific providers (Reddit, Google
-    News, X) and falling back to a reader-proxy-aware ladder, then extracting
-    the body by kind (RSS/Atom feed, reader-proxy markdown, or HTML via
-    trafilatura).
-  - :func:`search_web` wraps :func:`wesearch.search.search` and flattens
-    its typed results to ``{"url", "title", "snippet"}`` dicts.
-
-Both are synchronous; an async caller lifts them with ``asyncio.to_thread``.
-SSRF pinning is an app-level concern the caller opts into: :func:`fetch_web`
-accepts an optional ``validated_hosts`` resolver and threads it into every
-underlying fetch (sagent's ``WebFetch`` passes its own). Default ``None`` leaves
-the wesearch core fetch unpinned.
+Synchronous; an async caller lifts it with ``asyncio.to_thread``. Transport,
+extractor, and SSRF trust all travel in the ``policy`` argument; omitting it
+takes the safe default, which validates each host to a public address before
+connecting.
 """
 
 from __future__ import annotations
@@ -28,26 +24,29 @@ import re
 
 from wesearch.fetch import (
     Content,
+    Extractor,
     Policy,
     RequestParams,
     Retry,
     classify_challenge,
     fetch,
 )
+from wesearch.fetch.extractor.html2text import extract_html2text
+from wesearch.fetch.extractor.markdownify import extract_markdownify
+from wesearch.fetch.extractor.raw import extract_raw
+from wesearch.fetch.extractor.trafilatura import extract_trafilatura
+from wesearch.fetch.providers import google_news, reddit, x
+from wesearch.fetch.providers.fallback import fetch_with_reader_fallback
 from wesearch.lib.custom_json import JSONValue
-from wesearch.providers import google_news, reddit, x
-from wesearch.providers.fallback import fetch_with_reader_fallback
-from wesearch.search import search
+from wesearch.types.extractor import Extract
 
 
 if TYPE_CHECKING:
     import defusedxml.common as _defused_common
     import defusedxml.ElementTree as _defused_etree  # noqa: N813 -- match lazy_import name
-    import trafilatura
 else:
     from wrapt import lazy_import
 
-    trafilatura = lazy_import("trafilatura")  # ~150ms
     # Bind the submodules directly so ``.fromstring`` / ``.DefusedXmlException``
     # resolve without an eager top-level ``import defusedxml.ElementTree``.
     _defused_etree = lazy_import("defusedxml.ElementTree")
@@ -57,8 +56,18 @@ else:
 # The only HTTP methods this module supports.
 HttpMethod = Literal["GET", "POST"]
 
+# The extractor each ``Extractor`` name selects. A dict rather than a chain of
+# ifs so an unknown name is a KeyError here, not a silent fall-through to the
+# default -- and so the set of extractors is one readable list.
+_EXTRACTORS: Final[dict[Extractor, Extract]] = {
+    "html2text": extract_html2text,
+    "markdownify": extract_markdownify,
+    "trafilatura": extract_trafilatura,
+    "raw": extract_raw,
+}
+
 # Response kinds classified by the fetch path; select the extraction branch.
-_KIND_HTML: Final = "html"  # raw HTML, needs trafilatura
+_KIND_HTML: Final = "html"  # raw HTML, needs an extractor
 _KIND_MARKDOWN: Final = "markdown"  # already-extracted markdown (reader proxy)
 _KIND_RSS: Final = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter
 # Maps a reddit.RedditPayload to its extraction kind. The public export serves
@@ -105,7 +114,7 @@ def fetch_web(
     POST bodies go through a direct :func:`wesearch.fetch.fetch`. The bytes
     are then rendered by kind: an RSS/Atom feed to markdown, reader-proxy
     markdown as-is, Reddit JSON via the comment/listing formatters, and HTML via
-    trafilatura main-content extraction.
+    ``policy.extractor`` (``html2text`` by default).
 
     Args:
       url: Target URL to fetch.
@@ -117,10 +126,10 @@ def fetch_web(
         policy, and a hardcoded ceiling here would silently defeat a caller that
         appends its own truncation notice. When set, the text is cut to this
         length and ``truncated`` reports whether the cut occurred.
-      policy: Transport and trust, forwarded into every underlying fetch
-        (providers, reader-proxy ladder, and the direct POST path). Defaults to
-        the safe ``untrusted`` level, which validates each host to a public
-        address before connecting.
+      policy: Transport, extractor, and trust, forwarded into every underlying
+        fetch (providers, reader-proxy ladder, and the direct POST path).
+        Defaults to the safe ``untrusted`` level, which validates each host to a
+        public address before connecting, and to the ``html2text`` extractor.
 
     Returns:
       result: A :class:`WebFetchResult` with the extracted text, the fetched
@@ -139,35 +148,19 @@ def fetch_web(
         form_body=form_body,
         policy=policy,
     )
-    text = _extract_text(body, kind=kind, method=method)
+    text = _extract_text(
+        body,
+        kind=kind,
+        method=method,
+        url=url,
+        extractor=(policy or Policy()).extractor,
+    )
     if max_chars is None:
         return WebFetchResult(text=text, url=url, kind=kind, truncated=False)
     truncated = len(text) > max_chars
     return WebFetchResult(
         text=text[:max_chars], url=url, kind=kind, truncated=truncated
     )
-
-
-def search_web(
-    query: str,
-    *,
-    backend: Literal["duckduckgo", "searxng"] | None = None,
-    num_results: int = 10,
-) -> list[dict[str, str]]:
-    """Search the web and return flat ``{"url", "title", "snippet"}`` dicts.
-
-    Args:
-      query: Search query string.
-      backend: Search backend; defaults to the configured backend (DuckDuckGo,
-        or SearXNG when ``SEARXNG_URL`` is set).
-      num_results: Maximum number of results to return.
-
-    Returns:
-      results: One dict per hit with ``url``, ``title``, and ``snippet`` keys.
-
-    """
-    results = search(query, backend=backend, num_results=num_results)
-    return [{"url": r.url, "title": r.title, "snippet": r.snippet} for r in results]
 
 
 def _fetch_body(
@@ -226,15 +219,22 @@ def _fetch_body(
     return body, _KIND_HTML
 
 
-def _extract_text(body: bytes, *, kind: str, method: HttpMethod) -> str:
+def _extract_text(
+    body: bytes,
+    *,
+    kind: str,
+    method: HttpMethod,
+    url: str = "",
+    extractor: Extractor = "html2text",
+) -> str:
     """Extract result text from a response body (unbounded; caller caps).
 
     ``kind`` selects the post-processing path:
       - ``_KIND_RSS``: parse as RSS 2.0 / Atom XML and format as markdown.
       - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already rendered
-        to markdown; running trafilatura on it would strip structure).
-      - ``_KIND_HTML``: trafilatura main-content extraction, with a raw-content
-        fallback when extraction returns nothing.
+        to markdown; re-extracting it would strip structure).
+      - ``_KIND_HTML``: the ``extractor`` named by the policy, with a
+        raw-content fallback when it returns nothing.
     """
     content = body.decode("utf-8", errors="replace")
 
@@ -244,34 +244,11 @@ def _extract_text(body: bytes, *, kind: str, method: HttpMethod) -> str:
         return content
     if method == "POST" or content.lstrip().startswith(("{", "[")):
         return content
-    extracted = trafilatura.extract(
-        content,
-        include_links=True,
-        include_tables=True,
-        # Emits a YAML front-matter block (title, url, description, date,
-        # license) ahead of the body. Two reasons, neither cosmetic:
-        #
-        # 1. It recovers substance the body extraction drops. trafilatura scores
-        #    article-shaped prose, so a page whose content is a short fragment
-        #    loses it -- every Merriam-Webster entry returned the subscription
-        #    advert and discarded the definition, which the page states verbatim
-        #    in its meta description. Since that advert is non-empty, the
-        #    ``or content`` fallback below never fired: the tool reported success
-        #    on the wrong text. Eight other option combinations were measured
-        #    (bare defaults, favor_recall, no_fallback, prune_xpath=None, ...);
-        #    this is the only one that recovers it.
-        # 2. It supplies the page URL, so relative links resolve absolute
-        #    (``](#comment37161)`` -> ``](https://host#comment37161)``) instead
-        #    of emitting fragments no reader can follow.
-        #
-        # Cost is ~200-580 chars of front-matter per page against a 400k cap.
-        with_metadata=True,
-    )
     # Verifying a change to this call: sagent's WebFetch caches GET results for
     # 15 minutes per (transport, url), so it replays the pre-change text and a
     # working fix reads as a failed one. Prove it via fetch_web in a FRESH
     # process, not by re-running the tool.
-    return extracted or content
+    return _EXTRACTORS[extractor](content, url=url) or content
 
 
 def _raise_success_challenge(url: str, body: bytes) -> None:

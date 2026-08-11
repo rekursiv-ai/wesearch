@@ -1,6 +1,6 @@
 """SearXNG science backend for :mod:`wesearch.paper`.
 
-Thin adapter over :func:`wesearch.search.searxng` with ``categories=
+Thin adapter over :func:`wesearch.search.search.searxng` with ``categories=
 "science"``: adds breadth beyond S2/OpenAlex (PubMed, Crossref, arXiv, ...) via
 the self-hosted SearXNG instance. SearXNG exposes no server-side year or
 open-access filter for the science category, so those bounds are applied
@@ -18,7 +18,7 @@ from wesearch.fetch import Transport
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import BackendError
 from wesearch.paper.ids import ARXIV_URL_RE, looks_like_paper_id
-from wesearch.search import PaperResult, SearchError, searxng
+from wesearch.search.search import PaperResult, SearchError, searxng
 
 
 __all__ = ["search"]

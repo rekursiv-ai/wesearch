@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from wesearch.errors import FetchError
+    from wesearch.types.errors import FetchError
 
 
 __all__ = [

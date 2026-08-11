@@ -20,13 +20,13 @@ from typing import TYPE_CHECKING, cast
 
 import logging
 
-from wesearch.errors import FetchError
 from wesearch.fetch import RequestParams, Retry, fetch
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.custom_types import IdType
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.ids import s2_wire_id
 from wesearch.paper.providers import s2
+from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:

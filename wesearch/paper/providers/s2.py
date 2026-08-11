@@ -21,7 +21,6 @@ import functools
 import json
 import os
 
-from wesearch.errors import FetchError
 from wesearch.fetch import (
     Content,
     Policy,
@@ -39,6 +38,7 @@ from wesearch.paper.paginate import (
     paginate as paginate_cursor,
 )
 from wesearch.ratelimit import cross_process_limiter
+from wesearch.types.errors import FetchError
 
 
 __all__ = [
