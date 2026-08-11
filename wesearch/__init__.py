@@ -19,7 +19,8 @@ Usage::
     from wesearch.fetch import fetch
     from wesearch.types.errors import FetchError, BotDetectionError
     from wesearch.scrape import get_element_content
-    from wesearch.search.search import search, SearchResult
+    from wesearch.search.custom_types import SearchResult
+    from wesearch.search.search import search
 """
 
 from __future__ import annotations

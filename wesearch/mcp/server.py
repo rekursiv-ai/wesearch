@@ -177,6 +177,11 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
 @mcp.tool()
 def author_search(query: str, limit: int = 10) -> dict[str, object]:
     """Find scholars by name; results are ranked by h-index."""
+    # Same guard the paper tools carry: the library slices directly, so a
+    # negative limit performed the network call and then returned every record
+    # except the last.
+    if limit < 1:
+        raise ValueError(f"'limit' must be >= 1, got {limit}.")
     result = paper_authors_mod.search_authors(query, limit=limit)
     return {
         "records": [lean_author(r) for r in result.records],
@@ -192,6 +197,10 @@ def author_papers(
     year_to: int | None = None,
 ) -> dict[str, object]:
     """Publications of one author (author_id from author_search)."""
+    if limit < 1:
+        raise ValueError(f"'limit' must be >= 1, got {limit}.")
+    if year_from is not None and year_to is not None and year_from > year_to:
+        raise ValueError(f"'year_from' ({year_from}) exceeds 'year_to' ({year_to}).")
     listing = paper_authors_mod.author_papers(
         author_id,
         limit=limit,
@@ -210,9 +219,13 @@ def web_search(
     num_results: int = 10,
     backend: Literal["duckduckgo", "searxng"] | None = None,
 ) -> list[dict[str, str]]:
-    """Web search (DuckDuckGo by default; SearXNG when configured via
-    SEARXNG_URL).
+    """Web search. Omitting ``backend`` takes this build's default, which is
+    DuckDuckGo in the public package. Pass ``backend="searxng"`` explicitly for
+    a SearXNG instance; it reads ``SEARXNG_URL`` and fails without it.
     """
+    # Deliberately not env-sniffing here: nothing in the dispatch path inspects
+    # SEARXNG_URL, so a docstring promising "SearXNG when configured" described
+    # a behavior no build had.
     results = web_search_fn(query, backend=backend, num_results=num_results)
     return [{"url": r.url, "title": r.title, "snippet": r.snippet} for r in results]
 
@@ -227,8 +240,10 @@ def web_fetch(
     """Fetch a page and return its extracted text. Set browser=true to route
     through headless Chrome when a site blocks plain HTTP clients (slower;
     needs a local Chrome/Chromium). ``extractor`` picks how the page becomes
-    text: ``html2text`` (default) keeps every text node, ``trafilatura``
-    returns only the scored article body, ``raw`` the HTML source.
+    text: ``html2text`` (default) keeps every text node, ``markdownify``
+    converts the document's elements instead (keeping nested lists and tables),
+    ``trafilatura`` returns only the scored article body, ``raw`` the HTML
+    source.
     """
     if max_chars < 1:
         raise ValueError(f"'max_chars' must be >= 1, got {max_chars}.")

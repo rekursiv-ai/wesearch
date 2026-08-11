@@ -1,0 +1,3 @@
+"""Typed override for the ``trafilatura.baseline`` helper this repo calls."""
+
+def html2txt(content: str | bytes, clean: bool = ...) -> str: ...

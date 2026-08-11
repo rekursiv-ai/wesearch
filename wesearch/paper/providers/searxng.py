@@ -18,7 +18,8 @@ from wesearch.fetch import Transport
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import BackendError
 from wesearch.paper.ids import ARXIV_URL_RE, looks_like_paper_id
-from wesearch.search.search import PaperResult, SearchError, searxng
+from wesearch.search.custom_types import PaperResult, SearchError
+from wesearch.search.searxng import searxng
 
 
 __all__ = ["search"]

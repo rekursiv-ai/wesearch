@@ -52,8 +52,14 @@ def test_fetch_web_html_path_extracts() -> None:
     assert not result.truncated
 
 
-def test_fetch_web_html_fallback_when_extract_empty() -> None:
-    """When the extractor returns nothing, the raw decoded content is returned."""
+def test_empty_extraction_does_not_fall_back_to_raw_markup() -> None:
+    """An extractor that finds no text yields no text, not the page source.
+
+    ``Extract`` permits an empty return, and a page with nothing to extract is
+    a real answer. Substituting ``content`` handed a model a page of raw HTML
+    in place of the text it asked for -- and on a JS-only page that is the
+    common case, not the corner one.
+    """
     with (
         patch(
             "wesearch.web.fetch_with_reader_fallback",
@@ -62,7 +68,24 @@ def test_fetch_web_html_fallback_when_extract_empty() -> None:
         patch.dict("wesearch.web._EXTRACTORS", {"html2text": _extract_nothing}),
     ):
         result = fetch_web("https://example.com")
-    assert "raw fallback" in result.text
+    assert result.text == ""
+
+
+def test_post_html_is_extracted_like_a_get() -> None:
+    """A POST that answers with HTML gets the same extraction a GET would.
+
+    The method decided this for a while, so a POST returning a page handed back
+    raw markup while the docstring promised ``policy.extractor``.
+    """
+    text = _extract_text(b"<html><body><p>Hello</p></body></html>", kind=_KIND_HTML)
+    assert "Hello" in text
+    assert "<p>" not in text
+
+
+def test_json_body_is_returned_verbatim() -> None:
+    """A JSON body skips extraction: it is already text, and HTML tools mangle it."""
+    body = b'{"hello": "world"}'
+    assert _extract_text(body, kind=_KIND_HTML) == body.decode()
 
 
 def test_html_extraction_keeps_content_an_extractor_would_score_away() -> None:
@@ -83,7 +106,6 @@ def test_html_extraction_keeps_content_an_extractor_would_score_away() -> None:
         b'<html><body><div class="pron"><a href="/audio">'
         b"\xcb\x88\xc4\x81-j\xc9\x99nt</a></div></body></html>",
         kind=_KIND_HTML,
-        method="GET",
     )
     assert "\u02c8\u0101-j\u0259nt" in text
 
@@ -91,9 +113,7 @@ def test_html_extraction_keeps_content_an_extractor_would_score_away() -> None:
 def test_extractor_policy_selects_the_named_extractor() -> None:
     """``Policy.extractor`` picks the implementation; ``raw`` proves dispatch."""
     html = b"<html><body><p>Hi</p></body></html>"
-    assert _extract_text(html, kind=_KIND_HTML, method="GET", extractor="raw") == (
-        html.decode()
-    )
+    assert _extract_text(html, kind=_KIND_HTML, extractor="raw") == html.decode()
 
 
 def test_fetch_web_reader_proxy_body_is_markdown() -> None:
@@ -299,7 +319,7 @@ def test_extract_text_markdown_kind_returns_as_is() -> None:
     """Markdown kind (reader-proxy output) skips extraction entirely."""
     md = b"# Title\n\nReader proxy returned this verbatim.\n"
     with patch.dict("wesearch.web._EXTRACTORS", {"html2text": _extract_wrong}):
-        out = _extract_text(md, kind=_KIND_MARKDOWN, method="GET")
+        out = _extract_text(md, kind=_KIND_MARKDOWN)
     assert "# Title" in out
     assert "WRONG" not in out
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.render import (
     format_author_line,
@@ -43,6 +45,18 @@ def test_lean_author_drops_empty_fields() -> None:
     }
 
 
+def test_lean_record_rejects_non_positive_caps() -> None:
+    """A zero/negative cap is a caller bug, not a request for everything.
+
+    ``abstract_chars=0`` -- the plainest way to ask for no abstract -- used to
+    return the full one, and ``author_limit=-1`` sliced an author off and then
+    appended "et al." claiming there were more.
+    """
+    for kwargs in ({"author_limit": 0}, {"author_limit": -1}, {"abstract_chars": 0}):
+        with pytest.raises(ValueError, match="must be >= 1"):
+            lean_record(_RECORD, **kwargs)
+
+
 def test_text_and_lean_renderings_agree_on_identity() -> None:
     """Both renderings surface the same identifiers for the same record.
 
@@ -59,6 +73,13 @@ def test_text_and_lean_renderings_agree_on_identity() -> None:
     assert lean["doi"] == "10.1000/x"
     assert str(_RECORD.year) in text
     assert lean["year"] == _RECORD.year
+
+
+def test_both_renderings_emit_sources() -> None:
+    """``sources`` is the field the two renderings most recently drifted on."""
+    rec = PaperRecord(title="T", sources=("s2", "openalex"))
+    assert "sources: s2,openalex" in format_record(rec)
+    assert lean_record(rec)["sources"] == ["s2", "openalex"]
 
 
 def test_format_author_line_is_one_greppable_line() -> None:

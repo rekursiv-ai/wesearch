@@ -158,11 +158,18 @@ def _id_prefix(rec: PaperRecord) -> str:
 
 
 def _trim_abstract(abstract: str | None, cap: int | None) -> str | None:
-    """Apply caller-supplied character cap to an abstract, if any."""
+    """Apply caller-supplied character cap to an abstract, if any.
+
+    ``None`` means uncapped. A non-positive cap does NOT: it used to return the
+    full abstract, so ``abstract_chars=0`` -- the plainest way to ask for no
+    abstract at all -- returned the longest possible one.
+    """
     if abstract is None:
         return None
-    if cap is None or cap <= 0 or len(abstract) <= cap:
+    if cap is None or len(abstract) <= cap:
         return abstract
+    if cap < 1:
+        raise ValueError(f"'abstract_chars' must be >= 1, got {cap}.")
     return abstract[:cap].rstrip() + "..."
 
 
@@ -177,6 +184,10 @@ def lean_record(
     they lived in separate packages they drifted -- different author
     truncation, one silently omitting the influential flag.
     """
+    if author_limit < 1:
+        raise ValueError(f"'author_limit' must be >= 1, got {author_limit}.")
+    if abstract_chars < 1:
+        raise ValueError(f"'abstract_chars' must be >= 1, got {abstract_chars}.")
     authors: list[str] = list(rec.authors[:author_limit])
     if len(rec.authors) > author_limit:
         authors.append("et al.")
@@ -191,6 +202,7 @@ def lean_record(
         "reference_count": rec.reference_count,
         "open_access_pdf": rec.open_access_pdf,
         "is_influential": rec.is_influential,
+        "sources": list(rec.sources),
         "abstract": _trim_abstract(rec.abstract, abstract_chars),
     }
     return {k: v for k, v in fields.items() if v not in (None, [], "")}

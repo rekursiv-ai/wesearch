@@ -9,7 +9,7 @@ import pytest
 
 from wesearch.paper.errors import BackendError
 from wesearch.paper.providers import searxng
-from wesearch.search.search import PaperResult, SearchError
+from wesearch.search.custom_types import PaperResult, SearchError
 
 
 def _result(

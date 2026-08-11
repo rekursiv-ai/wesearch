@@ -24,7 +24,7 @@ from wesearch.paper import (
 )
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.search import SearchResult as PaperSearchResult
-from wesearch.search.search import SearchResult as WebSearchResult
+from wesearch.search.custom_types import SearchResult as WebSearchResult
 from wesearch.web import _KIND_HTML, WebFetchResult, _extract_text
 
 
@@ -51,7 +51,7 @@ def _fetch_web_returning(
         url: str, *, max_chars: int = max_chars, policy: object = None
     ) -> WebFetchResult:
         del policy
-        text = _extract_text(html, kind=_KIND_HTML, method="GET", url=url)
+        text = _extract_text(html, kind=_KIND_HTML, url=url)
         return WebFetchResult(
             text=text[:max_chars],
             url=url,
