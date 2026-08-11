@@ -56,6 +56,12 @@ class EchoOracle:
     order; :meth:`captured` returns the most recent capture. Use as a context
     manager so the socket and thread are always released.
 
+    Args:
+      client_timeout_sec: How long one connection may stall before the oracle
+        drops it. Bounds a client that opens a socket and never finishes its
+        request; well above any loopback exchange, well below a test timeout,
+        so a wedge fails an assertion rather than the suite.
+
     Attributes:
       url: The base URL clients should request (``https://localhost:<port>/``).
       ca_path: Path to the PEM certificate clients must trust to reach the
@@ -63,7 +69,8 @@ class EchoOracle:
 
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, client_timeout_sec: float = 10.0) -> None:
+        self._client_timeout_sec = client_timeout_sec
         self._dir = Path(tempfile.mkdtemp(prefix="echo-oracle-"))
         self.ca_path = self._dir / "cert.pem"
         key_path = self._dir / "key.pem"
@@ -133,13 +140,23 @@ class EchoOracle:
                 raw, _ = self._sock.accept()
             except OSError:
                 return  # Socket closed by close(); normal shutdown.
-            self._handle(raw)
+            # One thread per connection: Chrome preconnects, leaving sockets
+            # open and idle. Served serially, the first such socket parks this
+            # loop in recv and starves every client behind it.
+            threading.Thread(target=self._handle, args=(raw,), daemon=True).start()
 
     def _handle(self, raw: socket.socket) -> None:
         """TLS-wrap one connection, capture its header order, send a stub reply."""
+        # A client that opens a socket and never completes its request must not
+        # hold the connection open indefinitely.
+        raw.settimeout(self._client_timeout_sec)
         try:
             conn = self._context.wrap_socket(raw, server_side=True)
-        except ssl.SSLError:
+        except OSError:
+            # OSError, not ssl.SSLError (its subclass): a client that RSTs
+            # mid-handshake raises ConnectionResetError instead, which escaped
+            # _serve and killed the accept loop -- every later request in the
+            # session then hung until its own timeout.
             raw.close()
             return
         try:

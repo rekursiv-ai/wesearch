@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import http.client
+import socket
 import ssl
+import struct
 import time
 
 from wesearch.chrome.echo import (
@@ -66,6 +68,62 @@ class TestEchoOracle:
             conn.getresponse().read()
             conn.close()
             assert oracle.captured() == ()
+
+
+class TestEchoOracleResilience:
+    def test_survives_a_client_that_resets_the_connection(self) -> None:
+        """An aborted client must not kill the accept loop.
+
+        A client that RSTs before finishing the TLS handshake raises
+        ``ConnectionResetError`` -- an ``OSError``, not an ``ssl.SSLError`` --
+        out of ``wrap_socket``. Uncaught, it unwinds ``_serve`` and the oracle
+        stops accepting: pytest reports ``PytestUnhandledThreadExceptionWarning``
+        and every later request in the session hangs until its timeout.
+        """
+        with EchoOracle() as oracle:
+            port = int(oracle.url.rsplit(":", 1)[1].rstrip("/"))
+            aborting = socket.socket()
+            # SO_LINGER with a zero timeout makes close() send RST, not FIN.
+            aborting.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            aborting.connect(("127.0.0.1", port))
+            aborting.close()
+
+            context = ssl.create_default_context(cafile=str(oracle.ca_path))
+            conn = http.client.HTTPSConnection(
+                "localhost", port, timeout=5, context=context
+            )
+            conn.request("GET", "/", headers={"User-Agent": "probe"})
+            conn.getresponse().read()
+            conn.close()
+            assert "user-agent" in oracle.captured()
+
+    def test_an_idle_client_does_not_block_the_next_one(self) -> None:
+        """A connection that stalls mid-request must not wedge the oracle.
+
+        Chrome preconnects: it opens sockets speculatively and leaves them
+        idle. Handled serially with no timeout, the first such socket parks the
+        accept loop in ``recv`` forever and every subsequent client -- including
+        the parity test's own fetch -- blocks until its own timeout.
+        """
+        with EchoOracle() as oracle:
+            port = int(oracle.url.rsplit(":", 1)[1].rstrip("/"))
+            context = ssl.create_default_context(cafile=str(oracle.ca_path))
+            stalled = context.wrap_socket(
+                socket.create_connection(("localhost", port), timeout=5),
+                server_hostname="localhost",
+            )
+            stalled.sendall(b"GET / HTTP")  # A head that never terminates.
+
+            served = http.client.HTTPSConnection(
+                "localhost", port, timeout=5, context=context
+            )
+            served.request("GET", "/", headers={"User-Agent": "probe"})
+            served.getresponse().read()
+            served.close()
+            stalled.close()
+            assert "user-agent" in oracle.captured()
 
 
 class TestEchoOracleShutdown:
