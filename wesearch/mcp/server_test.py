@@ -19,8 +19,6 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
-# sagent is monorepo-only: wesearch ships standalone and cannot import it, so
-# the cross-surface schema check below is stripped from the export.
 from wesearch.mcp import server as mcp_server
 from wesearch.paper import (
     authors as paper_authors_mod,
