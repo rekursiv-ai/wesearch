@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import (
+    TYPE_CHECKING,
+    cast,
+    get_args,
+)
 
 import asyncio
 
@@ -15,6 +19,8 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
+# sagent is monorepo-only: wesearch ships standalone and cannot import it, so
+# the cross-surface schema check below is stripped from the export.
 from wesearch.mcp import server as mcp_server
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -25,6 +31,7 @@ from wesearch.paper import (
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.search import SearchResult as PaperSearchResult
 from wesearch.search.custom_types import SearchResult as WebSearchResult
+from wesearch.types.params import Transport
 from wesearch.web import _KIND_HTML, WebFetchResult, _extract_text
 
 
@@ -51,7 +58,10 @@ def _fetch_web_returning(
         url: str, *, max_chars: int = max_chars, policy: object = None
     ) -> WebFetchResult:
         del policy
-        text = _extract_text(html, kind=_KIND_HTML, url=url)
+        # Pinned, not defaulted: this stub feeds a few-line fixture, which the
+        # default trafilatura scores as boilerplate and discards entirely --
+        # leaving no text for the truncation assertion to be about.
+        text = _extract_text(html, kind=_KIND_HTML, url=url, extractor="html2text")
         return WebFetchResult(
             text=text[:max_chars],
             url=url,
@@ -164,6 +174,51 @@ def test_web_fetch_routes_through_the_shared_render_path(
     out = mcp_server.web_fetch("https://e.co", extractor="trafilatura")
     assert out["kind"] == "html"
     assert captured["extractor"] == "trafilatura"
+
+
+def test_web_fetch_forwards_every_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each ``Transport`` value reaches the policy verbatim.
+
+    The parameter was a ``browser: bool`` collapsing five transports into two,
+    and ``resolve_transport`` maps ``"auto"`` to ``"curl-then-zendriver"`` for
+    an eligible GET -- so both boolean values selected the SAME transport and
+    the flag chose nothing at all. ``curl`` and ``stdlib`` were unreachable
+    from MCP entirely.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake(
+        url: str, *, max_chars: int | None = None, policy: object = None
+    ) -> WebFetchResult:
+        del max_chars
+        captured["transport"] = getattr(policy, "transport", None)
+        return WebFetchResult(text="body", url=url, kind="html", truncated=False)
+
+    monkeypatch.setattr(mcp_server, "fetch_web", _fake)
+    for transport in get_args(Transport):
+        mcp_server.web_fetch("https://e.co", transport=transport)
+        assert captured["transport"] == transport
+
+
+def test_web_search_forwards_categories_and_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP search surface exposes what the sagent tool does.
+
+    ``categories`` and ``transport`` were absent, so an MCP client could not
+    reach a SearXNG result tab or pin a retrieval path.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake(query: str, **kwargs: object) -> list[WebSearchResult]:
+        del query
+        captured.update(kwargs)
+        return [WebSearchResult(url="https://e.co", title="E", snippet="s")]
+
+    monkeypatch.setattr(mcp_server, "web_search_fn", _fake)
+    mcp_server.web_search("q", categories="science", transport="curl")
+    assert captured["categories"] == "science"
+    assert captured["transport"] == "curl"
 
 
 def test_web_fetch_treats_the_model_url_as_untrusted(
