@@ -132,10 +132,6 @@ or unlock a backend, and are all optional unless noted.
 - `SEARXNG_URL` -- required only to use a `"searxng"` backend (`search(..., backend="searxng")`
   or `paper.search(..., source="searxng")`); the base URL of a SearXNG instance you control or
   trust.
-- `WESEARCH_BROWSER_CONNECTION_TIMEOUT_SEC` -- optional; only affects the `"zendriver"` browser
-  transport. Seconds to wait for Chrome's DevTools channel per launch attempt (default `1.0`,
-  which fails fast when no usable browser exists so the `curl-then-zendriver` cascade stays
-  snappy). Wrapper-launched browsers need much longer -- see the snap note below.
 
 State (the cookie/User-Agent profile jar, cross-process rate-limit lockfiles, the browser
 transport's persistent Chrome profile) is written under the OS's standard per-user data
@@ -143,17 +139,16 @@ directory -- `XDG_DATA_HOME` (or `~/.local/share`) on Linux, `~/Library/Applicat
 macOS, `%LOCALAPPDATA%` on Windows -- namespaced per component (see `wesearch/lib/userdirs.py`).
 No configuration file is required or read.
 
-**Snap-packaged Chromium (stock Ubuntu) needs two accommodations** for the `"zendriver"`
-transport, or it fails every launch with `BrowserUnavailableError`:
+**The `"zendriver"` transport needs a non-snap Chrome or Chromium** (e.g. Google Chrome's
+`.deb` on x86_64). Snap-packaged Chromium fails every launch with `BrowserUnavailableError`
+for two reasons, neither of which the library can work around:
 
-1. `WESEARCH_BROWSER_CONNECTION_TIMEOUT_SEC=30` -- the snap wrapper takes several seconds to
-   expose DevTools, far beyond the 1-second default, and each retry restarts the browser.
-2. `XDG_DATA_HOME` pointing at a **non-hidden** directory (e.g. `~/wesearch-data`) -- snap's
-   AppArmor confinement silently blocks writes under hidden home paths like `~/.local/share`,
-   so Chrome dies on its profile lock at every launch when the profile jar lives in the default
-   location.
-
-A non-snap Chrome or Chromium (e.g. Google Chrome's `.deb` on x86_64) needs neither.
+1. The snap wrapper takes several seconds to expose DevTools -- far beyond the launch budget
+   (0.5s per attempt, 6 attempts), which is sized so the `curl-then-zendriver` cascade fails
+   fast on hosts with no usable browser rather than stalling every fetch.
+2. Snap's AppArmor confinement silently blocks writes under hidden home paths like
+   `~/.local/share`, so Chrome dies on its profile lock wherever the profile jar lands by
+   default.
 
 ## Development
 
