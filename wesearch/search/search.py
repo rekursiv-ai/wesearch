@@ -1,10 +1,13 @@
 """The backend-agnostic entry point: :func:`search`.
 
-Dispatches to the backend named by the caller, or to
-``custom_types.DEFAULT_SEARCH_BACKEND`` when none is given -- a build-time
-constant, NOT an environment probe. Nothing here inspects ``SEARXNG_URL``;
-asking for SearXNG is explicit. The overloads exist so a
-``categories`` argument narrows the return type to that category's record.
+Dispatches to the backend named by the caller. When none is given, a
+non-general ``categories`` selects ``searxng`` -- the only backend that serves
+result tabs -- and anything else takes ``custom_types.DEFAULT_SEARCH_BACKEND``,
+a build-time constant, NOT an environment probe. Nothing here inspects
+``SEARXNG_URL``; asking for SearXNG is explicit. A category named ALONGSIDE a
+backend that cannot serve it raises rather than overriding the stated choice.
+The overloads exist so a ``categories`` argument narrows the return type to
+that category's record.
 """
 
 from __future__ import annotations
@@ -168,8 +171,16 @@ def search(
 
     """
     if backend is None:
-        backend = DEFAULT_SEARCH_BACKEND
+        # A non-general tab exists only on SearXNG, so asking for one IS asking
+        # for that backend when the caller named none. Resolved here rather than
+        # in each adapter: sagent forced it and the MCP server did not, so the
+        # same call raised on one surface and worked on the other -- and only in
+        # the public build, whose default backend is not SearXNG.
+        backend = "searxng" if categories != "general" else DEFAULT_SEARCH_BACKEND
     if categories != "general" and backend != "searxng":
+        # An EXPLICIT backend still errors. sagent used to overwrite it, so
+        # ``backend="duckduckgo", categories="science"`` silently ran against
+        # SearXNG -- a stated choice replaced without a word.
         raise ValueError(
             f"'categories' is only supported by the 'searxng' backend, not {backend!r}."
         )

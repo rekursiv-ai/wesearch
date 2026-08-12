@@ -16,7 +16,7 @@ connecting.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final
 from xml.etree.ElementTree import Element, ParseError
 
 import html
@@ -37,6 +37,7 @@ from wesearch.fetch.extractor.raw import extract_raw
 from wesearch.fetch.extractor.trafilatura import extract_trafilatura
 from wesearch.fetch.providers import google_news, reddit, x
 from wesearch.fetch.providers.fallback import fetch_with_reader_fallback
+from wesearch.fetch.spec import HttpMethod
 from wesearch.lib.custom_json import JSONValue
 from wesearch.types.extractor import Extract
 
@@ -52,9 +53,6 @@ else:
     _defused_etree = lazy_import("defusedxml.ElementTree")
     _defused_common = lazy_import("defusedxml.common")
 
-
-# The only HTTP methods this module supports.
-HttpMethod = Literal["GET", "POST"]
 
 # The extractor each ``Extractor`` name selects. A dict rather than a chain of
 # ifs so an unknown name is a KeyError here, not a silent fall-through to the
@@ -114,7 +112,7 @@ def fetch_web(
     POST bodies go through a direct :func:`wesearch.fetch.fetch`. The bytes
     are then rendered by kind: an RSS/Atom feed to markdown, reader-proxy
     markdown as-is, Reddit JSON via the comment/listing formatters, and HTML via
-    ``policy.extractor`` (``trafilatura`` by default).
+    ``policy.extractor`` (``html2text`` by default).
 
     Args:
       url: Target URL to fetch.
@@ -129,11 +127,14 @@ def fetch_web(
       policy: Transport, extractor, and trust, forwarded into every underlying
         fetch (providers, reader-proxy ladder, and the direct POST path).
         Defaults to the safe ``untrusted`` level, which validates each host to a
-        public address before connecting, and to the ``trafilatura`` extractor.
+        public address before connecting, and to the ``html2text`` extractor.
 
     Returns:
       result: A :class:`WebFetchResult` with the extracted text, the fetched
-        URL, the response kind, and whether the text was truncated.
+        URL, the response kind, and whether the text was truncated. ``text``
+        may be EMPTY on a successful fetch: an extractor that finds nothing
+        returns nothing, and the raw markup is deliberately not substituted
+        (see :func:`_extract_text`). A JS-only page is the common case.
 
     Raises:
       BotDetectionError: When the fetch (or a success-body challenge check)
@@ -223,7 +224,7 @@ def _extract_text(
     *,
     kind: str,
     url: str = "",
-    extractor: Extractor = "trafilatura",
+    extractor: Extractor = "html2text",
 ) -> str:
     """Extract result text from a response body (unbounded; caller caps).
 

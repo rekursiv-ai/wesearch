@@ -35,7 +35,7 @@ in the common case.
 
 ```python
 from wesearch.search.search import search
-from wesearch.fetch import RequestParams, fetch
+from wesearch.fetch import RequestParams, Retry, fetch
 from wesearch.scrape import get_element_content
 
 # Web search (DuckDuckGo by default)
@@ -44,7 +44,9 @@ for r in hits:
     print(r.title, r.url)
 
 # Fetch + scrape
-body, _session = fetch("https://example.com", request=RequestParams(timeout_sec=10))
+body, _session = fetch(
+    "https://example.com", request=RequestParams(retry=Retry(timeout_sec=10))
+)
 title = get_element_content(body.decode("utf-8"), "h1")
 
 # Scholarly papers: Semantic Scholar + OpenAlex, reciprocal-rank-fused by default
@@ -79,10 +81,10 @@ wesearch/
 │   │   ├── zendriver.py opt-in real-Chrome backend for JS-gated pages
 │   │   └── transport_routing.py  per-domain transport selection
 │   ├── extractor/   how a fetched page becomes text
-│   │   ├── html2text.py   every text node as Markdown
-│   │   ├── markdownify.py the document's elements as Markdown
-│   │   ├── trafilatura.py the scored article body only (the default)
-│   │   └── raw.py         the source, untouched
+│   │   ├── html2text.py   every text node as Markdown (the default)
+│   │   ├── trafilatura.py the scored article body only; article-shaped pages
+│   │   ├── raw.py         the source, untouched
+│   │   └── markdownify.py the document's elements as Markdown
 │   ├── providers/   per-site fetch strategies (reddit, google_news, x, ...)
 │   └── challenge.py bot-challenge detection and classification
 ├── search/          web search over pluggable backends
@@ -191,8 +193,9 @@ For Claude Code: `claude mcp add --scope user wesearch -- wesearch-mcp`.
 Tools exposed: `paper_search` (fused Semantic Scholar + OpenAlex),
 `paper_details`, `paper_references`, `paper_citations`, `paper_pdf`
 (downloads into the user cache and returns the path), `author_search`,
-`author_papers`, `web_search`, and `web_fetch` (extracted page text, with an
-opt-in headless-browser fallback for bot-walled sites). Outputs are
+`author_papers`, `web_search`, and `web_fetch` (extracted page text; the
+default transport escalates to a headless browser when a site bot-blocks the
+header transports). Outputs are
 deliberately compact for model consumption; abstracts are truncated and
 empty fields dropped. The server is synchronous and per-client — state that
 must be shared (rate limits, cookie/UA profiles) is already cross-process
