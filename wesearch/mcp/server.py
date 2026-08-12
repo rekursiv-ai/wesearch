@@ -22,6 +22,7 @@ client as MCP tool errors carrying the underlying exception message
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal
 
 import hashlib
@@ -37,6 +38,7 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
         "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]"
     ) from e
 
+from wesearch.fetch.spec import FetchParams
 from wesearch.lib.userdirs import cache_dir
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -47,9 +49,15 @@ from wesearch.paper import (
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
 from wesearch.search.custom_types import SearchBackends
+from wesearch.search.render import lean_result
 from wesearch.search.search import search as web_search_fn
 from wesearch.search.searxng import SearxngCategory
-from wesearch.types.params import Extractor, Policy, Transport
+from wesearch.search.spec import SearchParams
+from wesearch.types.params import (
+    Extractor,
+    Policy,
+    Transport,
+)
 from wesearch.web import fetch_web
 
 
@@ -62,6 +70,23 @@ mcp = MCPServer(
         "Scholar and OpenAlex."
     ),
 )
+
+
+def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
+    """Append generated prose to a tool's docstring before the SDK reads it.
+
+    A docstring cannot interpolate, and the MCP SDK publishes ``__doc__`` as
+    the tool description -- so a generated list (the SearXNG tabs) would
+    otherwise have to be hand-copied into the docstring, which is exactly how
+    both surfaces came to omit the ``social media`` tab. Applied UNDER
+    ``@mcp.tool()``, which reads the attribute after this runs.
+    """
+
+    def decorate(fn: F) -> F:
+        fn.__doc__ = f"{(fn.__doc__ or '').rstrip()}\n{extra}\n"
+        return fn
+
+    return decorate
 
 
 @mcp.tool()
@@ -216,19 +241,22 @@ def author_papers(
 
 
 @mcp.tool()
+@_append_doc(SearchParams.asset_markdown())
 def web_search(
     query: str,
     num_results: int = 10,
     backend: SearchBackends | None = None,
     categories: SearxngCategory = "general",
     transport: Transport = "auto",
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     """Web search. Omitting ``backend`` takes this build's default, which is
     DuckDuckGo in the public package. Pass ``backend="searxng"`` explicitly for
     a SearXNG instance; it reads ``SEARXNG_URL`` and fails without it.
-    ``categories`` selects a SearXNG result tab (science/images/videos/news/
-    map/music/it/files) and requires the SearXNG backend. ``transport`` picks
-    the retrieval path; see the ``web_fetch`` tool for the values.
+    ``categories`` selects a SearXNG result tab, which selects that backend
+    when none is named and is rejected alongside an explicit non-SearXNG one.
+    ``transport`` picks the retrieval path; see ``web_fetch`` for the values.
+    Category tabs and what each returns:
+
     """
     # Deliberately not env-sniffing here: nothing in the dispatch path inspects
     # SEARXNG_URL, so a docstring promising "SearXNG when configured" described
@@ -240,28 +268,30 @@ def web_search(
         categories=categories,
         transport=transport,
     )
-    return [{"url": r.url, "title": r.title, "snippet": r.snippet} for r in results]
+    # lean_result, not a hand-written projection: flattening to
+    # url/title/snippet here meant an MCP client could ASK for the science tab
+    # and receive none of the DOI, authors, or PDF link that make it a science
+    # result. The sagent tool rendered those all along.
+    return [lean_result(r) for r in results]
 
 
 @mcp.tool()
+@_append_doc(FetchParams.asset_markdown())
 def web_fetch(
     url: str,
     max_chars: int = 8000,
+    # Module constants, not ``FetchParams.default(...)``: ruff B008 forbids a
+    # call in a signature default. The parity test asserts these EQUAL the
+    # spec's, so the constant cannot drift from the description beside it.
     transport: Transport = "auto",
-    extractor: Extractor = "trafilatura",
+    extractor: Extractor = "html2text",
 ) -> dict[str, object]:
-    """Fetch a page and return its extracted text. ``transport`` picks the
-    retrieval path: ``auto`` (default) tries curl and escalates to headless
-    Chrome when a site bot-blocks it, ``curl`` the impersonated HTTP client,
-    ``zendriver`` a real browser (slower; needs a local Chrome/Chromium),
-    ``curl-then-zendriver`` the explicit ladder, ``stdlib`` the reference
-    client. ``extractor`` picks how the page becomes text: ``trafilatura``
-    (default) returns only the scored article body -- smallest, but it drops
-    the substance of any page that is not article-shaped (a dictionary entry,
-    a Q&A thread) -- ``html2text`` keeps every text node, ``markdownify``
-    converts the document's elements instead (keeping nested lists and
-    tables), and ``raw`` the HTML source. Re-fetch with ``html2text`` when the
-    answer you expected is missing.
+    """Fetch a page and return its extracted text.
+
+    GET only; ``max_chars`` caps the returned body. Every other knob is
+    described below from the shared spec, so this surface and the sagent tool
+    cannot document the same parameter differently.
+
     """
     if max_chars < 1:
         raise ValueError(f"'max_chars' must be >= 1, got {max_chars}.")

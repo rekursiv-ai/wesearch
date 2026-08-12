@@ -8,8 +8,9 @@ overloads in :mod:`wesearch.search.search` meaningful.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal, overload
+from typing import Final, Literal, get_args, overload
 from urllib.parse import urlencode
 
 import json
@@ -264,7 +265,7 @@ def searxng(
     # list_val, not dicts_val: the latter drops an EMPTY object, and a result
     # with no recognized fields is still a result the backend returned.
     items = list_val(dict_val(json.loads(text)).get("results"))
-    parse = _SEARXNG_PARSERS.get(categories, _searxng_web)
+    parse = category_parser(categories)
     return [parse(dict_val(item)) for item in items[:num_results]]
 
 
@@ -443,22 +444,77 @@ def _searxng_paper(item: dict[str, object]) -> PaperResult:
     )
 
 
-# Per-category result parser. A category absent here falls back to the generic
-# web reader (``general`` and the structure-free ``social media`` tab). Each
-# parser returns a ``SearchResult`` or a subclass of it, so the table's value
-# type stays uniform while ``searxng``'s overloads narrow the element type.
-_SEARXNG_PARSERS: Mapping[
-    SearxngCategory, Callable[[dict[str, object]], SearxngResult]
-] = {
-    "science": _searxng_paper,
-    "images": _searxng_image,
-    "videos": _searxng_video,
-    "news": _searxng_media,
-    "music": _searxng_media,
-    "map": _searxng_map,
-    "it": _searxng_it,
-    "files": _searxng_files,
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CategoryInfo:
+    """What a tab carries beyond its name: prose and a result parser.
+
+    Attributes:
+      gloss: One phrase naming what the tab returns, rendered into every tool
+        description. Written here rather than in each adapter's prose because
+        a hand-copied list drifts: both surfaces omitted ``social media`` for
+        as long as the tab has existed.
+      parser: Reader for the tab's result template. ``None`` means the tab has
+        no structured template and reads through the generic web parser --
+        which is what ``general`` and ``social media`` are.
+
+    """
+
+    gloss: str
+    parser: Callable[[dict[str, object]], SearxngResult] | None = None
+
+
+# One record per member of ``SearxngCategory``. The Literal above stays the only
+# place a tab NAME is spelled; this attaches data to those names, and the
+# assertion below makes a missing record an ImportError rather than a tab that
+# is silently unglossed and unparsed.
+CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
+    "general": CategoryInfo(gloss="web results"),
+    "images": CategoryInfo(
+        gloss="image URL, resolution, format, source", parser=_searxng_image
+    ),
+    "videos": CategoryInfo(
+        gloss="duration, view count, channel, embed URL", parser=_searxng_video
+    ),
+    "news": CategoryInfo(gloss="web results with publish date", parser=_searxng_media),
+    "map": CategoryInfo(
+        gloss="places with coordinates and structured address", parser=_searxng_map
+    ),
+    "music": CategoryInfo(
+        gloss="tracks with audio/embed URL and duration", parser=_searxng_media
+    ),
+    "it": CategoryInfo(
+        gloss="packages (name/version/license/homepage), repos, code",
+        parser=_searxng_it,
+    ),
+    "science": CategoryInfo(
+        gloss="papers with authors/DOI/citations", parser=_searxng_paper
+    ),
+    "files": CategoryInfo(
+        gloss="files (filename/size/type) and torrents", parser=_searxng_files
+    ),
+    "social media": CategoryInfo(gloss="posts from Mastodon/Lemmy (web results)"),
 }
+
+# Not a test: a tab added to the Literal without a record here must fail at
+# IMPORT, where the author sees it, rather than at the first query for that tab.
+assert set(CATEGORIES) == set(get_args(SearxngCategory.__value__)), (
+    "every SearxngCategory needs a CATEGORIES record"
+)
+
+
+def category_parser(
+    category: SearxngCategory,
+) -> Callable[[dict[str, object]], SearxngResult]:
+    """Return the reader for ``category``, or the generic web reader."""
+    return CATEGORIES[category].parser or _searxng_web
+
+
+def category_gloss() -> str:
+    """Render every tab as one description line; no hand-copied list."""
+    return "\n".join(
+        f"  - `{name}` -- {CATEGORIES[name].gloss}."
+        for name in get_args(SearxngCategory.__value__)
+    )
 
 
 def _searxng_url() -> str:

@@ -2,21 +2,22 @@
 
 Usage::
 
-    from wesearch.fetch import RequestParams, fetch
+    from wesearch.fetch import Content, RequestParams, Retry, fetch
     from wesearch.scrape import get_element_content
 
-    html = fetch(
-        "https://example.com", request=RequestParams(timeout_sec=10)
-    )[0].decode("utf-8")
+    body, _ = fetch(
+        "https://example.com", request=RequestParams(retry=Retry(timeout_sec=10))
+    )
 
     # With cookies:
     body, _ = fetch(
         "https://example.com",
-        request=RequestParams(cookies={"session": "abc", "lang": "en"}),
+        request=RequestParams(
+            content=Content(cookies={"session": "abc", "lang": "en"})
+        ),
     )
-    html = body.decode("utf-8")
 
-    title = get_element_content(html, "h1")
+    title = get_element_content(body.decode("utf-8"), "h1")
 """
 
 from __future__ import annotations

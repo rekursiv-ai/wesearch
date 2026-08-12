@@ -149,3 +149,8 @@ pgdata/
 *.sql.gz
 *.dump
 db_dumps/
+
+# Third-party pages cached for the extractor benchmark and the tests that
+# replay it. Fetched on demand by scripts/compare_extractors.py; a copy that
+# lands in the tree is a rebuildable cache, never a checked-in fixture.
+testdata/

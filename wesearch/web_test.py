@@ -46,10 +46,11 @@ def test_fetch_web_html_path_extracts() -> None:
     ):
         result = fetch_web("https://example.com")
     assert isinstance(result, WebFetchResult)
-    # Containment, not equality: the default trafilatura prepends a YAML
-    # metadata block, and this test is about the dispatch route, not the
-    # extractor's output shape.
-    assert "Hi" in result.text
+    # Equality, and the markup check below: a containment-only assertion here
+    # passes when extraction is BYPASSED and the source returned verbatim,
+    # since the fixture's own markup contains "Hi".
+    assert result.text.strip() == "Hi"
+    assert "<p>" not in result.text
     assert result.kind == _KIND_HTML
     assert result.url == "https://example.com"
     assert not result.truncated
@@ -68,7 +69,7 @@ def test_empty_extraction_does_not_fall_back_to_raw_markup() -> None:
             "wesearch.web.fetch_with_reader_fallback",
             return_value=(b"<html><body>raw fallback</body></html>", False),
         ),
-        patch.dict("wesearch.web._EXTRACTORS", {"trafilatura": _extract_nothing}),
+        patch.dict("wesearch.web._EXTRACTORS", {"html2text": _extract_nothing}),
     ):
         result = fetch_web("https://example.com")
     assert result.text == ""
@@ -191,7 +192,8 @@ def test_fetch_web_google_news_html_payload() -> None:
     ):
         result = fetch_web("https://news.google.com/articles/xyz")
     assert result.kind == _KIND_HTML
-    assert "article" in result.text
+    assert result.text.strip() == "article"
+    assert "<body>" not in result.text
 
 
 def test_fetch_web_x_routes_to_markdown() -> None:

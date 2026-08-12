@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    cast,
-    get_args,
-)
+from typing import TYPE_CHECKING, cast, get_args, get_type_hints
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -19,6 +16,7 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
+from wesearch.fetch.spec import BodyFetchParams
 from wesearch.mcp import server as mcp_server
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -29,7 +27,9 @@ from wesearch.paper import (
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.search import SearchResult as PaperSearchResult
 from wesearch.search.custom_types import SearchResult as WebSearchResult
+from wesearch.search.spec import SearchParams
 from wesearch.types.params import Transport
+from wesearch.types.spec import ParamSet, literal_values
 from wesearch.web import _KIND_HTML, WebFetchResult, _extract_text
 
 
@@ -217,6 +217,51 @@ def test_web_search_forwards_categories_and_transport(
     mcp_server.web_search("q", categories="science", transport="curl")
     assert captured["categories"] == "science"
     assert captured["transport"] == "curl"
+
+
+# The params a GET-only surface omits BY DESIGN. Named, so the omission is a
+# stated boundary a reader can check rather than a gap the comparison happens
+# not to look at.
+_MCP_OMITS = frozenset({"method", "json", "form"})
+
+
+_PARAM_SURFACES: list[tuple[type[ParamSet], str, frozenset[str]]] = [
+    (BodyFetchParams, "web_fetch", _MCP_OMITS),
+    (SearchParams, "web_search", frozenset()),
+]
+
+
+@pytest.mark.parametrize(("spec", "tool", "omitted"), _PARAM_SURFACES)
+def test_mcp_renders_every_declared_param(
+    spec: type[ParamSet], tool: str, omitted: frozenset[str]
+) -> None:
+    """Every declared knob, on both surfaces, derived from the spec.
+
+    The first version of this check iterated a hand-typed
+    ``("transport", "extractor")`` pair, so the three params the surfaces
+    actually differ on -- ``method``, ``json``, ``form`` -- were never
+    examined, and a knob added to the spec would have gone unnoticed exactly
+    as the MCP ``browser`` bool did. ``web_search`` had no check at all.
+    """
+    fn = getattr(mcp_server, tool)
+    declared = set(spec.params())
+    hints = get_type_hints(fn)
+    assert declared - set(hints) == omitted
+    for name in declared & set(hints):
+        param = spec.params()[name]
+        if param.choices:
+            assert set(literal_values(hints[name])) == set(param.choices), (
+                f"{tool}.{name} values diverged"
+            )
+        if not param.required:
+            assert _signature_default(fn, name) == param.default, (
+                f"{tool}.{name} default diverged"
+            )
+
+
+def _signature_default(fn: Callable[..., object], name: str) -> object:
+    """The default value ``fn``'s signature gives ``name``."""
+    return inspect.signature(fn).parameters[name].default
 
 
 def test_web_fetch_treats_the_model_url_as_untrusted(

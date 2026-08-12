@@ -23,9 +23,9 @@ unvalidated fetch.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import math
 import random
@@ -74,21 +74,34 @@ Transport: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
 Trust: TypeAlias = Literal["untrusted", "internal"]  # noqa: UP040 -- get_args()
 
 # How a fetched HTML page becomes text. ``"html2text"`` renders every text node
-# as Markdown; ``"markdownify"`` converts the document's elements instead, which
-# keeps nested structure a text walk flattens; ``"trafilatura"`` scores blocks
-# and returns only what it judges to be the article; ``"raw"`` returns the
-# source untouched.
+# as Markdown; ``"trafilatura"`` scores blocks and returns only what it judges to
+# be the article; ``"raw"`` returns the source untouched; ``"markdownify"``
+# converts the document's elements, which keeps nested structure a text walk
+# flattens.
 #
-# They are not ranked versions of one idea -- they answer different questions,
-# and the article-shaped assumption behind ``"trafilatura"`` is wrong for a
-# dictionary entry, a Q&A thread, or a profile timeline, where it returns
-# plausible-looking output with the substance missing (a StackOverflow thread
-# minus every answer). ``wesearch/scripts/compare_extractors.py`` measures
-# all of them against a corpus of those shapes.
+# They are not ranked versions of one idea -- they answer different questions --
+# but the default is not a toss-up. ``scripts/compare_extractors.py`` scores
+# every converter against hand-picked content probes on an 11-page corpus of the
+# shapes that break extractors. Measured there, ``html2text`` loses 0 of 37
+# probes and ``trafilatura`` loses 12: it keeps ONE answer of a StackOverflow
+# thread (spliced, trailing "9more comments"), returns 864 characters of a
+# profile timeline where ``html2text`` returns 4_530, and drops a dictionary
+# entry's pronunciation. It is also
+# undetectable -- trafilatura's API is ``str | None`` with no confidence signal,
+# no HTML5 landmark predicts the loss (x.com matches its strongest rule and loses
+# every probe; Hacker News matches none and loses none), and the one available
+# proxy -- output length against another converter's -- is anti-correlated with
+# the compression that motivates using it at all.
+#
+# So ``html2text`` is the default: whole, at ~2.5x the characters. Reach for
+# ``trafilatura`` deliberately, on a page whose substance IS one contiguous prose
+# body (an encyclopedia article, a spec document), where it is both smaller and
+# lossless. Ordered here by that expected reach; ``get_args`` feeds every schema
+# enum, so this order is what a caller reads first.
 #
 # A ``Literal`` for the same reason as ``Transport`` above.
 Extractor: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
-    "html2text", "markdownify", "trafilatura", "raw"
+    "html2text", "trafilatura", "raw", "markdownify"
 ]
 
 
@@ -256,6 +269,12 @@ class Policy:
     application's rendering choice and nothing a server ever sees -- the same
     test that puts ``transport`` here.
 
+    The class-level defaults ARE the defaults every surface renders. A
+    signature default cannot call anything (ruff B008), so a tool reads
+    ``Policy.extractor`` -- the annotation on the field, not an instance -- and
+    a spec reads the same. Spelling ``"html2text"`` at each site instead is how
+    the previous switch needed four edits plus two prose files to land.
+
     Attributes:
       transport: Retrieval transport; see :data:`Transport`.
       extractor: HTML-to-text extractor; see :data:`Extractor`.
@@ -264,8 +283,28 @@ class Policy:
     """
 
     transport: Transport = "auto"
-    extractor: Extractor = "trafilatura"
+    extractor: Extractor = "html2text"
     trust: Trust = "untrusted"
+
+    @classmethod
+    def field_default[T](cls, name: str, kind: type[T] | object = object) -> T:
+        """Return the class's declared default for ``name``.
+
+        ``slots=True`` replaces the class attribute with a descriptor, so
+        ``Policy.extractor`` is a slot object rather than ``"html2text"``;
+        ``dataclasses.fields`` is where the declared value survives. ``kind``
+        types the result for a caller whose annotation is a ``Literal``; it is
+        not re-checked, since this class declared the value.
+
+        Raises:
+          KeyError: When ``name`` is not a field of this class.
+
+        """
+        del kind
+        for field_ in fields(cls):
+            if field_.name == name:
+                return cast("T", field_.default)
+        raise KeyError(f"{cls.__name__} has no field {name!r}.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
