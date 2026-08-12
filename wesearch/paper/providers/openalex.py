@@ -34,7 +34,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import MutableJSON, int_val
+from wesearch.lib.custom_json import MutableJSON, dict_val, dicts_val, int_val, list_val
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,
@@ -165,7 +165,7 @@ def _paginate_works(
             "per-page": size,
         }
         body = _get("/works", params, transport=transport)
-        total = int_val(cast(MutableJSON, body.get("meta") or {}).get("count"), 0)
+        total = int_val(dict_val(body.get("meta")).get("count"), 0)
         return body
 
     cursor = Cursor(
@@ -182,8 +182,8 @@ def _works_page_advance(body: MutableJSON, page_no: int, size: int) -> int | Non
     """Next 1-based ``/works`` page; stops via ``meta.count`` so a count-aligned
     full final page ends (``len < size`` alone would miss it).
     """
-    rows = cast(list[MutableJSON], body.get("results") or [])
-    count = int_val(cast(MutableJSON, body.get("meta") or {}).get("count"), 0)
+    rows = list_val(body.get("results"))
+    count = int_val(dict_val(body.get("meta")).get("count"), 0)
     seen = (page_no - 1) * size + len(rows)
     return page_no + 1 if rows and seen < count else None
 
@@ -269,11 +269,11 @@ def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str | None:
 
 def _work_to_record(work: MutableJSON) -> PaperRecord:
     """Convert an OpenAlex work dict into a :class:`PaperRecord`."""
-    authorships = cast(list[MutableJSON], work.get("authorships") or [])
+    authorships = dicts_val(work.get("authorships"))
     authors = tuple(
-        str(cast(MutableJSON, a.get("author") or {}).get("display_name") or "")
+        str(dict_val(a.get("author")).get("display_name") or "")
         for a in authorships
-        if cast(MutableJSON, a.get("author") or {}).get("display_name")
+        if dict_val(a.get("author")).get("display_name")
     )
     title = str(work.get("title") or work.get("display_name") or "")
 
@@ -290,7 +290,7 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
 
     # arXiv id lives under ``ids.arxiv`` as a full URL in OpenAlex.
     arxiv: str | None = None
-    ids = cast(MutableJSON, work.get("ids") or {})
+    ids = dict_val(work.get("ids"))
     arxiv_raw = ids.get("arxiv")
     if isinstance(arxiv_raw, str) and arxiv_raw:
         m = re.search(
@@ -310,10 +310,10 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         if m:
             arxiv = m.group(1)
 
-    primary = cast(MutableJSON, work.get("primary_location") or {})
-    source = cast(MutableJSON, primary.get("source") or {})
+    primary = dict_val(work.get("primary_location"))
+    source = dict_val(primary.get("source"))
     venue = source.get("display_name")
-    oa = cast(MutableJSON, work.get("open_access") or {})
+    oa = dict_val(work.get("open_access"))
 
     return PaperRecord(
         title=title,
@@ -371,7 +371,7 @@ def references(
         extra_select="referenced_works",
         transport=transport,
     )
-    ref_urls = cast(list[str], work.get("referenced_works") or [])
+    ref_urls = list_val(work.get("referenced_works"), str)
     ids = [_work_id_tail(u) for u in ref_urls]
     capped = ids if limit is None else ids[:limit]
     records = _resolve_works(capped, transport=transport)
@@ -432,7 +432,7 @@ def _resolve_work(
     *,
     extra_select: str,
     transport: Transport = "auto",
-) -> MutableJSON:
+) -> dict[str, object]:
     """Resolve a seed DOI to its OpenAlex work (arXiv unsupported for the graph)."""
     if kind != "doi":
         raise BackendError(
@@ -445,7 +445,7 @@ def _resolve_work(
         {"filter": f"doi:{canonical}", "select": f"id,{extra_select}"},
         transport=transport,
     )
-    results = cast(list[MutableJSON], data.get("results") or [])
+    results = dicts_val(data.get("results"))
     if not results:
         raise NotFoundError(f"OpenAlex has no work for doi:{canonical}.")
     return results[0]
