@@ -29,7 +29,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import MutableJSON, int_val
+from wesearch.lib.custom_json import MutableJSON, dict_val, dicts_val, int_val, list_val
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
 from wesearch.paper.paginate import (
@@ -370,7 +370,7 @@ def _fetch_offset_page(
 def _next_offset_advance(body: MutableJSON, _offset: int, _size: int) -> int | None:
     """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
     nxt = body.get("next")
-    rows = cast(list[MutableJSON], body.get("data") or [])
+    rows = list_val(body.get("data"))
     return nxt if isinstance(nxt, int) and rows else None
 
 
@@ -421,7 +421,7 @@ def search_paginate(
 
 def _search_offset_advance(body: MutableJSON, offset: int, _size: int) -> int | None:
     """Next ``/paper/search`` offset; None once ``total`` is reached or a page empties."""
-    rows = cast(list[MutableJSON], body.get("data") or [])
+    rows = list_val(body.get("data"))
     nxt = offset + len(rows)
     return nxt if rows and nxt < int_val(body.get("total"), 0) else None
 
@@ -456,10 +456,10 @@ def paper_record_from(
       record: Populated paper record.
 
     """
-    ids = cast(MutableJSON, data.get("externalIds") or {})
-    authors_raw = cast(list[MutableJSON], data.get("authors") or [])
+    ids = dict_val(data.get("externalIds"))
+    authors_raw = dicts_val(data.get("authors"))
     authors = tuple(str(a.get("name") or "") for a in authors_raw if a.get("name"))
-    oa = cast(MutableJSON, data.get("openAccessPdf") or {})
+    oa = dict_val(data.get("openAccessPdf"))
     doi = ids.get("DOI")
     arxiv = ids.get("ArXiv")
     return PaperRecord(
@@ -486,19 +486,19 @@ def author_record_from(data: MutableJSON) -> AuthorRecord:
 
     """
     author_id = str(data.get("authorId") or "")
-    aliases_raw = cast(list[object], data.get("aliases") or [])
+    aliases_raw = list_val(data.get("aliases"))
     aliases = tuple(str(a) for a in aliases_raw if a)
 
     # Affiliations can come as a list of strings (common) or a list of dicts
     # with ``name``/``affiliation`` keys (rarer). Handle both.
-    aff_raw = cast(list[object], data.get("affiliations") or [])
+    aff_raw = list_val(data.get("affiliations"))
     affiliations: list[str] = []
     for a in aff_raw:
         if isinstance(a, str):
             if a.strip():
                 affiliations.append(a.strip())
-        elif isinstance(a, dict):
-            a_dict = cast(MutableJSON, a)
+        else:
+            a_dict = dict_val(a)
             name = a_dict.get("name") or a_dict.get("affiliation") or ""
             if isinstance(name, str) and name.strip():
                 affiliations.append(name.strip())
