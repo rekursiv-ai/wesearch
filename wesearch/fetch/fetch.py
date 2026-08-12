@@ -66,6 +66,7 @@ from wesearch.lib.userdirs import data_dir
 from wesearch.profile import Profile, ProfileStore, parse_set_cookie
 from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.types.params import (
+    NO_BODY,
     ContentParams,
     RequestParams,
     RetryParams,
@@ -826,7 +827,7 @@ def _fetch_once(
     if params.content.data is not None:
         body_bytes = urlencode(params.content.data).encode()
         body_content_type = "application/x-www-form-urlencoded"
-    elif params.content.json is not None:
+    elif params.content.json is not NO_BODY:
         body_bytes = json_lib.dumps(params.content.json).encode()
         body_content_type = "application/json"
     merged = _build_headers(

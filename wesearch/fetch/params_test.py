@@ -120,6 +120,21 @@ class TestValidation:
         with pytest.raises(ValueError, match="mutually exclusive"):
             RequestParams(content=ContentParams(data={"a": "1"}, json={"b": 2}))
 
+    def test_a_json_null_body_is_a_body(self) -> None:
+        """``json=None`` sends the JSON literal ``null``; omitting it sends none.
+
+        ``None`` is itself a valid JSON value, so using it as the "no body"
+        sentinel made the two indistinguishable and left ``null`` -- which an
+        API may require -- unsendable. ``has_body`` gates both the encoder and
+        the browser-transport guard, so the confusion reached the wire.
+        """
+        assert ContentParams(method="POST", json=None).has_body
+        assert not ContentParams(method="POST").has_body
+
+    def test_a_json_null_body_still_conflicts_with_data(self) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            RequestParams(content=ContentParams(data={"a": "1"}, json=None))
+
 
 class TestTrustVocabulary:
     """``Trust`` names where a URL came from, not what DNS to do about it."""
