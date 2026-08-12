@@ -229,7 +229,7 @@ class RetryParams:
             when = parsedate_to_datetime_or_none(retry_after.strip())
             if when is not None:
                 return min(max((when - datetime.now(UTC)).total_seconds(), 0.0), 30)
-        delay_sec = min(1.0 * (2**attempt), 30)
+        delay_sec = min(float(1 << attempt), 30)
         return delay_sec + random.uniform(0, delay_sec * 0.5)  # noqa: S311 -- jitter
 
 

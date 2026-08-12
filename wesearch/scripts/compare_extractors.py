@@ -373,7 +373,7 @@ def _word_grams(text: str, size: int = 5) -> frozenset[tuple[str, ...]]:
     converter that lost nothing scores as if it had: markdownify measured 0.72
     on arXiv while visibly containing the whole page.
     """
-    words = re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower())
+    words: list[str] = re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower())
     return frozenset(
         tuple(words[i : i + size]) for i in range(max(0, len(words) - size + 1))
     )

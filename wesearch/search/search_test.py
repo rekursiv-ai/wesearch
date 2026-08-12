@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from typing import Any, ClassVar, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import json
 import os
@@ -53,7 +53,7 @@ def _patch_fetch(
     side_effect: Any = None,
     *,
     module: str = "search",
-) -> Any:
+) -> AbstractContextManager[MagicMock | AsyncMock]:
     # fetch returns (body, session); wrap the byte-valued test inputs so the
     # mock matches that shape (an exception side_effect still raises).
     kwargs: dict[str, Any] = {}
@@ -61,7 +61,7 @@ def _patch_fetch(
         kwargs["side_effect"] = _tuple_side_effect(side_effect)
     else:
         kwargs["return_value"] = (return_value, FetchSession())
-    return patch(f"wesearch.search.{module}.fetch", **kwargs)
+    return patch(f"wesearch.search.{module}.fetch", **kwargs)  # ty: ignore[unsound-return-statement] -- dynamic **kwargs into patch's overloads erases the return type
 
 
 def _tuple_side_effect(side_effect: Any) -> Any:
@@ -76,7 +76,9 @@ def _tuple_side_effect(side_effect: Any) -> Any:
 
 
 @contextmanager
-def _patch_searxng_fetch(payload: dict[str, Any]) -> Generator[MagicMock]:
+def _patch_searxng_fetch(
+    payload: dict[str, Any],
+) -> Generator[MagicMock | AsyncMock]:
     body = json.dumps(payload).encode()
     with (
         patch.dict(

@@ -130,7 +130,11 @@ def _text(content: str | bytes) -> str:
 
 def _page_title(text: str) -> str | None:
     match = _TITLE_RE.search(text)
-    return match.group(1).strip() if match is not None else None
+    if match is None:
+        return None
+    title = match[1]
+    assert isinstance(title, str)
+    return title.strip()
 
 
 def _has_markup_marker(text: str, markers: tuple[str, ...]) -> bool:
