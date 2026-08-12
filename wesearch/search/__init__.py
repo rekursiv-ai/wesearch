@@ -4,10 +4,13 @@ The search analogue of :mod:`wesearch.fetch`: one synchronous
 backend-agnostic entry point over SearXNG, DuckDuckGo, and Google.
 
 - :mod:`.custom_types` -- ``SearchResult`` and its per-category subclasses,
-  ``SearchError``, ``SearchBackends``, ``DEFAULT_SEARCH_BACKEND``.
-- :mod:`.searxng` -- the SearXNG backend + ``SearxngCategory``.
+  ``SearchError``, ``SearchBackends``, ``DEFAULT_SEARCH_BACKEND``,
+  and ``SearxngCategory``.
+- :mod:`.searxng` -- the SearXNG backend, its per-template parsers, and the
+  ``CATEGORIES`` table each tab's gloss and parser live in.
 - :mod:`.duckduckgo` -- the always-available scraped backend.
-- :mod:`.search` -- ``search``, which picks a backend and returns its records.
+- :mod:`.search` -- ``search``, which picks a backend and returns its
+  records, plus the ``SearchParamsSchema`` every surface renders.
 
 This ``__init__`` re-exports the names a caller needs to NAME a result or ask
 for one, so the common import is one line rather than three. It deliberately
@@ -30,11 +33,11 @@ from wesearch.search.custom_types import (
     SearchBackends,
     SearchError,
     SearchResult,
+    SearxngCategory,
     TorrentResult,
     VideoResult,
 )
 from wesearch.search.search import search
-from wesearch.search.searxng import SearxngCategory
 
 
 __all__ = [

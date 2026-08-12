@@ -6,13 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import Policy, RequestParams
+from wesearch.fetch import PolicyParams, RequestParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.web import (
     _KIND_HTML,
     _KIND_MARKDOWN,
     _KIND_RSS,
-    WebFetchResult,
+    FetchResult,
     _extract_text,
     _fetch_body,
     _format_rss,
@@ -45,7 +45,7 @@ def test_fetch_web_html_path_extracts() -> None:
         return_value=(b"<html><body><p>Hi</p></body></html>", False),
     ):
         result = fetch_web("https://example.com")
-    assert isinstance(result, WebFetchResult)
+    assert isinstance(result, FetchResult)
     # Equality, and the markup check below: a containment-only assertion here
     # passes when extraction is BYPASSED and the source returned verbatim,
     # since the fixture's own markup contains "Hi".
@@ -115,7 +115,7 @@ def test_html_extraction_keeps_content_an_extractor_would_score_away() -> None:
 
 
 def test_extractor_policy_selects_the_named_extractor() -> None:
-    """``Policy.extractor`` picks the implementation; ``raw`` proves dispatch."""
+    """``PolicyParams.extractor`` picks the implementation; ``raw`` proves dispatch."""
     html = b"<html><body><p>Hi</p></body></html>"
     assert _extract_text(html, kind=_KIND_HTML, extractor="raw") == html.decode()
 
@@ -295,7 +295,7 @@ def test_fetch_web_forwards_policy_to_reader_fallback() -> None:
     Each rung fetches a URL of its own (the proxy's), so a rung that dropped the
     policy would silently fetch it unvalidated.
     """
-    policy = Policy(transport="stdlib", trust="internal")
+    policy = PolicyParams(transport="stdlib", trust="internal")
     with patch("wesearch.web.fetch_with_reader_fallback") as fallback:
         fallback.return_value = (b"<html></html>", False)
         fetch_web("https://example.com/x", policy=policy)

@@ -23,7 +23,7 @@ from wesearch.fetch.common import ValidatedHost
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import CloudflareChallengeError
-from wesearch.types.params import Policy, RequestParams, Transport, Trust
+from wesearch.types.params import PolicyParams, RequestParams, Transport, Trust
 
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
@@ -99,7 +99,9 @@ class TestCookiesSurviveTrust:
         ):
             fetch_mod.fetch(
                 "https://example.com/",
-                request=RequestParams(policy=Policy(transport=transport, trust=trust)),
+                request=RequestParams(
+                    policy=PolicyParams(transport=transport, trust=trust)
+                ),
             )
         assert "stored" in sent["cookies"], (
             f"transport={transport} trust={trust} sent no stored cookie: "
@@ -139,7 +141,7 @@ class TestBrowserUnderUntrusted:
         ):
             body, _ = fetch_mod.fetch(
                 "https://example.com/",
-                request=RequestParams(policy=Policy(transport=transport)),
+                request=RequestParams(policy=PolicyParams(transport=transport)),
             )
         assert body == b"<html>ok</html>"
         assert reached, f"{transport} never reached the browser under untrusted"
@@ -187,7 +189,7 @@ class TestTrustEnforcement:
         with pytest.raises(ValueError, match="non-public"):
             fetch_mod.fetch(
                 "http://127.0.0.1:1/",
-                request=RequestParams(policy=Policy(transport=transport)),
+                request=RequestParams(policy=PolicyParams(transport=transport)),
             )
 
     def test_internal_permits_loopback(self) -> None:
@@ -200,7 +202,7 @@ class TestTrustEnforcement:
             body, _ = fetch_mod.fetch(
                 f"http://127.0.0.1:{port}/",
                 request=RequestParams(
-                    policy=Policy(transport="curl", trust="internal")
+                    policy=PolicyParams(transport="curl", trust="internal")
                 ),
             )
         finally:

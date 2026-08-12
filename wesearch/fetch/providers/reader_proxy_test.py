@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import Policy
+from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers import reader_proxy
 from wesearch.types.errors import FetchError
 
@@ -21,7 +21,7 @@ class TestThirdPartyConsent:
     def test_refuses_without_consent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("WESEARCH_ALLOW_THIRD_PARTY_RENDER", raising=False)
         with pytest.raises(FetchError, match="third-party egress"):
-            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=Policy())
+            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
 
     @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
     def test_allows_on_truthy(
@@ -60,7 +60,7 @@ class TestFetch:
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
             body = reader_proxy.fetch_reader_proxy(
-                "https://x.com/user", policy=Policy()
+                "https://x.com/user", policy=PolicyParams()
             )
         assert body == b"# rendered"
         assert seen["url"] == "https://r.jina.ai/https://x.com/user"
@@ -76,7 +76,7 @@ class TestFetch:
             return b"ok", None
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
-            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=Policy())
+            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
         assert seen["headers"] == {"Authorization": "Bearer jina_secret"}
 
     def test_soft_fail_sentinel_raises(self) -> None:
@@ -90,7 +90,7 @@ class TestFetch:
             patch.object(reader_proxy, "fetch", fake_fetch),
             pytest.raises(FetchError) as exc,
         ):
-            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=Policy())
+            reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
         assert exc.value.status == 502
 
 

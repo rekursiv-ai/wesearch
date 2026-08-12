@@ -32,12 +32,15 @@ from wesearch.search.custom_types import (
     SearchBackends,
     SearchError,
     SearchResult,
+    SearxngCategory,
     TorrentResult,
     VideoResult,
 )
 from wesearch.search.duckduckgo import duckduckgo
-from wesearch.search.searxng import SearxngCategory, SearxngResult, searxng
+from wesearch.search.searxng import SearxngResult, category_gloss, searxng
 from wesearch.types.errors import BotDetectionError, FetchError
+from wesearch.types.params import PolicyParams
+from wesearch.types.schema import Field, Schema
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,54 @@ logger = logging.getLogger(__name__)
 # import must sit inside a copybarista fence, and ruff's isort pass reorders
 # across a fence in the import block -- sweeping unrelated imports inside it and
 # stripping them from the export.
+class SearchParamsSchema(Schema):
+    """What every search surface accepts.
+
+    The counterpart to
+    :class:`wesearch.fetch.custom_types.FetchParamsSchema`, and here for
+    the same reason: the sagent tool's schema, that tool's directive
+    validation, and the MCP server's signature are three renderings of one
+    description rather than three copies of it.
+
+    Beside :func:`search` rather than in ``custom_types`` because the
+    ``categories`` prose is rendered from ``searxng.CATEGORIES``, which reads
+    the vocabulary FROM ``custom_types``. Declaring the schema at the leaf
+    would close that loop; declaring it here, where importing a backend is
+    already the point, leaves each tab's gloss beside the parser it names.
+    """
+
+    query = Field[str](
+        annotation=str, required=True, description="Search query string."
+    )
+    backend = Field[SearchBackends](
+        annotation=SearchBackends,
+        # No default: an unnamed backend is RESOLVED by ``search`` -- a
+        # non-general category selects SearXNG, anything else takes the
+        # build's default. Naming one here would preempt that.
+        description=(
+            "Search backend. Omit to let a category choose, else this build's"
+            f' default ("{DEFAULT_SEARCH_BACKEND}").'
+        ),
+    )
+    categories = Field[SearxngCategory](
+        annotation=SearxngCategory,
+        default="general",
+        description=(
+            "SearXNG result category (tab). A non-default value selects the "
+            "SearXNG backend when none is named, and is rejected alongside an "
+            f"explicit non-SearXNG one.\n{category_gloss()}"
+        ),
+    )
+    transport = Field[Transport](
+        annotation=Transport,
+        default=PolicyParams.field_default("transport", Transport),
+        description=(
+            "Retrieval path. 'auto' tries curl and escalates to Zendriver when "
+            "a site bot-blocks it. Set an explicit transport to stress a path."
+        ),
+    )
+
+
 @overload
 def search(
     query: str,

@@ -41,11 +41,11 @@ import pytest
 from wesearch.chrome.capture import capture_chrome_request, chrome_available
 from wesearch.chrome.echo import EchoOracle
 from wesearch.fetch import (
-    Content,
+    ContentParams,
     FetchSession,
-    Policy,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     Transport,
     fetch,
 )
@@ -119,7 +119,14 @@ def test_fetch_wire_request_matches_chrome(
     chrome = _drop(_chrome_headers(oracle), omit)
     if not chrome:
         pytest.skip("Chrome sent no capturable request to the oracle.")
-    fetch(oracle.url, request=RequestParams(policy=_policy(backend)))
+    # trust="internal": the oracle is a loopback server, which the default
+    # ``untrusted`` SSRF check refuses before any wire bytes exist. The test
+    # authored this URL, so declaring it is exactly true -- and is the seam that
+    # keeps the check real for every other caller instead of weakening it.
+    fetch(
+        oracle.url,
+        request=RequestParams(policy=PolicyParams(transport=backend, trust="internal")),
+    )
     ours = _drop(oracle.captured(), omit)
     assert ours == chrome, (
         f"wire header set/order diverged from Chrome (transport={backend}).\n"
@@ -145,7 +152,7 @@ def test_session_threads_across_requests(
     oracle sets no Accept-CH, so a reused session must send the same wire headers
     as a fresh one.
     """
-    request = RequestParams(policy=_policy(backend))
+    request = RequestParams(policy=PolicyParams(transport=backend, trust="internal"))
     _first, session = fetch(oracle.url, request=request)
     assert isinstance(session, FetchSession)
     fetch(oracle.url, session=session, request=request)
@@ -175,7 +182,8 @@ def test_pooled_session_does_not_duplicate_cookie_on_wire(oracle: EchoOracle) ->
         fetch(
             oracle.url,
             request=RequestParams(
-                content=Content(cookies={"CONSENT": "YES+"}), policy=_policy()
+                content=ContentParams(cookies={"CONSENT": "YES+"}),
+                policy=PolicyParams(trust="internal"),
             ),
         )
     joined = " ".join(_cookie_lines(oracle.captured_lines()))
@@ -190,8 +198,8 @@ def test_case_variant_cookie_header_not_duplicated_on_wire(oracle: EchoOracle) -
         fetch(
             oracle.url,
             request=RequestParams(
-                content=Content(headers={"cookie": "a=1"}, cookies={"b": "2"}),
-                policy=_policy(),
+                content=ContentParams(headers={"cookie": "a=1"}, cookies={"b": "2"}),
+                policy=PolicyParams(trust="internal"),
             ),
         )
     lines = _cookie_lines(oracle.captured_lines())
@@ -219,7 +227,8 @@ def test_browser_backend_fetches_live_page(
         body, session = fetch(
             "https://example.com/",
             request=RequestParams(
-                retry=Retry(timeout_sec=30.0), policy=Policy(transport="zendriver")
+                retry=RetryParams(timeout_sec=30.0),
+                policy=PolicyParams(transport="zendriver"),
             ),
         )
     except BrowserUnavailableError as error:
@@ -231,17 +240,6 @@ def test_browser_backend_fetches_live_page(
         shutdown_browsers()
     assert b"Example Domain" in body
     assert isinstance(session, FetchSession)
-
-
-def _policy(transport: Transport = "auto") -> Policy:
-    """Policy for a request the test itself authored against the local oracle.
-
-    The oracle is a loopback server, so the default ``untrusted`` SSRF check
-    refuses it before any wire bytes exist. ``internal`` is the caller declaring
-    it wrote the URL -- exactly true here -- and is the seam that keeps the check
-    real for every other caller instead of weakening it.
-    """
-    return Policy(transport=transport, trust="internal")
 
 
 def _chrome_headers(oracle: EchoOracle) -> tuple[str, ...]:

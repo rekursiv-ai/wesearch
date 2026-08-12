@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import Policy
+from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers import x
 
 
@@ -39,7 +39,7 @@ class TestFetch:
             return b"# tweet md"
 
         with patch.object(x, "fetch_reader_proxy", fake_proxy):
-            body = x.fetch_x("https://x.com/user", policy=Policy())
+            body = x.fetch_x("https://x.com/user", policy=PolicyParams())
         assert body == b"# tweet md"
         assert seen["url"] == "https://x.com/user"
 

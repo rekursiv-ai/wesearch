@@ -21,11 +21,11 @@ from curl_cffi import (
 import pytest
 
 from wesearch.fetch import (
-    Content,
-    Observe,
-    Policy,
+    ContentParams,
+    ObserveParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     ValidatedHost,
     fetch,
 )
@@ -218,8 +218,8 @@ class TestFetchCurlBackend:
             body, _ = fetch(
                 "https://example.com/start",
                 request=RequestParams(
-                    observe=Observe(on_redirect=lambda _u: None),
-                    policy=Policy(transport="curl"),
+                    observe=ObserveParams(on_redirect=lambda _u: None),
+                    policy=PolicyParams(transport="curl"),
                 ),
             )
         assert body == b"done"
@@ -271,8 +271,8 @@ class TestFetchCurlBackend:
             fetch(
                 "https://a.com/submit",
                 request=RequestParams(
-                    content=Content(method="POST", data={"x": "1"}),
-                    policy=Policy(transport="curl"),
+                    content=ContentParams(method="POST", data={"x": "1"}),
+                    policy=PolicyParams(transport="curl"),
                 ),
             )
         second = mock_req.call_args_list[1].kwargs["headers"]
@@ -289,7 +289,9 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://a.com/submit",
-                request=RequestParams(content=Content(method="POST", data={"x": "1"})),
+                request=RequestParams(
+                    content=ContentParams(method="POST", data={"x": "1"})
+                ),
             )
         second_headers = mock_req.call_args_list[1].kwargs["headers"]
         assert second_headers.get("Origin") == "https://b.com"
@@ -306,7 +308,9 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(content=Content(cookies={"CONSENT": "YES+"})),
+                request=RequestParams(
+                    content=ContentParams(cookies={"CONSENT": "YES+"})
+                ),
             )
         kwargs = mock_req.call_args.kwargs
         # Cookie is in the jar, not the header, and cookies= kwarg is unset.
@@ -323,7 +327,7 @@ class TestFetchCurlBackend:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(headers={"cookie": "a=1"}, cookies={"b": "2"})
+                    content=ContentParams(headers={"cookie": "a=1"}, cookies={"b": "2"})
                 ),
             )
         sent = mock_req.call_args.kwargs["headers"]
@@ -346,9 +350,9 @@ class TestFetchCurlBackend:
             body, _ = fetch(
                 "https://a.com/start",
                 request=RequestParams(
-                    retry=Retry(max_redirects=2),
-                    observe=Observe(on_redirect=seen.append),
-                    policy=Policy(transport="curl"),
+                    retry=RetryParams(max_redirects=2),
+                    observe=ObserveParams(on_redirect=seen.append),
+                    policy=PolicyParams(transport="curl"),
                 ),
             )
         assert body == b"final 3xx"
@@ -368,7 +372,7 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="curl")),
+                request=RequestParams(policy=PolicyParams(transport="curl")),
             )
         assert exc.value.status == 403
         assert exc.value.body == html
@@ -383,7 +387,9 @@ class TestFetchCurlBackend:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(headers={"User-Agent": "custom"}, raw_headers=True)
+                    content=ContentParams(
+                        headers={"User-Agent": "custom"}, raw_headers=True
+                    )
                 ),
             )
         assert mock_req.call_args.kwargs["headers"] == {"User-Agent": "custom"}
@@ -420,8 +426,8 @@ class TestFetchCurlBackend:
             body, _ = fetch(
                 "https://example.com/submit",
                 request=RequestParams(
-                    content=Content(method="POST", data={"x": "1"}),
-                    observe=Observe(on_redirect=lambda _u: None),
+                    content=ContentParams(method="POST", data={"x": "1"}),
+                    observe=ObserveParams(on_redirect=lambda _u: None),
                 ),
             )
         assert body == b"got it"
@@ -447,7 +453,9 @@ class TestFetchCurlBackend:
         ):
             fetch(
                 "https://example.com/submit",
-                request=RequestParams(content=Content(method="POST", json={"x": 1})),
+                request=RequestParams(
+                    content=ContentParams(method="POST", json={"x": 1})
+                ),
             )
         assert "Content-Type" not in calls[1]["headers"]
 
@@ -465,7 +473,7 @@ class TestFetchCurlBackend:
         ):
             body, _ = fetch(
                 "https://example.com",
-                request=RequestParams(retry=Retry(max_redirects=0)),
+                request=RequestParams(retry=RetryParams(max_redirects=0)),
             )
         assert body == b"redirect body"
         assert mock_req.call_count == 1  # never followed
@@ -485,7 +493,8 @@ class TestFetchCurlBackend:
         ):
             assert (
                 fetch(
-                    "https://example.com", request=RequestParams(retry=Retry(retries=1))
+                    "https://example.com",
+                    request=RequestParams(retry=RetryParams(retries=1)),
                 )[0]
                 == b"ok"
             )
@@ -498,7 +507,10 @@ class TestFetchCurlBackend:
             patch("wesearch.fetch.fetch.time.sleep"),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com", request=RequestParams(retry=Retry(retries=2)))
+            fetch(
+                "https://example.com",
+                request=RequestParams(retry=RetryParams(retries=2)),
+            )
         assert exc.value.status == 0
 
     def test_same_origin_redirect_keeps_one_pooled_session(self) -> None:
@@ -530,8 +542,8 @@ class TestFetchCurlBackend:
             body, _ = fetch(
                 "https://example.com/start",
                 request=RequestParams(
-                    observe=Observe(on_redirect=lambda _u: None),
-                    policy=Policy(transport="curl"),
+                    observe=ObserveParams(on_redirect=lambda _u: None),
+                    policy=PolicyParams(transport="curl"),
                 ),
             )
         assert body == b"ok"
@@ -642,7 +654,7 @@ class TestCurlPathSendsUserAgent:
                 # exactly what "internal" declares. Leaving it untrusted would
                 # (correctly) refuse the fetch.
                 request=RequestParams(
-                    policy=Policy(transport="curl", trust="internal")
+                    policy=PolicyParams(transport="curl", trust="internal")
                 ),
             )
         finally:

@@ -16,7 +16,7 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
-from wesearch.fetch.spec import BodyFetchParams
+from wesearch.fetch.custom_types import FetchBodyParamsSchema
 from wesearch.mcp import server as mcp_server
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -27,10 +27,10 @@ from wesearch.paper import (
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.search import SearchResult as PaperSearchResult
 from wesearch.search.custom_types import SearchResult as WebSearchResult
-from wesearch.search.spec import SearchParams
+from wesearch.search.search import SearchParamsSchema
 from wesearch.types.params import Transport
-from wesearch.types.spec import ParamSet, literal_values
-from wesearch.web import _KIND_HTML, WebFetchResult, _extract_text
+from wesearch.types.schema import Schema, literal_values
+from wesearch.web import _KIND_HTML, FetchResult, _extract_text
 
 
 if TYPE_CHECKING:
@@ -47,20 +47,18 @@ def _returns[T](value: T) -> Callable[..., T]:
     return lambda *_args, **_kwargs: value
 
 
-def _fetch_web_returning(
-    html: bytes, *, max_chars: int
-) -> Callable[..., WebFetchResult]:
+def _fetch_web_returning(html: bytes, *, max_chars: int) -> Callable[..., FetchResult]:
     """Return a ``fetch_web`` stub that renders ``html`` through the real extractor."""
 
     def _stub(
         url: str, *, max_chars: int = max_chars, policy: object = None
-    ) -> WebFetchResult:
+    ) -> FetchResult:
         del policy
         # Pinned, not defaulted: this stub feeds a few-line fixture, which the
         # default trafilatura scores as boilerplate and discards entirely --
         # leaving no text for the truncation assertion to be about.
         text = _extract_text(html, kind=_KIND_HTML, url=url, extractor="html2text")
-        return WebFetchResult(
+        return FetchResult(
             text=text[:max_chars],
             url=url,
             kind=_KIND_HTML,
@@ -166,7 +164,7 @@ def test_web_fetch_routes_through_the_shared_render_path(
     ) -> object:
         del max_chars
         captured["extractor"] = getattr(policy, "extractor", None)
-        return WebFetchResult(text="body", url=url, kind="html", truncated=False)
+        return FetchResult(text="body", url=url, kind="html", truncated=False)
 
     monkeypatch.setattr(mcp_server, "fetch_web", _fake)
     out = mcp_server.web_fetch("https://e.co", extractor="trafilatura")
@@ -187,10 +185,10 @@ def test_web_fetch_forwards_every_transport(monkeypatch: pytest.MonkeyPatch) -> 
 
     def _fake(
         url: str, *, max_chars: int | None = None, policy: object = None
-    ) -> WebFetchResult:
+    ) -> FetchResult:
         del max_chars
         captured["transport"] = getattr(policy, "transport", None)
-        return WebFetchResult(text="body", url=url, kind="html", truncated=False)
+        return FetchResult(text="body", url=url, kind="html", truncated=False)
 
     monkeypatch.setattr(mcp_server, "fetch_web", _fake)
     for transport in get_args(Transport):
@@ -225,36 +223,36 @@ def test_web_search_forwards_categories_and_transport(
 _MCP_OMITS = frozenset({"method", "json", "form"})
 
 
-_PARAM_SURFACES: list[tuple[type[ParamSet], str, frozenset[str]]] = [
-    (BodyFetchParams, "web_fetch", _MCP_OMITS),
-    (SearchParams, "web_search", frozenset()),
+_PARAM_SURFACES: list[tuple[type[Schema], str, frozenset[str]]] = [
+    (FetchBodyParamsSchema, "web_fetch", _MCP_OMITS),
+    (SearchParamsSchema, "web_search", frozenset()),
 ]
 
 
 @pytest.mark.parametrize(("spec", "tool", "omitted"), _PARAM_SURFACES)
 def test_mcp_renders_every_declared_param(
-    spec: type[ParamSet], tool: str, omitted: frozenset[str]
+    spec: type[Schema], tool: str, omitted: frozenset[str]
 ) -> None:
-    """Every declared knob, on both surfaces, derived from the spec.
+    """Every declared param, on both surfaces, derived from the spec.
 
     The first version of this check iterated a hand-typed
     ``("transport", "extractor")`` pair, so the three params the surfaces
     actually differ on -- ``method``, ``json``, ``form`` -- were never
-    examined, and a knob added to the spec would have gone unnoticed exactly
+    examined, and a param added to the spec would have gone unnoticed exactly
     as the MCP ``browser`` bool did. ``web_search`` had no check at all.
     """
     fn = getattr(mcp_server, tool)
-    declared = set(spec.params())
+    declared = set(spec.fields())
     hints = get_type_hints(fn)
     assert declared - set(hints) == omitted
     for name in declared & set(hints):
-        param = spec.params()[name]
-        if param.choices:
-            assert set(literal_values(hints[name])) == set(param.choices), (
+        field = spec.fields()[name]
+        if field.choices:
+            assert set(literal_values(hints[name])) == set(field.choices), (
                 f"{tool}.{name} values diverged"
             )
-        if not param.required:
-            assert _signature_default(fn, name) == param.default, (
+        if not field.required:
+            assert _signature_default(fn, name) == field.default, (
                 f"{tool}.{name} default diverged"
             )
 
@@ -274,10 +272,10 @@ def test_web_fetch_treats_the_model_url_as_untrusted(
 
     def _fake_fetch(
         url: str, *, max_chars: int | None = None, policy: object = None
-    ) -> WebFetchResult:
+    ) -> FetchResult:
         del max_chars
         captured["trust"] = getattr(policy, "trust", None)
-        return WebFetchResult(text="ok", url=url, kind="html", truncated=False)
+        return FetchResult(text="ok", url=url, kind="html", truncated=False)
 
     monkeypatch.setattr(mcp_server, "fetch_web", _fake_fetch)
     mcp_server.web_fetch("https://e.co")

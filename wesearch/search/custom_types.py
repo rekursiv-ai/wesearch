@@ -1,8 +1,9 @@
 """Result records and the shared vocabulary every search backend returns.
 
-The typed shapes a backend maps its wire payload onto, plus the helpers that
-mapping needs. Depends on no backend, so a caller can name a result type
-without importing the machinery that produces one.
+The typed shapes a backend maps its wire payload onto, the vocabularies that
+name a backend and a category, and the helpers that mapping needs. Depends on
+no backend, so a caller can name a result type or a category without importing
+the machinery that produces one.
 """
 
 from __future__ import annotations
@@ -31,6 +32,20 @@ else:
 _BACKEND_NAMES = Literal["duckduckgo", "searxng"]
 DEFAULT_SEARCH_BACKEND: Final[SearchBackends] = "duckduckgo"
 SearchBackends: TypeAlias = _BACKEND_NAMES  # noqa: UP040 -- type keyword breaks get_args() at runtime
+
+
+type SearxngCategory = Literal[
+    "general",
+    "images",
+    "videos",
+    "news",
+    "map",
+    "music",
+    "it",
+    "science",
+    "files",
+    "social media",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

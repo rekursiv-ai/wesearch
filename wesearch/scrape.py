@@ -2,18 +2,18 @@
 
 Usage::
 
-    from wesearch.fetch import Content, RequestParams, Retry, fetch
+    from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
     from wesearch.scrape import get_element_content
 
     body, _ = fetch(
-        "https://example.com", request=RequestParams(retry=Retry(timeout_sec=10))
+        "https://example.com", request=RequestParams(retry=RetryParams(timeout_sec=10))
     )
 
     # With cookies:
     body, _ = fetch(
         "https://example.com",
         request=RequestParams(
-            content=Content(cookies={"session": "abc", "lang": "en"})
+            content=ContentParams(cookies={"session": "abc", "lang": "en"})
         ),
     )
 

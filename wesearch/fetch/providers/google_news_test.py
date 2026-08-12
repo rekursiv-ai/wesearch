@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import Policy
+from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers import google_news
 
 
@@ -52,7 +52,7 @@ class TestFetch:
             return b"<xml/>", None
 
         with patch.object(google_news, "fetch", fake_fetch):
-            _body, payload = google_news.fetch_google_news(url, policy=Policy())
+            _body, payload = google_news.fetch_google_news(url, policy=PolicyParams())
         assert seen["target"] == want_target
         assert payload == want_payload
 

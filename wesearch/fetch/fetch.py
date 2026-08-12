@@ -66,9 +66,9 @@ from wesearch.lib.userdirs import data_dir
 from wesearch.profile import Profile, ProfileStore, parse_set_cookie
 from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.types.params import (
-    Content,
+    ContentParams,
     RequestParams,
-    Retry,
+    RetryParams,
     Transport,
 )
 
@@ -589,7 +589,7 @@ def _send_via_zendriver(
         # on_response) as a synthesized Set-Cookie for this origin, so the
         # session warms exactly as a header-level backend's would.
         #
-        # Called even with an empty jar: Observe.on_response promises a callback
+        # Called even with an empty jar: ObserveParams.on_response promises a callback
         # for every response, and gating on cookies meant a successful
         # cookie-free browser fetch notified the caller of nothing at all.
         # Status and headers are synthesized because Chrome does not surface the
@@ -742,8 +742,8 @@ def egress_ip(
             body, _ = fetch(
                 url,
                 request=RequestParams(
-                    content=Content(headers={}, raw_headers=True),
-                    retry=Retry(timeout_sec=timeout_sec),
+                    content=ContentParams(headers={}, raw_headers=True),
+                    retry=RetryParams(timeout_sec=timeout_sec),
                 ),
             )
             ip = body.decode().strip()

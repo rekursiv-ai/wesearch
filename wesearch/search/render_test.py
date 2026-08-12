@@ -134,6 +134,22 @@ def test_text_labels_live_only_in_the_text_rendering() -> None:
     assert lean_result(paper)["doi"] == "10.1/x"
 
 
+def test_a_reported_zero_survives_both_renderings() -> None:
+    """Zero citations and zero seeders are facts, not absences.
+
+    Both renderings filtered on truthiness, so a reported ``0`` vanished while
+    an empty string did not.
+    """
+    paper = PaperResult(url="https://p", title="P", snippet="", citations=0)
+    assert "cites:0" in format_result(paper)
+    assert lean_result(paper)["citations"] == 0
+
+    torrent = TorrentResult(url="https://t", title="T", snippet="", seed=0, leech=0)
+    text = format_result(torrent)
+    assert "seed:0" in text
+    assert "leech:0" in text
+
+
 def test_lean_result_drops_empty_fields() -> None:
     lean = lean_result(SearchResult(url="https://w", title="W", snippet=""))
     assert lean == {"url": "https://w", "title": "W"}

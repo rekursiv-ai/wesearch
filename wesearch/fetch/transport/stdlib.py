@@ -69,7 +69,7 @@ def _open_connection(
     read. The connection is therefore built with the CONNECT budget, and the
     caller widens the live socket to ``timeout_sec`` once connected
     (:func:`_widen_after_connect`). Matches curl_cffi's ``(connect, read)``
-    pair, which is what keeps the two backends from disagreeing on ``Retry``.
+    pair, which is what keeps the two backends from disagreeing on ``RetryParams``.
     """
     handshake_sec = (
         connect_timeout_sec if connect_timeout_sec is not None else timeout_sec

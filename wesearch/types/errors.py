@@ -48,7 +48,7 @@ class BotDetectionError(FetchError):
     """A site served an automated-access challenge instead of content."""
 
     guidance = (
-        "The site served an automated-access block. Retry later or from a "
+        "The site served an automated-access block. RetryParams later or from a "
         "different IP; a full browser session may be required."
     )
 

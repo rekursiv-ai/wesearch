@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from wesearch.fetch import Policy, RequestParams, fetch
+from wesearch.fetch import PolicyParams, RequestParams, fetch
 from wesearch.fetch.providers.reader_proxy import fetch_reader_proxy
 from wesearch.types.errors import FetchError
 
@@ -28,7 +28,7 @@ __all__ = ["fetch_with_reader_fallback"]
 _BOT_WALL_STATUSES: Final = frozenset({403, 429, 503})
 
 
-def fetch_with_reader_fallback(url: str, *, policy: Policy) -> tuple[bytes, bool]:
+def fetch_with_reader_fallback(url: str, *, policy: PolicyParams) -> tuple[bytes, bool]:
     """Fetch ``url``; on a bot-wall GET, retry through the reader proxy.
 
     Args:

@@ -49,7 +49,13 @@ def format_result(result: SearchResult) -> str:
     head = f"[{result.title}]({result.url})"
     # Empty values dropped BEFORE joining: a field a given engine did not
     # report would otherwise render as a bare separator run (``· · ·``).
-    kept = [_labelled(k, v) for k, v in detail_fields(result).items() if v]
+    # ``is not None`` and not ``if v``: a reported ZERO is a fact ("cites:0",
+    # "seed:0"), and truthiness deleted it while keeping an empty string.
+    kept = [
+        _labelled(k, v)
+        for k, v in detail_fields(result).items()
+        if v is not None and v != ""
+    ]
     detail = "  " + " · ".join(p for p in kept if p) if any(kept) else ""
     body = "\n".join(part for part in (result.snippet, detail) if part)
     return f"{head}\n{body}" if body else head
@@ -97,6 +103,8 @@ def lean_result(result: SearchResult) -> dict[str, object]:
         "snippet": result.snippet,
         **detail_fields(result),
     }
+    # Enumerated emptiness, not truthiness: a reported ``0`` (zero citations,
+    # zero seeders) is a fact the caller asked for, and ``if v`` deleted it.
     return {k: v for k, v in fields.items() if v not in (None, [], (), "")}
 
 

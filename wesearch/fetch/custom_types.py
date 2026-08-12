@@ -1,4 +1,4 @@
-"""The knobs every web-fetch surface exposes.
+"""The vocabulary and parameter descriptions every web-fetch surface exposes.
 
 Declared here, in the library both adapters import, so the sagent tool's
 schema, that tool's directive validation, and the MCP server's signature are
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from wesearch.types.params import Extractor, Policy, Transport
-from wesearch.types.spec import Param, ParamSet
+from wesearch.types.params import Extractor, PolicyParams, Transport
+from wesearch.types.schema import Field, Schema
 
 
 # The methods a fetch surface accepts. Declared here beside the param that
@@ -18,22 +18,22 @@ from wesearch.types.spec import Param, ParamSet
 HttpMethod = Literal["GET", "POST"]
 
 
-__all__ = ["BodyFetchParams", "FetchParams"]
+__all__ = ["FetchBodyParamsSchema", "FetchParamsSchema", "HttpMethod"]
 
 
-class FetchParams(ParamSet):
+class FetchParamsSchema(Schema):
     """What every fetch surface accepts, including the GET-only MCP tool."""
 
-    url = Param[str](
+    url = Field[str](
         annotation=str,
         required=True,
         description=(
             "The URL to fetch. Fully qualified; `http://` is upgraded to HTTPS."
         ),
     )
-    transport = Param[Transport](
+    transport = Field[Transport](
         annotation=Transport,
-        default=Policy.field_default("transport", Transport),
+        default=PolicyParams.field_default("transport", Transport),
         description=(
             "Retrieval path. 'auto' tries curl and escalates to Zendriver when a "
             "site bot-blocks it, routing straight to Zendriver for domains already "
@@ -41,9 +41,9 @@ class FetchParams(ParamSet):
             "a transport failure."
         ),
     )
-    extractor = Param[Extractor](
+    extractor = Field[Extractor](
         annotation=Extractor,
-        default=Policy.field_default("extractor", Extractor),
+        default=PolicyParams.field_default("extractor", Extractor),
         description=(
             "How the page becomes text. 'html2text' (default) converts every text "
             "node to Markdown and loses nothing. 'trafilatura' returns only the "
@@ -60,24 +60,24 @@ class FetchParams(ParamSet):
     )
 
 
-class BodyFetchParams(FetchParams):
-    """Adds the request-body knobs a GET-only surface deliberately omits."""
+class FetchBodyParamsSchema(FetchParamsSchema):
+    """Adds the request-body params a GET-only surface deliberately omits."""
 
-    method = Param[HttpMethod](
+    method = Field[HttpMethod](
         annotation=HttpMethod,
         default="GET",
         description=(
             "HTTP method. Defaults to GET. Use POST to call JSON or form APIs."
         ),
     )
-    json = Param[object](
+    json = Field[object](
         annotation=object,
         description=(
             "JSON-serializable body for POST requests. Sets Content-Type: "
             "application/json. Mutually exclusive with 'form'."
         ),
     )
-    form = Param[dict[str, str]](
+    form = Field[dict[str, str]](
         annotation=dict,
         # A free-form object of string fields, so the schema pins the VALUE
         # type rather than enumerating keys.

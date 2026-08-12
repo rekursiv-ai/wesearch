@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, cast
 
 import logging
 
-from wesearch.fetch import RequestParams, Retry, fetch
+from wesearch.fetch import RequestParams, RetryParams, fetch
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.custom_types import IdType
 from wesearch.paper.errors import NotFoundError
@@ -96,7 +96,7 @@ def _download_pdf(
     body, _ = fetch(
         url,
         request=RequestParams(
-            retry=Retry(retries=retries, timeout_sec=download_timeout_sec)
+            retry=RetryParams(retries=retries, timeout_sec=download_timeout_sec)
         ),
     )
     return _validate_pdf(url, body, min_pdf_bytes=min_pdf_bytes)
