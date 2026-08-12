@@ -227,7 +227,7 @@ def searxng(
     if num_results < 0:
         raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
     if num_results == 0:
-        return []  # Nothing to return, so do not pay for a round-trip.
+        return list[SearxngResult]()  # No results wanted; skip the round-trip.
     base_url = _searxng_url()
     params = urlencode(
         {"q": query, "format": "json", "pageno": "1", "categories": categories}

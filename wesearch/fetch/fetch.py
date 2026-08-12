@@ -928,7 +928,7 @@ def _build_headers(
     # the wire (the connection path overrides Host when validated_hosts splits
     # SNI/IP); curl adds them itself.
     if raw_headers:
-        return dict(extra or {})
+        return dict(extra) if extra else {}
     if use_curl:
         return _curl_structural_headers(
             method=method,
@@ -980,7 +980,7 @@ def _accept_ch_hints(resp_headers: dict[str, str]) -> frozenset[str]:
     """The extended client-hint names an ``Accept-CH`` response requested."""
     accept_ch = resp_headers.get("accept-ch")
     if accept_ch is None:
-        return frozenset()
+        return frozenset[str]()
     wanted = {tok.strip().lower() for tok in accept_ch.split(",") if tok.strip()}
     return frozenset(name for name in chrome_client_hints(major=1) if name in wanted)
 

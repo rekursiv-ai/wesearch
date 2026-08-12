@@ -59,10 +59,10 @@ def _read_domains(path: Path) -> frozenset[str]:
     try:
         file_descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     except FileNotFoundError:
-        return frozenset()
+        return frozenset[str]()
     except OSError:
         logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
-        return frozenset()
+        return frozenset[str]()
     try:
         fcntl.flock(file_descriptor, fcntl.LOCK_SH)
         raw = _read_all(file_descriptor)
@@ -71,14 +71,14 @@ def _read_domains(path: Path) -> frozenset[str]:
         # lock or read failure on an optional rebuildable cache must not abort
         # every automatic fetch, and this runs on the per-fetch hot path.
         logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
-        return frozenset()
+        return frozenset[str]()
     finally:
         os.close(file_descriptor)
     try:
         text = raw.decode()
     except UnicodeDecodeError:
         logger.warning("Ignoring undecodable Zendriver domain list at %s.", path)
-        return frozenset()
+        return frozenset[str]()
     return frozenset(
         normalized for line in text.splitlines() if (normalized := _normalize(line))
     )
