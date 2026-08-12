@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 import re
 
 from wesearch.fetch import (
-    Policy,
+    PolicyParams,
     RequestParams,
     fetch,
 )
@@ -42,7 +42,7 @@ def matches(url: str) -> bool:
     return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
 
-def fetch_reddit(url: str, *, policy: Policy) -> tuple[bytes, RedditPayload]:
+def fetch_reddit(url: str, *, policy: PolicyParams) -> tuple[bytes, RedditPayload]:
     """Fetch a Reddit URL; return its bytes and the payload shape.
 
     Args:

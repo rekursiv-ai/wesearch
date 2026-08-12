@@ -5,7 +5,7 @@
 site-specific providers (Reddit, Google News, X) and falling back to a
 reader-proxy-aware ladder, then extracting the body by kind (RSS/Atom feed,
 reader-proxy markdown, or HTML via the extractor named by
-:class:`wesearch.types.params.Policy`).
+:class:`wesearch.types.params.PolicyParams`).
 
 Synchronous; an async caller lifts it with ``asyncio.to_thread``. Transport,
 extractor, and SSRF trust all travel in the ``policy`` argument; omitting it
@@ -23,21 +23,21 @@ import html
 import re
 
 from wesearch.fetch import (
-    Content,
+    ContentParams,
     Extractor,
-    Policy,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     classify_challenge,
     fetch,
 )
+from wesearch.fetch.custom_types import HttpMethod
 from wesearch.fetch.extractor.html2text import extract_html2text
 from wesearch.fetch.extractor.markdownify import extract_markdownify
 from wesearch.fetch.extractor.raw import extract_raw
 from wesearch.fetch.extractor.trafilatura import extract_trafilatura
 from wesearch.fetch.providers import google_news, reddit, x
 from wesearch.fetch.providers.fallback import fetch_with_reader_fallback
-from wesearch.fetch.spec import HttpMethod
 from wesearch.lib.custom_json import JSONValue
 from wesearch.types.extractor import Extract
 
@@ -76,7 +76,7 @@ _REDDIT_PAYLOAD_KINDS: Final[dict[str, str]] = {
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class WebFetchResult:
+class FetchResult:
     """Extracted result of a :func:`fetch_web` call.
 
     Attributes:
@@ -101,8 +101,8 @@ def fetch_web(
     json_body: JSONValue = None,
     form_body: dict[str, str] | None = None,
     max_chars: int | None = None,
-    policy: Policy | None = None,
-) -> WebFetchResult:
+    policy: PolicyParams | None = None,
+) -> FetchResult:
     """Fetch a URL and render its response to clean text.
 
     GET requests are first offered to the site-specific wesearch providers
@@ -130,7 +130,7 @@ def fetch_web(
         public address before connecting, and to the ``html2text`` extractor.
 
     Returns:
-      result: A :class:`WebFetchResult` with the extracted text, the fetched
+      result: A :class:`FetchResult` with the extracted text, the fetched
         URL, the response kind, and whether the text was truncated. ``text``
         may be EMPTY on a successful fetch: an extractor that finds nothing
         returns nothing, and the raw markup is deliberately not substituted
@@ -153,14 +153,12 @@ def fetch_web(
         body,
         kind=kind,
         url=url,
-        extractor=(policy or Policy()).extractor,
+        extractor=(policy or PolicyParams()).extractor,
     )
     if max_chars is None:
-        return WebFetchResult(text=text, url=url, kind=kind, truncated=False)
+        return FetchResult(text=text, url=url, kind=kind, truncated=False)
     truncated = len(text) > max_chars
-    return WebFetchResult(
-        text=text[:max_chars], url=url, kind=kind, truncated=truncated
-    )
+    return FetchResult(text=text[:max_chars], url=url, kind=kind, truncated=truncated)
 
 
 def _fetch_body(
@@ -169,7 +167,7 @@ def _fetch_body(
     method: HttpMethod,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
-    policy: Policy | None = None,
+    policy: PolicyParams | None = None,
 ) -> tuple[bytes, str]:
     """Fetch a URL and classify the response for downstream extraction.
 
@@ -186,7 +184,7 @@ def _fetch_body(
         in :func:`_extract_text`.
 
     """
-    policy = Policy() if policy is None else policy
+    policy = PolicyParams() if policy is None else policy
     if method == "GET":
         if reddit.matches(url):
             body, payload = reddit.fetch_reddit(url, policy=policy)
@@ -210,8 +208,8 @@ def _fetch_body(
     body, _session = fetch(
         url,
         request=RequestParams(
-            content=Content(method=method, json=json_body, data=form_body),
-            retry=Retry(timeout_sec=15),
+            content=ContentParams(method=method, json=json_body, data=form_body),
+            retry=RetryParams(timeout_sec=15),
             policy=policy,
         ),
     )

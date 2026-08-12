@@ -27,10 +27,10 @@ import os
 import re
 
 from wesearch.fetch import (
-    Content,
-    Policy,
+    ContentParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     Transport,
     fetch,
 )
@@ -215,9 +215,9 @@ def _get(
         raw, _ = fetch(
             url=f"{base}{path}",
             request=RequestParams(
-                content=Content(params=params, headers=_headers()),
-                retry=Retry(timeout_sec=timeout_sec),
-                policy=Policy(transport=transport),
+                content=ContentParams(params=params, headers=_headers()),
+                retry=RetryParams(timeout_sec=timeout_sec),
+                policy=PolicyParams(transport=transport),
             ),
         )
     except FetchError as e:

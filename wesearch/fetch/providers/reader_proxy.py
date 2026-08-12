@@ -30,10 +30,10 @@ import os
 import re
 
 from wesearch.fetch import (
-    Content,
-    Policy,
+    ContentParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     fetch,
 )
 from wesearch.types.errors import FetchError
@@ -80,7 +80,7 @@ def third_party_render_allowed() -> bool:
     )
 
 
-def fetch_reader_proxy(url: str, *, policy: Policy) -> bytes:
+def fetch_reader_proxy(url: str, *, policy: PolicyParams) -> bytes:
     """Render ``url`` through the reader proxy; return its markdown bytes.
 
     Args:
@@ -113,8 +113,8 @@ def fetch_reader_proxy(url: str, *, policy: Policy) -> bytes:
     body, _session = fetch(
         proxy_url,
         request=RequestParams(
-            content=Content(headers=headers),
-            retry=Retry(timeout_sec=30),
+            content=ContentParams(headers=headers),
+            retry=RetryParams(timeout_sec=30),
             policy=policy,
         ),
     )

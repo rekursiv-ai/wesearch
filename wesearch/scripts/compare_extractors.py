@@ -55,7 +55,7 @@ from trafilatura.external import try_readability
 import html2text
 import lxml.html
 
-from wesearch.fetch import Policy, RequestParams, Transport, fetch
+from wesearch.fetch import PolicyParams, RequestParams, Transport, fetch
 from wesearch.fetch.extractor.html2text import extract_html2text
 from wesearch.fetch.extractor.markdownify import extract_markdownify
 from wesearch.fetch.extractor.trafilatura import extract_trafilatura
@@ -301,7 +301,7 @@ def cached_html(page: Page, *, cache_dir: Path, refresh: bool = False) -> str:
     if path.exists() and not refresh:
         return path.read_text(errors="replace")
     body, _ = fetch(
-        page.url, request=RequestParams(policy=Policy(transport=page.transport))
+        page.url, request=RequestParams(policy=PolicyParams(transport=page.transport))
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     path.write_bytes(body)

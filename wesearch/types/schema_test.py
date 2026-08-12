@@ -1,4 +1,4 @@
-"""Tests for the declarative parameter specs."""
+"""Tests for the declarative parameter descriptions in ``types.schema``."""
 
 from __future__ import annotations
 
@@ -8,25 +8,25 @@ import typing
 
 import pytest
 
-from wesearch.types.spec import Param, ParamSet, literal_values
+from wesearch.types.schema import Field, Schema, literal_values
 
 
 _Color = Literal["red", "green"]
 type _Alias = Literal["a", "b"]
 
 
-class _Base(ParamSet):
-    name = Param[str](annotation=str, required=True, description="A name.")
-    color = Param[_Color](annotation=_Color, default="red", description="A color.")
+class _Base(Schema):
+    name = Field[str](annotation=str, required=True, description="A name.")
+    color = Field[_Color](annotation=_Color, default="red", description="A color.")
 
 
 class _Derived(_Base):
-    count = Param[int](annotation=int, default=1, description="How many.")
+    count = Field[int](annotation=int, default=1, description="How many.")
 
 
 def test_params_include_inherited_base_first() -> None:
     """A surface that accepts more extends one that accepts less."""
-    assert list(_Derived.params()) == ["name", "color", "count"]
+    assert list(_Derived.fields()) == ["name", "color", "count"]
 
 
 def test_json_schema_renders_types_enums_and_required() -> None:
@@ -80,7 +80,7 @@ def test_literal_values_unwraps_alias_and_optional() -> None:
 def test_coerce_rejects_a_bool_for_an_int() -> None:
     """``isinstance(True, int)`` is true; JSON's ``true`` and ``1`` are not.
 
-    A directive of ``{"count": true}`` satisfied an ``int`` param and reached
+    A directive of ``{"count": true}`` satisfied an ``int`` field and reached
     the tool as a boolean.
     """
     with pytest.raises(ValueError, match="expected int, got bool"):
@@ -94,11 +94,11 @@ def test_a_parameterized_generic_is_not_a_literal() -> None:
     ``{"type": "string", "enum": [<class 'str'>, <class 'str'>]}`` -- not valid
     JSON Schema -- and reject a value with "Valid: <class 'str'>".
     """
-    param = Param[dict[str, str]](annotation=dict[str, str])
-    assert param.choices == ()
-    assert param.schema() == {"type": "object"}
+    field = Field[dict[str, str]](annotation=dict[str, str])
+    assert field.choices == ()
+    assert field.schema() == {"type": "object"}
     with pytest.raises(ValueError, match="expected dict, got list"):
-        param.coerce("form", [])
+        field.coerce("form", [])
 
 
 def test_both_union_spellings_yield_the_same_members() -> None:
@@ -107,7 +107,7 @@ def test_both_union_spellings_yield_the_same_members() -> None:
     3.14 unified the two origins (gh-105499); 3.12 -- the floor the export
     publishes -- reports ``typing.Union`` for BOTH. Matching only
     ``types.UnionType`` returned () there while passing on the dev
-    interpreter, silently dropping the enum of every optional param.
+    interpreter, silently dropping the enum of every optional field.
     """
     # Built rather than written: ``Optional[X]`` as source trips UP045, and
     # the point is precisely that the deprecated spelling -- which a caller's
@@ -126,22 +126,55 @@ def test_an_optional_non_literal_has_no_choices() -> None:
     real string with "Valid: <class 'str'>".
     """
     assert literal_values(str | None) == ()
-    assert Param[str](annotation=str | None).choices == ()
+    assert Field[str](annotation=str | None).choices == ()
     # Mixed unions are not choice sets either, however literal one side is.
     assert literal_values(_Color | int) == ()
 
 
+def test_a_float_knob_accepts_a_json_integer() -> None:
+    """JSON has one number syntax, so ``1`` is as valid a ``number`` as ``1.0``.
+
+    The schema advertised ``number`` -- which admits an integer -- and the
+    check then rejected ``1`` for not being a ``float``.
+    """
+    field = Field[float](annotation=float)
+    assert field.schema() == {"type": "number"}
+    assert field.coerce("temperature", 1) == 1
+
+
+def test_a_tuple_knob_accepts_the_list_json_decodes_to() -> None:
+    """Every JSON array decodes to a ``list``, never a ``tuple``.
+
+    The schema advertised ``array`` and the check demanded ``tuple``, so no
+    directive could ever satisfy it.
+    """
+    field = Field[tuple[str, ...]](annotation=tuple)
+    assert field.schema() == {"type": "array"}
+    assert field.coerce("items", ["a"]) == ["a"]
+
+
+def test_a_non_literal_union_advertises_no_shape_it_cannot_enforce() -> None:
+    """No single JSON type describes ``str | int``, so the schema stays open.
+
+    It previously rendered as ``{"type": "object"}`` and raised
+    "expected Union, got list" -- a message naming a typing construct.
+    """
+    field = Field[object](annotation=str | int)
+    assert field.schema() == {}
+    assert field.coerce("value", []) == []
+
+
 def test_object_annotation_leaves_the_schema_type_open() -> None:
     """A JSON body is as legitimately a list or a string as a mapping."""
-    param = Param[object](annotation=object, description="Any JSON.")
-    assert param.schema() == {"description": "Any JSON."}
+    field = Field[object](annotation=object, description="Any JSON.")
+    assert field.schema() == {"description": "Any JSON."}
 
 
 def test_schema_extra_merges_shape_the_type_cannot_carry() -> None:
-    param = Param[dict[str, str]](
+    field = Field[dict[str, str]](
         annotation=dict, schema_extra={"additionalProperties": {"type": "string"}}
     )
-    assert param.schema() == {
+    assert field.schema() == {
         "type": "object",
         "additionalProperties": {"type": "string"},
     }

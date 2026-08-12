@@ -14,6 +14,7 @@ from wesearch.chrome.echo import (
     EchoOracle,
     _header_lines,
     _header_names,
+    _read_head,
     _requests_root,
     self_signed_localhost_cert,
 )
@@ -32,6 +33,41 @@ class TestHeaderParsing:
         assert _requests_root("GET / HTTP/1.1\r\n")
         assert not _requests_root("GET /favicon.ico HTTP/1.1\r\n")
         assert not _requests_root("garbage")
+
+
+class TestReadHead:
+    """``_read_head`` must distinguish a finished head from a truncated one."""
+
+    def test_a_head_that_never_terminated_reads_as_nothing(self) -> None:
+        """A peer that hangs up mid-head sent no request, not a partial one.
+
+        ``GET / HTTP`` -- what a Chrome preconnect leaves on the wire -- has a
+        request line targeting ``/`` and no header block, so returning the
+        partial bytes made it capture as a request carrying ZERO headers.
+        ``captured()`` reports the LAST capture, so that empty record replaced
+        the real one and the parity assertion read ``()``.
+
+        Reaching EOF is how it surfaces where OpenSSL delivers a ``close_notify``
+        as a clean end-of-stream; where it raises instead, ``_handle`` discards
+        the connection and never reaches this. Only the former is reproducible
+        in-process, and it is the one that broke CI.
+        """
+        assert _read_head(_EofAfter(b"GET / HTTP")) == ""
+
+    def test_a_terminated_head_reads_through(self) -> None:
+        head = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+        assert _read_head(_EofAfter(head)) == head.decode()
+
+
+class _EofAfter:
+    """A reader yielding ``chunks``, then a clean EOF forever."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = list(chunks)
+
+    def recv(self, bufsize: int, /) -> bytes:
+        del bufsize
+        return self._chunks.pop(0) if self._chunks else b""
 
 
 class TestSelfSignedCert:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from wesearch.fetch import Policy
+from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers.reader_proxy import fetch_reader_proxy
 
 
@@ -32,7 +32,7 @@ def matches(url: str) -> bool:
     return hostname.endswith((".x.com", ".twitter.com"))
 
 
-def fetch_x(url: str, *, policy: Policy) -> bytes:
+def fetch_x(url: str, *, policy: PolicyParams) -> bytes:
     """Render an X URL through the reader proxy; return its markdown bytes.
 
     Args:

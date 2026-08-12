@@ -9,7 +9,7 @@ Real-browser fetch backend for ``wesearch.fetch`` (opt-in).
 Drives a headless Chrome via ``zendriver`` so pages gated behind a run-the-JS
 challenge or an interactive CAPTCHA load where the curl/stdlib backends get a
 wall. Select it per call with
-``RequestParams(policy=Policy(transport="zendriver"))``; the page runs under a
+``RequestParams(policy=PolicyParams(transport="zendriver"))``; the page runs under a
 persistent Chrome profile, so cookies you seat (e.g. by logging in) carry
 across fetches.
 
@@ -709,7 +709,7 @@ def main() -> int:
         description=(
             "Open a URL in a headed Chrome on the zendriver backend's dedicated "
             "profile -- the same profile the headless "
-            'RequestParams(policy=Policy(transport="zendriver")) fetch uses. Use '
+            'RequestParams(policy=PolicyParams(transport="zendriver")) fetch uses. Use '
             "it to debug a fetch that errored: you see exactly what Chrome "
             "renders (a challenge, a login wall, a broken page), and any cookies "
             "you seat while there (e.g. by logging in) persist for later "

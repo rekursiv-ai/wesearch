@@ -17,25 +17,25 @@ from wesearch.fetch.fetch import (
     set_last_egress_ip,
 )
 from wesearch.types.params import (
-    Content,
+    ContentParams,
     Extractor,
-    Observe,
-    Policy,
+    ObserveParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     Transport,
     Trust,
 )
 
 
 __all__ = [
-    "Content",
+    "ContentParams",
     "Extractor",
     "FetchSession",
-    "Observe",
-    "Policy",
+    "ObserveParams",
+    "PolicyParams",
     "RequestParams",
-    "Retry",
+    "RetryParams",
     "Transport",
     "Trust",
     "ValidatedHost",

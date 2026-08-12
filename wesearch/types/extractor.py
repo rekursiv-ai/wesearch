@@ -13,7 +13,7 @@ class Extract(Protocol):
 
     One implementation per module under :mod:`wesearch.fetch.extractor`,
     selected by the ``extractor`` field of
-    :class:`wesearch.types.params.Policy` -- the same shape the transports
+    :class:`wesearch.types.params.PolicyParams` -- the same shape the transports
     use.
     """
 

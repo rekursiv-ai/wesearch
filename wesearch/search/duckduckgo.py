@@ -14,11 +14,11 @@ import logging
 
 from wesearch.chrome.useragents import user_agent_pool
 from wesearch.fetch import (
-    Content,
-    Observe,
-    Policy,
+    ContentParams,
+    ObserveParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     Transport,
     fetch,
 )
@@ -89,7 +89,7 @@ def duckduckgo(
         165ms RTT and a 0.39s handshake from here, so 3s absorbs that plus a
         lost SYN (+1s initial RTO) and still fails a black-holed host in 3s
         rather than the full ``timeout_sec``.
-      retries: Retry attempts for a transient failure. Multiplies with
+      retries: RetryParams attempts for a transient failure. Multiplies with
         ``timeout_sec``: an egress that cannot reach the endpoint at all burns
         ``(retries + 1) * timeout_sec`` before raising, so a caller on a
         deadline lowers both rather than either alone.
@@ -131,8 +131,8 @@ def duckduckgo(
     body, _ = fetch(
         f"{_DUCKDUCKGO_URL}?{params}",
         request=RequestParams(
-            content=Content(headers=request_headers, raw_headers=True),
-            retry=Retry(
+            content=ContentParams(headers=request_headers, raw_headers=True),
+            retry=RetryParams(
                 retries=retries,
                 timeout_sec=timeout_sec,
                 connect_timeout_sec=connect_timeout_sec,
@@ -142,8 +142,8 @@ def duckduckgo(
             # here would raise past fetch's own `except BotDetectionError` --
             # the hook that learns the domain and retries through Zendriver.
             # Detected outside, an automatic-transport caller just fails.
-            observe=Observe(body_validator=_duckduckgo_validate_body),
-            policy=Policy(transport=transport),
+            observe=ObserveParams(body_validator=_duckduckgo_validate_body),
+            policy=PolicyParams(transport=transport),
         ),
     )
     return _duckduckgo_parse(body.decode("utf-8"), num_results)

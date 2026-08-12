@@ -14,11 +14,11 @@ import pytest
 import zstandard
 
 from wesearch.fetch import (
-    Content,
-    Observe,
-    Policy,
+    ContentParams,
+    ObserveParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     fetch,
 )
 from wesearch.fetch.transport.stdlib import _open_connection
@@ -56,7 +56,7 @@ class TestFetchStdlibPath:
         ):
             result, _ = fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert result == b"hello"
         mock_conn.request.assert_called_once()
@@ -75,7 +75,7 @@ class TestFetchStdlibPath:
             assert (
                 fetch(
                     "https://example.com",
-                    request=RequestParams(policy=Policy(transport="stdlib")),
+                    request=RequestParams(policy=PolicyParams(transport="stdlib")),
                 )[0]
                 == b"hello"
             )
@@ -89,8 +89,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(method="POST", data={"q": "test"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(method="POST", data={"q": "test"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert mock_conn.request.call_args.args[0] == "POST"
@@ -105,8 +105,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(method="POST", json={"key": "value"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(method="POST", json={"key": "value"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert mock_conn.request.call_args.kwargs["body"] == b'{"key": "value"}'
@@ -118,8 +118,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(data={"a": "1"}, json={"b": 2}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(data={"a": "1"}, json={"b": 2}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
 
@@ -132,8 +132,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(cookies={"a": "1", "b": "2"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(cookies={"a": "1", "b": "2"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -149,8 +149,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(headers={"User-Agent": "custom"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(headers={"User-Agent": "custom"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -165,13 +165,13 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=Content(
+                    content=ContentParams(
                         method="POST",
                         data={"q": "test"},
                         headers={"User-Agent": "custom"},
                         raw_headers=True,
                     ),
-                    policy=Policy(transport="stdlib"),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         # Host survives raw_headers: the pinned connection is opened to an IP,
@@ -192,12 +192,12 @@ class TestFetchStdlibPath:
             fetch(
                 "https://u:p@example.com",
                 request=RequestParams(
-                    content=Content(
+                    content=ContentParams(
                         headers={"User-Agent": "custom"},
                         cookies={"a": "1"},
                         raw_headers=True,
                     ),
-                    policy=Policy(transport="stdlib"),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -216,7 +216,7 @@ class TestFetchStdlibPath:
         ) as mock_open:
             fetch(
                 "https://u:p@example.com:8443/x",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         # userinfo stripped: the connection opens on the bare host:port, and the
         # request path carries no credentials.
@@ -235,8 +235,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://u:p@example.com/",
                 request=RequestParams(
-                    content=Content(headers={"Authorization": "Bearer xyz"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(headers={"Authorization": "Bearer xyz"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -254,7 +254,7 @@ class TestFetchStdlibPath:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
 
     def test_timeout_passed(self) -> None:
@@ -266,7 +266,8 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    retry=Retry(timeout_sec=60), policy=Policy(transport="stdlib")
+                    retry=RetryParams(timeout_sec=60),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert mock_open.call_args.args[2] == 60
@@ -301,7 +302,7 @@ class TestConnectionClosedOnError:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         conn.close.assert_called_once()
 
@@ -331,7 +332,8 @@ class TestConnectionClosedOnError:
                 fetch(
                     "https://example.com",
                     request=RequestParams(
-                        retry=Retry(retries=1), policy=Policy(transport="stdlib")
+                        retry=RetryParams(retries=1),
+                        policy=PolicyParams(transport="stdlib"),
                     ),
                 )[0]
                 == b"ok"
@@ -378,7 +380,7 @@ class TestFetchStdlibBackend:
         ):
             body, _ = fetch(
                 "https://example.com/start",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert body == b"final"
 
@@ -401,8 +403,8 @@ class TestFetchStdlibBackend:
             fetch(
                 "https://example.com/start",
                 request=RequestParams(
-                    observe=Observe(on_redirect=urls.append),
-                    policy=Policy(transport="stdlib"),
+                    observe=ObserveParams(on_redirect=urls.append),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert urls == ["https://example.com/final"]
@@ -428,7 +430,7 @@ class TestFetchStdlibBackend:
         ):
             _body, session = fetch(
                 "https://example.com/",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         jar = session.cookies_for("https://example.com/")
         assert jar.get("pref") == "a, b, c"
@@ -457,8 +459,8 @@ class TestFetchStdlibBackend:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    observe=Observe(on_redirect=reject),
-                    policy=Policy(transport="stdlib"),
+                    observe=ObserveParams(on_redirect=reject),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
 
@@ -482,7 +484,8 @@ class TestFetchStdlibBackend:
             result, _ = fetch(
                 "https://example.com",
                 request=RequestParams(
-                    retry=Retry(max_redirects=0), policy=Policy(transport="stdlib")
+                    retry=RetryParams(max_redirects=0),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert result == b"redirect body"
@@ -513,7 +516,7 @@ class TestFetchStdlibBackend:
         ):
             result, _ = fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )  # default max_redirects=10
         assert result == b"cap body"
 
@@ -539,7 +542,7 @@ class TestFetchStdlibBackend:
         ):
             body, _ = fetch(
                 "https://example.com/start",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert body == b"other"
         mock_conn1.close.assert_called_once()
@@ -563,8 +566,8 @@ class TestFetchStdlibBackend:
             body, _ = fetch(
                 "https://example.com/base/start",
                 request=RequestParams(
-                    observe=Observe(on_redirect=urls.append),
-                    policy=Policy(transport="stdlib"),
+                    observe=ObserveParams(on_redirect=urls.append),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert body == b"landed"
@@ -591,8 +594,8 @@ class TestFetchStdlibBackend:
             fetch(
                 "https://a.com/submit",
                 request=RequestParams(
-                    content=Content(method="POST", data={"x": "1"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(method="POST", data={"x": "1"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         sent = conn_b.request.call_args.kwargs["headers"]
@@ -619,8 +622,8 @@ class TestFetchStdlibBackend:
             fetch(
                 "https://a.com/start",
                 request=RequestParams(
-                    content=Content(headers={"host": "a.com"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(headers={"host": "a.com"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         sent = conn_b.request.call_args.kwargs["headers"]
@@ -644,8 +647,8 @@ class TestFetchStdlibBackend:
             body, _ = fetch(
                 "https://example.com/submit",
                 request=RequestParams(
-                    content=Content(method="POST", data={"x": "1"}),
-                    policy=Policy(transport="stdlib"),
+                    content=ContentParams(method="POST", data={"x": "1"}),
+                    policy=PolicyParams(transport="stdlib"),
                 ),
             )
         assert body == b"got it"
@@ -672,7 +675,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
 
     def test_http_error_raises_fetch_error(self) -> None:
@@ -690,7 +693,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
 
     def test_error_body_isdecompressed(self) -> None:
@@ -716,7 +719,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert exc.value.body == html
 
@@ -743,7 +746,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert exc.value.status == 500
         assert exc.value.body == garbage
@@ -775,7 +778,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com:8443/page",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert seen == ["example.com"]
 
@@ -795,7 +798,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com:8443/page",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert mock_conn.request.call_args.kwargs["headers"]["Host"] == (
             "example.com:8443"
@@ -815,7 +818,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com/page",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert mock_conn.request.call_args.kwargs["headers"]["Host"] == "example.com"
 
@@ -838,7 +841,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com/start",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert conn_b.request.call_args.kwargs["headers"]["Host"] == "other.com:8443"
 
@@ -881,7 +884,7 @@ class TestOpenConnection:
         ):
             body, _ = fetch(
                 "https://example.com",
-                request=RequestParams(policy=Policy(transport="stdlib")),
+                request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
         assert body == b"stdlib"
         curl_request.assert_not_called()

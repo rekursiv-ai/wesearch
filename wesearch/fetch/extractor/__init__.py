@@ -1,7 +1,7 @@
 """HTML-to-text extractors: how a fetched page becomes text.
 
 One module per extractor, selected by the ``extractor`` field of
-:class:`wesearch.types.params.Policy` and satisfying
+:class:`wesearch.types.params.PolicyParams` and satisfying
 :class:`wesearch.types.extractor.Extract` -- the same shape the transports
 use.
 

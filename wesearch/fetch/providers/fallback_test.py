@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import Policy
+from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers import fallback
 from wesearch.types.errors import FetchError
 
@@ -28,7 +28,7 @@ class TestFallback:
 
         with patch.object(fallback, "fetch", ok):
             body, via = fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=Policy()
+                "https://s.example/", policy=PolicyParams()
             )
         assert body == b"<html>ok</html>"
         assert via is False
@@ -44,7 +44,7 @@ class TestFallback:
             patch.object(fallback, "fetch_reader_proxy", proxy_ok),
         ):
             body, via = fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=Policy()
+                "https://s.example/", policy=PolicyParams()
             )
         assert body == b"# md"
         assert via is True
@@ -55,7 +55,9 @@ class TestFallback:
             patch.object(fallback, "fetch", _fetch_raising(status)),
             pytest.raises(FetchError) as exc,
         ):
-            fallback.fetch_with_reader_fallback("https://s.example/", policy=Policy())
+            fallback.fetch_with_reader_fallback(
+                "https://s.example/", policy=PolicyParams()
+            )
         assert exc.value.status == status
 
     def test_proxy_failure_reraises_primary(self) -> None:
@@ -68,7 +70,9 @@ class TestFallback:
             patch.object(fallback, "fetch_reader_proxy", proxy_fail),
             pytest.raises(FetchError) as exc,
         ):
-            fallback.fetch_with_reader_fallback("https://s.example/", policy=Policy())
+            fallback.fetch_with_reader_fallback(
+                "https://s.example/", policy=PolicyParams()
+            )
         # The primary (403) is surfaced, not the proxy's 401.
         assert exc.value.status == 403
 

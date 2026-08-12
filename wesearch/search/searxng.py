@@ -18,7 +18,14 @@ import logging
 import os
 import re
 
-from wesearch.fetch import Content, Policy, RequestParams, Retry, Transport, fetch
+from wesearch.fetch import (
+    ContentParams,
+    PolicyParams,
+    RequestParams,
+    RetryParams,
+    Transport,
+    fetch,
+)
 from wesearch.lib.custom_json import (
     datetime_val,
     dict_val,
@@ -37,6 +44,7 @@ from wesearch.search.custom_types import (
     PaperResult,
     SearchError,
     SearchResult,
+    SearxngCategory,
     TorrentResult,
     VideoResult,
     clean_text,
@@ -48,19 +56,6 @@ logger = logging.getLogger(__name__)
 
 _SEARXNG_URL_ENV: Final = "SEARXNG_URL"
 
-
-type SearxngCategory = Literal[
-    "general",
-    "images",
-    "videos",
-    "news",
-    "map",
-    "music",
-    "it",
-    "science",
-    "files",
-    "social media",
-]
 
 # Union of every result shape a SearXNG query can return -- the implementation
 # return type behind the per-category overloads. ``VideoResult`` is omitted as
@@ -240,15 +235,15 @@ def searxng(
     body, _ = fetch(
         f"{base_url}/search?{params}",
         request=RequestParams(
-            content=Content(headers=headers),
-            retry=Retry(
+            content=ContentParams(headers=headers),
+            retry=RetryParams(
                 timeout_sec=timeout_sec, connect_timeout_sec=connect_timeout_sec
             ),
             # trust="internal": SEARXNG_URL names an instance the OPERATOR
             # runs, which is exactly the private-network case the untrusted
             # default refuses -- a loopback instance failed with "Refusing to
             # fetch '127.0.0.1' (resolves to non-public address)".
-            policy=Policy(transport=transport, trust="internal"),
+            policy=PolicyParams(transport=transport, trust="internal"),
         ),
     )
     # Decoded explicitly: json.loads on raw bytes raises UnicodeDecodeError for
@@ -463,10 +458,10 @@ class CategoryInfo:
     parser: Callable[[dict[str, object]], SearxngResult] | None = None
 
 
-# One record per member of ``SearxngCategory``. The Literal above stays the only
-# place a tab NAME is spelled; this attaches data to those names, and the
-# assertion below makes a missing record an ImportError rather than a tab that
-# is silently unglossed and unparsed.
+# One record per member of ``SearxngCategory``. The Literal in
+# :mod:`.custom_types` stays the only place a tab NAME is spelled; this attaches
+# data to those names, and the assertion below makes a missing record an
+# ImportError rather than a tab that is silently unglossed and unparsed.
 CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
     "general": CategoryInfo(gloss="web results"),
     "images": CategoryInfo(

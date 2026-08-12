@@ -2,22 +2,27 @@
 
 Four groups, split by who owns the value and how often it varies:
 
-- :class:`Content` -- what to send. The caller's request, per call.
-- :class:`Retry` -- how hard to try. The caller's patience, rarely varied.
-- :class:`Observe` -- who watches. The caller's instrumentation, per call.
-- :class:`Policy` -- transport and trust. The APPLICATION's decision, constant
-  for its whole lifetime.
+- :class:`ContentParams` -- what to send. The caller's request, per call.
+- :class:`RetryParams` -- how hard to try. The caller's patience, rarely varied.
+- :class:`ObserveParams` -- who watches. The caller's instrumentation, per call.
+- :class:`PolicyParams` -- transport and trust. The APPLICATION's decision,
+  constant for its whole lifetime.
 
 The split is not cosmetic. A flat parameter bag let a security policy
 (``validated_hosts``) double as a transport selector and a session-pool
 disabler: asking for SSRF safety silently disabled the browser transports and
 dropped the cookie jar. Grouping makes that category error unrepresentable --
-:class:`Content` holds nothing a transport can route on, and :class:`Policy`
-holds nothing a server ever sees.
+:class:`ContentParams` holds nothing a transport can route on, and
+:class:`PolicyParams` holds nothing a server ever sees.
 
-``Policy`` is one opaque object a provider forwards rather than a pair of knobs
-it must restate; a provider that forgets it gets a type error, never a silent
-unvalidated fetch.
+``PolicyParams`` is one opaque object a provider forwards rather than a pair of
+knobs it must restate; a provider that forgets it gets a type error, never a
+silent unvalidated fetch.
+
+These are the VALUES a caller passes. The DESCRIPTIONS a tool surface renders --
+type, default, and prose per parameter -- live in
+:mod:`wesearch.types.schema`, which reads its defaults back off
+:meth:`PolicyParams.field_default`.
 """
 
 from __future__ import annotations
@@ -39,12 +44,12 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "Content",
+    "ContentParams",
     "Extractor",
-    "Observe",
-    "Policy",
+    "ObserveParams",
+    "PolicyParams",
     "RequestParams",
-    "Retry",
+    "RetryParams",
     "Transport",
     "Trust",
 ]
@@ -106,7 +111,7 @@ Extractor: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Content:
+class ContentParams:
     """What to send: the request itself.
 
     Attributes:
@@ -149,11 +154,11 @@ class Content:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Retry:
+class RetryParams:
     """How hard to try: the caller's patience.
 
     Attributes:
-      retries: Retry attempts for transient failures.
+      retries: RetryParams attempts for transient failures.
       timeout_sec: Socket timeout in seconds, covering the whole request.
       connect_timeout_sec: Ceiling on the TCP/TLS handshake alone, before any
         byte of the response. Separate from ``timeout_sec`` because the two
@@ -194,9 +199,9 @@ class Retry:
             raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")
 
     def backoff_delay(self, attempt: int, headers: dict[str, str]) -> float:
-        """Retry backoff in seconds for ``attempt``, honoring any ``Retry-After``.
+        """RetryParams backoff in seconds for ``attempt``, honoring any ``RetryParams-After``.
 
-        ``Retry-After`` is delta-seconds OR an HTTP-date (RFC 9110 SS 10.2.3);
+        ``RetryParams-After`` is delta-seconds OR an HTTP-date (RFC 9110 SS 10.2.3);
         both forms are honored, capped at 30s. A malformed value falls through to
         the computed exponential backoff.
 
@@ -229,7 +234,7 @@ class Retry:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Observe:
+class ObserveParams:
     """Who watches: the caller's instrumentation.
 
     Attributes:
@@ -252,7 +257,7 @@ class Observe:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Policy:
+class PolicyParams:
     """Transport, extractor, and trust: the application's decision, not the request's.
 
     Constant for an application's lifetime -- sagent's URLs are always
@@ -265,13 +270,13 @@ class Policy:
     and cannot be handed an IP without a proxy). Conflating the two is what made
     a security choice disable the browser.
 
-    ``extractor`` sits here rather than in :class:`Content` because it is the
+    ``extractor`` sits here rather than in :class:`ContentParams` because it is the
     application's rendering choice and nothing a server ever sees -- the same
     test that puts ``transport`` here.
 
     The class-level defaults ARE the defaults every surface renders. A
     signature default cannot call anything (ruff B008), so a tool reads
-    ``Policy.extractor`` -- the annotation on the field, not an instance -- and
+    ``PolicyParams.extractor`` -- the annotation on the field, not an instance -- and
     a spec reads the same. Spelling ``"html2text"`` at each site instead is how
     the previous switch needed four edits plus two prose files to land.
 
@@ -291,7 +296,7 @@ class Policy:
         """Return the class's declared default for ``name``.
 
         ``slots=True`` replaces the class attribute with a descriptor, so
-        ``Policy.extractor`` is a slot object rather than ``"html2text"``;
+        ``PolicyParams.extractor`` is a slot object rather than ``"html2text"``;
         ``dataclasses.fields`` is where the declared value survives. ``kind``
         types the result for a caller whose annotation is a ``Literal``; it is
         not re-checked, since this class declared the value.
@@ -319,10 +324,10 @@ class RequestParams:
 
     """
 
-    content: Content = field(default_factory=Content)
-    retry: Retry = field(default_factory=Retry)
-    observe: Observe = field(default_factory=Observe)
-    policy: Policy = field(default_factory=Policy)
+    content: ContentParams = field(default_factory=ContentParams)
+    retry: RetryParams = field(default_factory=RetryParams)
+    observe: ObserveParams = field(default_factory=ObserveParams)
+    policy: PolicyParams = field(default_factory=PolicyParams)
 
     def __post_init__(self) -> None:
         """Reject a request a browser transport could never perform.

@@ -22,10 +22,10 @@ import json
 import os
 
 from wesearch.fetch import (
-    Content,
-    Policy,
+    ContentParams,
+    PolicyParams,
     RequestParams,
-    Retry,
+    RetryParams,
     Transport,
     fetch,
 )
@@ -206,9 +206,9 @@ def get(
         lambda: fetch(
             url=f"{base}{path}",
             request=RequestParams(
-                content=Content(params=params, headers=_headers()),
-                retry=Retry(timeout_sec=timeout_sec),
-                policy=Policy(transport=transport),
+                content=ContentParams(params=params, headers=_headers()),
+                retry=RetryParams(timeout_sec=timeout_sec),
+                policy=PolicyParams(transport=transport),
             ),
         )[0],
         source=source,
@@ -268,14 +268,14 @@ def batch(
         lambda: fetch(
             url=f"{base}/{endpoint}/batch",
             request=RequestParams(
-                content=Content(
+                content=ContentParams(
                     method="POST",
                     params={"fields": fields},
                     json={"ids": ids},
                     headers=_headers(),
                 ),
-                retry=Retry(timeout_sec=timeout_sec),
-                policy=Policy(transport=transport),
+                retry=RetryParams(timeout_sec=timeout_sec),
+                policy=PolicyParams(transport=transport),
             ),
         )[0],
         source=source,

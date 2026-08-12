@@ -38,7 +38,7 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
         "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]"
     ) from e
 
-from wesearch.fetch.spec import FetchParams
+from wesearch.fetch.custom_types import FetchParamsSchema
 from wesearch.lib.userdirs import cache_dir
 from wesearch.paper import (
     authors as paper_authors_mod,
@@ -48,14 +48,15 @@ from wesearch.paper import (
 )
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
-from wesearch.search.custom_types import SearchBackends
+from wesearch.search.custom_types import SearchBackends, SearxngCategory
 from wesearch.search.render import lean_result
-from wesearch.search.search import search as web_search_fn
-from wesearch.search.searxng import SearxngCategory
-from wesearch.search.spec import SearchParams
+from wesearch.search.search import (
+    SearchParamsSchema,
+    search as web_search_fn,
+)
 from wesearch.types.params import (
     Extractor,
-    Policy,
+    PolicyParams,
     Transport,
 )
 from wesearch.web import fetch_web
@@ -241,7 +242,7 @@ def author_papers(
 
 
 @mcp.tool()
-@_append_doc(SearchParams.asset_markdown())
+@_append_doc(SearchParamsSchema.asset_markdown())
 def web_search(
     query: str,
     num_results: int = 10,
@@ -276,11 +277,11 @@ def web_search(
 
 
 @mcp.tool()
-@_append_doc(FetchParams.asset_markdown())
+@_append_doc(FetchParamsSchema.asset_markdown())
 def web_fetch(
     url: str,
     max_chars: int = 8000,
-    # Module constants, not ``FetchParams.default(...)``: ruff B008 forbids a
+    # Module constants, not ``FetchParamsSchema.default(...)``: ruff B008 forbids a
     # call in a signature default. The parity test asserts these EQUAL the
     # spec's, so the constant cannot drift from the description beside it.
     transport: Transport = "auto",
@@ -309,7 +310,7 @@ def web_fetch(
     result = fetch_web(
         url,
         max_chars=max_chars,
-        policy=Policy(transport=transport, extractor=extractor),
+        policy=PolicyParams(transport=transport, extractor=extractor),
     )
     return {
         "url": result.url,

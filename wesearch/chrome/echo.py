@@ -28,7 +28,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Protocol, Self
 
 import contextlib
 import socket
@@ -210,15 +210,34 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
     )
 
 
-def _read_head(conn: ssl.SSLSocket, *, max_bytes: int = 1 << 16) -> str:
-    """Read a request up to the end of its header block."""
+def _read_head(conn: _Recvable, *, max_bytes: int = 1 << 16) -> str:
+    """Read a request up to the end of its header block.
+
+    Returns ``""`` for a head that never terminated -- the peer hung up or
+    stalled past its timeout mid-request. Returning the PARTIAL bytes instead
+    let ``GET / HTTP`` (Chrome's preconnect, and what the resilience test
+    sends) parse as a request to ``/`` carrying zero headers, which then
+    overwrote the real capture as the most recent one.
+    """
     data = b""
     while b"\r\n\r\n" not in data and len(data) < max_bytes:
         chunk = conn.recv(4096)
         if not chunk:
-            break
+            return ""
         data += chunk
-    return data.decode("latin-1")
+    return data.decode("latin-1") if b"\r\n\r\n" in data else ""
+
+
+class _Recvable(Protocol):
+    """The one operation reading a head needs.
+
+    Narrower than ``ssl.SSLSocket`` on purpose: the truncation this reader must
+    distinguish is reproducible only by feeding it bytes directly, and a
+    parameter that demands a real TLS socket makes that test impossible to
+    write without a cast asserting something untrue.
+    """
+
+    def recv(self, bufsize: int, /) -> bytes: ...
 
 
 def _requests_root(request: str) -> bool:

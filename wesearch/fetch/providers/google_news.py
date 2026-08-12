@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Final, Literal
 from urllib.parse import urlparse
 
-from wesearch.fetch import Policy, RequestParams, fetch
+from wesearch.fetch import PolicyParams, RequestParams, fetch
 
 
 __all__ = [
@@ -37,7 +37,7 @@ def matches(url: str) -> bool:
     return urlparse(url).hostname == "news.google.com"
 
 
-def fetch_google_news(url: str, *, policy: Policy) -> tuple[bytes, NewsPayload]:
+def fetch_google_news(url: str, *, policy: PolicyParams) -> tuple[bytes, NewsPayload]:
     """Fetch a Google News URL via RSS when the path has a rewrite, else HTML.
 
     Args:

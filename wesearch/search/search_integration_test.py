@@ -44,11 +44,12 @@ from wesearch.search.custom_types import (
     PackageResult,
     PaperResult,
     SearchResult,
+    SearxngCategory,
     TorrentResult,
     VideoResult,
 )
 from wesearch.search.duckduckgo import duckduckgo
-from wesearch.search.searxng import SearxngCategory, searxng
+from wesearch.search.searxng import searxng
 from wesearch.types.errors import BotDetectionError, FetchError
 
 
