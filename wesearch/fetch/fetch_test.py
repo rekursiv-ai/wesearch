@@ -95,7 +95,7 @@ class TestBackoffDelay:
         assert RetryParams().backoff_delay(0, {"retry-after": "999"}) == 30.0
 
     def test_retry_after_http_date_honored(self) -> None:
-        # REV2A-007: RetryParams-After may be an HTTP-date, not just delta-seconds.
+        # REV2A-007: Retry-After may be an HTTP-date, not just delta-seconds.
         # A near-future date must produce a positive delay (honored), not fall
         # through to exponential backoff.
         future = datetime.now(tz=UTC) + timedelta(seconds=10)

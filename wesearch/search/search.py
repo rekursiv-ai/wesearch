@@ -101,7 +101,7 @@ class SearchParamsSchema(Schema):
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,
@@ -113,7 +113,7 @@ def search(
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,
@@ -125,7 +125,7 @@ def search(
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,
@@ -137,7 +137,7 @@ def search(
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,
@@ -149,7 +149,7 @@ def search(
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,
@@ -161,7 +161,7 @@ def search(
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,
@@ -173,7 +173,7 @@ def search(
 @overload
 def search(
     query: str,
-    backend: Literal["searxng"],
+    backend: SearchBackends | None = ...,
     num_results: int = ...,
     headers: dict[str, str] | None = ...,
     *,

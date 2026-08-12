@@ -30,7 +30,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    TypeAlias,
+    cast,
+    final,
+    override,
+)
 
 import math
 import random
@@ -44,8 +52,10 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "NO_BODY",
     "ContentParams",
     "Extractor",
+    "NoBody",
     "ObserveParams",
     "PolicyParams",
     "RequestParams",
@@ -53,6 +63,22 @@ __all__ = [
     "Transport",
     "Trust",
 ]
+
+
+@final
+class NoBody:
+    """The type of :data:`NO_BODY`; see it for why ``None`` cannot serve."""
+
+    @override
+    def __repr__(self) -> str:
+        return "NO_BODY"
+
+
+# "This request carries no JSON body", as distinct from "its body is the JSON
+# literal ``null``". ``None`` cannot say both -- it is itself a valid JSON
+# value -- so using it as the sentinel made ``json=None`` mean "no body" and
+# left ``null`` unsendable, though an API may require exactly that.
+NO_BODY: Final = NoBody()
 
 # Retrieval transport. ``"auto"`` selects curl-then-Zendriver for eligible GETs
 # and curl for requests a browser cannot replay. ``"curl"`` is the curl_cffi
@@ -120,7 +146,8 @@ class ContentParams:
       data: Form data, sent as application/x-www-form-urlencoded. Mutually
         exclusive with ``json``.
       json: JSON-serializable body, sent as application/json. Mutually exclusive
-        with ``data``.
+        with ``data``. Defaults to :data:`NO_BODY` -- the absence of a body --
+        so that ``json=None`` sends the JSON literal ``null``.
       headers: Extra headers, merged over the session identity (these win).
       cookies: Cookies to send, merged over the session jar (these win). On the
         curl path these are written INTO the pooled jar, which outlives the
@@ -137,20 +164,20 @@ class ContentParams:
     method: HttpMethod = "GET"
     params: dict[str, str | int] | None = None
     data: dict[str, str] | None = None
-    json: JSONValue = None
+    json: JSONValue | NoBody = NO_BODY
     headers: dict[str, str] | None = None
     cookies: dict[str, str] | None = None
     raw_headers: bool = False
 
     def __post_init__(self) -> None:
         """Reject a request carrying two mutually exclusive bodies."""
-        if self.data is not None and self.json is not None:
+        if self.data is not None and self.json is not NO_BODY:
             raise ValueError("'data' and 'json' are mutually exclusive.")
 
     @property
     def has_body(self) -> bool:
         """Whether this request carries a body a browser cannot replay."""
-        return self.data is not None or self.json is not None
+        return self.data is not None or self.json is not NO_BODY
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -158,7 +185,7 @@ class RetryParams:
     """How hard to try: the caller's patience.
 
     Attributes:
-      retries: RetryParams attempts for transient failures.
+      retries: Retry attempts for transient failures.
       timeout_sec: Socket timeout in seconds, covering the whole request.
       connect_timeout_sec: Ceiling on the TCP/TLS handshake alone, before any
         byte of the response. Separate from ``timeout_sec`` because the two
@@ -199,9 +226,9 @@ class RetryParams:
             raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")
 
     def backoff_delay(self, attempt: int, headers: dict[str, str]) -> float:
-        """RetryParams backoff in seconds for ``attempt``, honoring any ``RetryParams-After``.
+        """Retry backoff in seconds for ``attempt``, honoring any ``Retry-After``.
 
-        ``RetryParams-After`` is delta-seconds OR an HTTP-date (RFC 9110 SS 10.2.3);
+        ``Retry-After`` is delta-seconds OR an HTTP-date (RFC 9110 SS 10.2.3);
         both forms are honored, capped at 30s. A malformed value falls through to
         the computed exponential backoff.
 
@@ -270,14 +297,14 @@ class PolicyParams:
     and cannot be handed an IP without a proxy). Conflating the two is what made
     a security choice disable the browser.
 
-    ``extractor`` sits here rather than in :class:`ContentParams` because it is the
-    application's rendering choice and nothing a server ever sees -- the same
+    ``extractor`` sits here rather than in :class:`ContentParams` because it is
+    the application's rendering choice and nothing a server ever sees -- the same
     test that puts ``transport`` here.
 
     The class-level defaults ARE the defaults every surface renders. A
     signature default cannot call anything (ruff B008), so a tool reads
-    ``PolicyParams.extractor`` -- the annotation on the field, not an instance -- and
-    a spec reads the same. Spelling ``"html2text"`` at each site instead is how
+    ``PolicyParams.extractor`` -- the annotation on the field, not an instance --
+    and a schema reads the same. Spelling ``"html2text"`` at each site instead is how
     the previous switch needed four edits plus two prose files to land.
 
     Attributes:
