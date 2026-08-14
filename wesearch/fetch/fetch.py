@@ -578,7 +578,7 @@ def _send_via_zendriver(
     browser_url = _url_with_params(request.url, request.params.content.params)
     result = zendriver_backend.fetch_zendriver(
         browser_url,
-        profile_dir=data_dir("rekursiv-ai") / "wesearch" / "fetch-zendriver",
+        profile_dir=data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
         egress=egress or "",
         timeout_sec=request.params.retry.timeout_sec,
         headers=headers,

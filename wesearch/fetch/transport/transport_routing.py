@@ -105,7 +105,7 @@ def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
     if path is not None:
         return _read_domains(path)
     return _read_domains(_bundled_domains_path()) | _read_domains(
-        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
     )
 
 
@@ -125,7 +125,7 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
     if not normalized or "\n" in normalized or "\r" in normalized:
         raise ValueError(f"Invalid Zendriver domain: {domain!r}.")
     target = (
-        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
         if path is None
         else path
     )
