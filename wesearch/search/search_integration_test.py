@@ -75,7 +75,7 @@ _searxng_required = pytest.mark.skipif(
 # Per USER, not per machine. This lived in ``gettempdir()``, which is shared:
 # every checkout and every operator on the host queued on one file, so a
 # colleague's gate run blocked this one.
-_LOCK_DIR = state_dir("rekursiv-ai") / "wesearch"
+_LOCK_DIR = state_dir() / "rekursiv-ai" / "wesearch"
 # ``state_dir`` resolves a path and does not create it (``userdirs.py:138``).
 _LOCK_DIR.mkdir(parents=True, exist_ok=True)
 

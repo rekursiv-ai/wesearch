@@ -26,7 +26,7 @@ def test_default_path_uses_per_user_state(
     """
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     remember_zendriver_domain("walled.example")
-    expected = state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+    expected = state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
     assert expected.is_file()
     assert "walled.example" in expected.read_text().split()
 
@@ -46,7 +46,7 @@ def test_default_remember_does_not_modify_bundled_manifest(
     after = bundled.read_bytes() if bundled.exists() else None
     assert after == before
     assert (
-        state_dir("rekursiv-ai") / "wesearch" / "zendriver-domains.txt"
+        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
     ).read_text() == "learned.example\n"
     assert "learned.example" in zendriver_domains()
 

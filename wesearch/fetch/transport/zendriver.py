@@ -309,7 +309,7 @@ def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
 
     """
     target = (
-        data_dir("rekursiv-ai") / "wesearch" / "fetch-zendriver"
+        data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver"
         if profile_dir is None
         else profile_dir
     )
@@ -736,7 +736,7 @@ def main() -> int:
     args = parser.parse_args()
     print(  # noqa: T201 -- CLI user feedback.
         f"Opening {args.url} in Chrome on "
-        f"{data_dir('rekursiv-ai') / 'wesearch' / 'fetch-zendriver'} -- "
+        f"{data_dir() / 'rekursiv-ai' / 'wesearch' / 'fetch-zendriver'} -- "
         "close the window when done."
     )
     open_instance(args.url)

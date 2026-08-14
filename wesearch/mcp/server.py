@@ -190,7 +190,7 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
     """
     kind, canonical = normalize_id(paper_id)
     pdf_bytes, source = paper_fetch_mod.download(kind, canonical)
-    target_dir = cache_dir("rekursiv-ai") / "wesearch" / "papers"
+    target_dir = cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
     target_dir.mkdir(parents=True, exist_ok=True)
     # Slug for a human, digest for identity: ``id_slug`` maps every unsafe
     # character to ``_``, so ``10.1/a_b`` and ``10.1/a/b`` collide and one
