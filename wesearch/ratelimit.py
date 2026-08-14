@@ -30,7 +30,7 @@ from collections import deque
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import Final, Protocol, cast, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 import asyncio
 import fcntl
@@ -211,9 +211,7 @@ class FileStore:
                 os.lseek(self._fd, 0, os.SEEK_SET)
                 raw = os.read(self._fd, _STATE_BYTES)
                 current = (
-                    cast(tuple[float, float], struct.unpack("<dd", raw))
-                    if len(raw) == _STATE_BYTES
-                    else None
+                    struct.unpack("<dd", raw) if len(raw) == _STATE_BYTES else None
                 )
                 tokens, updated = update(current)
                 os.lseek(self._fd, 0, os.SEEK_SET)
