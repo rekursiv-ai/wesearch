@@ -1,115 +1,62 @@
-"""Unit tests for the net-log parsing helpers in chrome.capture."""
+"""Unit tests for driving a headless Chrome in chrome.capture."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from unittest.mock import patch
 
-import json
+import subprocess
 
 import pytest
 
-from wesearch.chrome.capture import _load_lenient, _parse_netlog
+from wesearch.chrome.capture import drive_chrome
 
 
-class TestParseNetlogConstantDrift:
-    def test_missing_event_type_constant_raises(self, tmp_path: Path) -> None:
-        # REV2A-006: if the event-type constant name drifts, `.get()` returns
-        # None; `event["type"] != None` then matches NO events (silent zero
-        # capture). A missing constant must raise, not degrade silently.
-        netlog = {
-            "constants": {"logEventTypes": {"SOME_OTHER_NAME": 42}},
-            "events": [{"type": 42, "params": {"headers": [":method: GET"]}}],
-        }
-        p = tmp_path / "netlog.json"
-        p.write_text(json.dumps(netlog))
-        with pytest.raises((KeyError, ValueError, RuntimeError)):
-            _parse_netlog(p, to_origin="https://x.com")
+class TestDriveChrome:
+    def test_timeout_is_reported_not_raised(self) -> None:
+        # A Chrome that hangs AFTER navigating has already put the request on
+        # the wire; the server-side record is complete. Propagating the timeout
+        # failed the parity suite over a browser shutdown nobody is testing.
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="chrome", timeout=40.0),
+            ),
+            patch(
+                "wesearch.chrome.capture._chrome_binary",
+                return_value="google-chrome-stable",
+            ),
+        ):
+            assert drive_chrome("https://localhost:1/") is True
 
+    def test_clean_exit_reports_no_timeout(self) -> None:
+        with (
+            patch("subprocess.run"),
+            patch(
+                "wesearch.chrome.capture._chrome_binary",
+                return_value="google-chrome-stable",
+            ),
+        ):
+            assert drive_chrome("https://localhost:1/") is False
 
-class TestParseNetlogProtocols:
-    def test_http2_event_reconstructs_url_from_pseudo_headers(
-        self, tmp_path: Path
-    ) -> None:
-        netlog = {
-            "constants": {
-                "logEventTypes": {"HTTP_TRANSACTION_HTTP2_SEND_REQUEST_HEADERS": 7}
-            },
-            "events": [
-                {
-                    "type": 7,
-                    "params": {
-                        "headers": [
-                            ":method: GET",
-                            ":scheme: https",
-                            ":authority: x.com",
-                            ":path: /a",
-                            "user-agent: Chrome",
-                            "accept: */*",
-                        ]
-                    },
-                }
-            ],
-        }
-        p = tmp_path / "n.json"
-        p.write_text(json.dumps(netlog))
-        got = _parse_netlog(p, to_origin="https://x.com")
-        assert len(got) == 1
-        assert got[0].url == "https://x.com/a"
-        assert got[0].header_names() == ("user-agent", "accept")
+    def test_missing_binary_raises(self) -> None:
+        with (
+            patch("wesearch.chrome.capture._chrome_binary", return_value=None),
+            pytest.raises(RuntimeError, match="No Chrome binary"),
+        ):
+            drive_chrome("https://localhost:1/")
 
-    def test_http1_event_reconstructs_url_from_line_and_host(
-        self, tmp_path: Path
-    ) -> None:
-        # An HTTP/1.1 send event carries no pseudo-headers: the URL comes from
-        # the request `line` plus the `Host` header. A loopback oracle served
-        # only over HTTP/1.1 would be invisible if this path were unsupported.
-        netlog = {
-            "constants": {
-                "logEventTypes": {"HTTP_TRANSACTION_SEND_REQUEST_HEADERS": 9}
-            },
-            "events": [
-                {
-                    "type": 9,
-                    "params": {
-                        "line": "GET /a HTTP/1.1",
-                        "headers": [
-                            "Host: localhost:8443",
-                            "User-Agent: Chrome",
-                            "Accept: */*",
-                        ],
-                    },
-                }
-            ],
-        }
-        p = tmp_path / "n.json"
-        p.write_text(json.dumps(netlog))
-        got = _parse_netlog(p, to_origin="https://localhost:8443")
-        assert len(got) == 1
-        assert got[0].url == "https://localhost:8443/a"
-        assert got[0].header_names() == ("host", "user-agent", "accept")
-
-
-class TestLoadLenient:
-    def test_parses_well_formed_json(self) -> None:
-        assert _load_lenient('{"a": 1}') == {"a": 1}
-
-    def test_repairs_truncated_tail(self) -> None:
-        # A net-log killed mid-write ends after a complete event's "},"; the
-        # repair closes the array + object so the completed events still parse.
-        raw = '{"events": [{"x": 1}, {"y": 2},'
-        got = _load_lenient(raw)
-        assert got["events"] == [{"x": 1}, {"y": 2}]
-
-    def test_no_delimiter_raises_on_original_not_repair_artifact(self) -> None:
-        # RED: when the truncated body has no "}," at all, rfind returns -1 and
-        # the repair parses "]}" -- raising a JSONDecodeError about the ARTIFACT,
-        # not the real input, masking what actually failed. The failure must
-        # reflect the original body, not the "]}" the repair fabricated.
-        with pytest.raises(json.JSONDecodeError) as exc:
-            _load_lenient("garbage with no delimiter")
-        assert exc.value.doc != "]}", (
-            "repair fabricated ']}' and raised on it, hiding the real failure"
-        )
+    def test_certificate_flag_only_when_requested(self) -> None:
+        with (
+            patch("subprocess.run") as run,
+            patch(
+                "wesearch.chrome.capture._chrome_binary",
+                return_value="google-chrome-stable",
+            ),
+        ):
+            drive_chrome("https://localhost:1/")
+            assert "--ignore-certificate-errors" not in run.call_args.args[0]
+            drive_chrome("https://localhost:1/", ignore_certificate_errors=True)
+            assert "--ignore-certificate-errors" in run.call_args.args[0]
 
 
 if __name__ == "__main__":

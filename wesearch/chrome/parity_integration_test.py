@@ -38,7 +38,7 @@ import importlib
 
 import pytest
 
-from wesearch.chrome.capture import capture_chrome_request, chrome_available
+from wesearch.chrome.capture import chrome_available, drive_chrome
 from wesearch.chrome.echo import EchoOracle
 from wesearch.fetch import (
     ContentParams,
@@ -117,8 +117,7 @@ def test_fetch_wire_request_matches_chrome(
     """
     omit = _HTTP2_ONLY if backend == "curl" else frozenset[str]()
     chrome = _drop(_chrome_headers(oracle), omit)
-    if not chrome:
-        pytest.skip("Chrome sent no capturable request to the oracle.")
+    assert chrome, "Chrome sent no request to the oracle; nothing to compare."
     # trust="internal": the oracle is a loopback server, which the default
     # ``untrusted`` SSRF check refuses before any wire bytes exist. The test
     # authored this URL, so declaring it is exactly true -- and is the seam that
@@ -243,13 +242,22 @@ def test_browser_backend_fetches_live_page(
 
 
 def _chrome_headers(oracle: EchoOracle) -> tuple[str, ...]:
-    """The ordered header names a real Chrome sent to the oracle."""
-    requests = capture_chrome_request(
-        oracle.url,
-        to_origin=oracle.url.rstrip("/"),
-        ignore_certificate_errors=True,
-    )
-    return requests[0].header_names() if requests else ()
+    """The ordered header names a real Chrome sent to the oracle.
+
+    Read from the oracle, the same server-side record the fetch backends are
+    judged by, so both sides of the comparison come from one observer. Call
+    before issuing our own request: ``captured()`` returns only the most recent.
+
+    A Chrome killed at the timeout AFTER navigating still leaves a complete
+    record, so the drive is retried only when the hang produced nothing --
+    otherwise a slow CI runner fails a test about header order.
+    """
+    for _attempt in range(2):
+        timed_out = drive_chrome(oracle.url, ignore_certificate_errors=True)
+        captured = oracle.captured()
+        if captured or not timed_out:
+            return captured
+    return oracle.captured()
 
 
 def _drop(names: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]:
