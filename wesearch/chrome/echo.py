@@ -10,7 +10,7 @@ host whose certificate can expire out from under the suite.
 a self-signed ``localhost`` certificate with :mod:`cryptography`, serves HTTPS on
 a loopback port from a daemon thread, and records the ordered header names of
 each request to ``/``. Chrome reaches it with ``--ignore-certificate-errors``
-(via :func:`wesearch.chrome.capture.capture_chrome_request`); the fetch
+(via :func:`wesearch.chrome.capture.drive_chrome`); the fetch
 backends reach it by trusting :attr:`ca_path` (``SSL_CERT_FILE`` for the stdlib
 path, ``verify`` for curl).
 

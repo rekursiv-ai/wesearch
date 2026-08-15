@@ -7,9 +7,12 @@ from typing import cast, override
 from unittest.mock import patch
 
 import asyncio
+import contextlib
+import os
 import random
 import struct
 import threading
+import time
 
 import pytest
 
@@ -147,22 +150,10 @@ def test_pacer_async_first_free_then_paces() -> None:
     assert clock.sleeps == [9.0]
 
 
-class _FrozenClock(FakeClock):
-    """A clock whose time never advances, so each paced sleep is the full draw."""
-
-    @override
-    def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)  # record but do NOT advance `now`
-
-    @override
-    async def sleep_async(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-
-
 def test_pacer_draws_stay_within_bounds_across_many_acquires() -> None:
-    # Real RNG, time frozen between calls: every PACED sleep (call 2+) must fall
-    # in [low, high]. The first call is free (no sleep).
-    clock = _FrozenClock()
+    # Real RNG, no work between calls: every PACED sleep (call 2+) is the full
+    # draw and must fall in [low, high]. The first call is free (no sleep).
+    clock = FakeClock()
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock)
     for _ in range(500):
         pacer.acquire()
@@ -396,6 +387,80 @@ def test_file_store_serializes_concurrent_threads(tmp_path: Path) -> None:
         t.join()
     tokens, _ = struct.unpack("<dd", (tmp_path / "rl.bin").read_bytes())
     assert tokens == 800.0  # no lost updates
+
+
+def test_file_store_holds_no_descriptor_between_transactions(tmp_path: Path) -> None:
+    """A store must not own an fd across calls: ephemeral stores would leak one each.
+
+    ``clear_domain_cooldowns`` builds one ``FileStore`` per matching file per call,
+    so a cached descriptor leaks per call and eventually exhausts the process.
+    """
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.exists():
+        pytest.skip("descriptor count requires /proc")
+    store = FileStore(tmp_path / "rl.bin")
+    store.transact(lambda _state: (1.0, 2.0))
+    before = len(list(fd_dir.iterdir()))
+    for _ in range(50):
+        FileStore(tmp_path / "rl.bin").transact(lambda _state: (1.0, 2.0))
+    assert len(list(fd_dir.iterdir())) <= before
+
+
+def test_file_store_excludes_a_forked_child(tmp_path: Path) -> None:
+    """``flock`` is per-open-file-description, so an INHERITED fd excludes nothing.
+
+    A store opened before ``fork`` shares one description with the child, and both
+    ``LOCK_EX`` calls succeed -- silently voiding cross-process exclusion.
+    """
+    store = FileStore(tmp_path / "rl.bin")
+    store.transact(lambda _state: (1.0, 2.0))  # open before forking
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover -- child process
+
+        def hold(_state: tuple[float, float] | None) -> tuple[float, float]:
+            _ = os.write(write_fd, b"x")
+            time.sleep(0.3)
+            return (9.0, 9.0)
+
+        store.transact(hold)
+        os._exit(0)
+    _ = os.read(read_fd, 1)  # child is inside its transaction
+    start = time.monotonic()
+    store.transact(lambda _state: (5.0, 5.0))
+    waited = time.monotonic() - start
+    _ = os.waitpid(pid, 0)
+    assert waited >= 0.2
+
+
+def test_pacer_reserves_its_slot_before_sleeping() -> None:
+    """Concurrent first acquires must not both take the free grant.
+
+    ``_last_grant`` is read-modify-written across a sleep; without reserving the
+    slot under a lock, two threads observe ``None`` and fire together -- losing
+    the jitter the pacer exists to provide.
+    """
+    barrier = threading.Barrier(2)
+
+    class _BarrierClock(FakeClock):
+        """Blocks in ``time()`` until both threads are inside ``_wait``."""
+
+        @override
+        def time(self) -> float:
+            # Times out once the loser is parked on the pacer's lock and can no
+            # longer reach the barrier -- which is exactly the fix working.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                _ = barrier.wait(timeout=0.25)
+            return self.now
+
+    clock = _BarrierClock()
+    pacer = RandomUniformPacer(10.0, 10.0, clock=clock)
+    threads = [threading.Thread(target=pacer.acquire) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert clock.sleeps == [10.0]  # exactly one free grant, one paced
 
 
 def test_sliding_is_thread_safe_under_contention() -> None:

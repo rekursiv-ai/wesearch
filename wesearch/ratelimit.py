@@ -1,27 +1,36 @@
-"""Rate limiters (sync-back test): sliding-window and token-bucket.
+"""Pace outbound requests: rate limiters, a jitter pacer, and a shared cooldown.
 
 Each limiter blocks the caller until a request slot is available, via either
 :meth:`acquire` (sync, sleeps the thread) or :meth:`acquire_async` (sleeps
 the coroutine). Both paths share one pure reserve step that updates limiter
-state under the store's lock and returns how long to wait; the wait then
-happens *outside* the lock, so a slow caller never blocks the state update
-for others. The two paths differ only in which sleep they call.
+state under a lock and returns how long to wait; the wait then happens
+*outside* the lock, so a slow caller never blocks the state update for
+others. The two paths differ only in which sleep they call.
 
-Scope of coordination depends on the limiter and its store. The default
-backing coordinates callers within one process (threads and coroutines via
-a ``threading.Lock``). :class:`TokenBucketRateLimiter` can instead take a
-:class:`FileStore`, which holds its state in an ``fcntl``-locked file, so
-several processes -- e.g. ones sharing an API key -- pace against one budget.
+Scope of coordination depends on the backing :class:`Store`. The default
+:class:`InProcessStore` coordinates callers within one process (threads and
+coroutines via a ``threading.Lock``). A :class:`FileStore` holds its state in
+an ``fcntl``-locked file, so several processes -- e.g. ones sharing an API key
+-- pace against one budget.
 
-Choosing between them:
+Choosing a pacer:
   - :class:`SlidingWindowRateLimiter` -- exact "no more than ``max_calls``
     in any ``per_seconds`` window". Tracks individual call timestamps;
-    memory grows with ``max_calls``. In-process only (no cross-process
-    store). Use when the provider enforces a true rolling window.
+    memory grows with ``max_calls``. In-process only (no pluggable store).
+    Use when the provider enforces a true rolling window.
   - :class:`TokenBucketRateLimiter` -- smooth average rate with burst
-    capacity ``max_calls``; O(1) state. The only limiter with a pluggable
-    :class:`Store`, so the only one that shares a budget across processes.
-    Use when you want steady pacing and an occasional burst is acceptable.
+    capacity ``max_calls``; O(1) state, and takes a :class:`Store`, so it is
+    the one rate limiter that shares a budget across processes. Use when you
+    want steady pacing and an occasional burst is acceptable.
+  - :class:`RandomUniformPacer` -- randomized spacing rather than a rate. The
+    irregular cadence is the point against a target that fingerprints a fixed
+    interval; the last-grant time is process-local.
+
+:class:`CooldownGate` is the orthogonal signal: an external "slow down" (an
+HTTP 429, a CAPTCHA) that every requester honors. It takes a :class:`Store`
+too, so the window is shareable across processes.
+:class:`CooldownRateLimiter` composes a pacer with a gate, and
+:func:`cross_process_limiter` builds the standard host-wide combination.
 """
 
 from __future__ import annotations
@@ -189,35 +198,27 @@ class FileStore:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._fd: int | None = None
-        # ``flock`` is per-open-file-description, so it does NOT serialize
-        # threads in this process that share ``self._fd``. The inner thread
-        # lock provides that; the flock provides cross-process exclusion.
-        # Mirrors providers/lib/oauth.py's two-layer lock.
-        self._lock = threading.Lock()
 
     def transact(
         self, update: Callable[[tuple[float, float] | None], tuple[float, float]]
     ) -> None:
-        """Run ``update`` on the on-disk state under thread + process locks."""
-        with self._lock:
-            if self._fd is None:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                self._fd = os.open(
-                    self._path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
-                )
-            fcntl.flock(self._fd, fcntl.LOCK_EX)
-            try:
-                os.lseek(self._fd, 0, os.SEEK_SET)
-                raw = os.read(self._fd, _STATE_BYTES)
-                current = (
-                    struct.unpack("<dd", raw) if len(raw) == _STATE_BYTES else None
-                )
-                tokens, updated = update(current)
-                os.lseek(self._fd, 0, os.SEEK_SET)
-                _ = os.write(self._fd, struct.pack("<dd", tokens, updated))
-            finally:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+        """Run ``update`` on the on-disk state under an exclusive ``flock``."""
+        # The descriptor lives only inside this call. ``flock`` is per-open-file-
+        # DESCRIPTION, so a cached fd would exclude neither threads sharing it nor
+        # a forked child inheriting it; one open per transaction gives every
+        # caller its own description and makes the flock the whole lock.
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.lseek(fd, 0, os.SEEK_SET)
+            raw = os.read(fd, _STATE_BYTES)
+            current = struct.unpack("<dd", raw) if len(raw) == _STATE_BYTES else None
+            tokens, updated = update(current)
+            os.lseek(fd, 0, os.SEEK_SET)
+            _ = os.write(fd, struct.pack("<dd", tokens, updated))
+        finally:
+            os.close(fd)
 
 
 class SlidingWindowRateLimiter:
@@ -348,28 +349,38 @@ class RandomUniformPacer:
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._rng: random.Random = rng if rng is not None else random.SystemRandom()
         self._last_grant: float | None = None  # None until the first grant.
+        self._lock = threading.Lock()
 
-    def _wait(self) -> float:
-        """Seconds to sleep to space this grant from the last; 0 on the first."""
-        now = self._clock.time()
-        if self._last_grant is None:
-            return 0.0
-        elapsed = now - self._last_grant
-        return max(0.0, self._rng.uniform(self._low, self._high) - elapsed)
+    def _reserve(self) -> float:
+        """Claim this caller's slot and return the seconds to sleep for it.
+
+        The slot is claimed under the lock and the sleep happens outside it (the
+        module's one reserve-then-wait rule): concurrent callers each take a
+        DISTINCT slot instead of all reading the same ``_last_grant`` and firing
+        together. The reservation is the grant time this caller is sleeping
+        TOWARD, so it is correct before the sleep has elapsed.
+        """
+        with self._lock:
+            now = self._clock.time()
+            if self._last_grant is None:
+                wait = 0.0
+            else:
+                elapsed = now - self._last_grant
+                wait = max(0.0, self._rng.uniform(self._low, self._high) - elapsed)
+            self._last_grant = now + wait
+            return wait
 
     def acquire(self) -> None:
         """Sleep until spaced from the previous grant (first grant is free)."""
-        wait = self._wait()
+        wait = self._reserve()
         if wait > 0:
             self._clock.sleep(wait)
-        self._last_grant = self._clock.time()
 
     async def acquire_async(self) -> None:
         """Async twin of :meth:`acquire`."""
-        wait = self._wait()
+        wait = self._reserve()
         if wait > 0:
             await self._clock.sleep_async(wait)
-        self._last_grant = self._clock.time()
 
 
 class TokenBucketRateLimiter:
