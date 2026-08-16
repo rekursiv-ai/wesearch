@@ -486,6 +486,24 @@ class TestHeaderOrder:
         assert headers["Sec-Fetch-Mode"] == "navigate"
         assert "Chrome/" in headers["User-Agent"]
 
+    def test_user_agent_agrees_with_the_client_hints_beside_it(self) -> None:
+        # The client hints are built from the impersonate target while the UA
+        # was drawn from the pool, so a Windows Chrome/48 UA rode beside
+        # sec-ch-ua-platform "macOS" and sec-ch-ua v="146". Both headers are
+        # present and correctly ordered, so no order check can see it -- but a
+        # browser that contradicts itself is provably not a browser.
+        headers = self._capture_headers()
+        user_agent = headers["User-Agent"]
+        platform = headers["sec-ch-ua-platform"].strip('"')
+        token = {"Windows": "Windows NT", "Linux": "X11; Linux", "macOS": "Macintosh"}
+        assert token[platform] in user_agent, (
+            f"sec-ch-ua-platform {platform!r} contradicts UA {user_agent!r}"
+        )
+        major = user_agent.split("Chrome/", 1)[1].split(".", 1)[0]
+        assert f'v="{major}"' in headers["sec-ch-ua"], (
+            f"sec-ch-ua {headers['sec-ch-ua']!r} contradicts UA Chrome/{major}"
+        )
+
     def test_post_xhr_order_with_json(self) -> None:
         headers = self._capture_headers(method="POST", json={"q": "x"})
         assert list(headers) == [

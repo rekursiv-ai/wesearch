@@ -475,23 +475,16 @@ def _send_as(
     caller_headers: dict[str, str] | None,
     caller_cookies: dict[str, str] | None,
 ) -> bytes:
-    """Send seeded with ``profile``'s UA + cookies (caller wins), save Set-Cookie."""
-    # egress=None => keyless: draw a UA, persist nothing. A drawn UA matches the
-    # request's impersonated browser so the UA and TLS fingerprint agree.
+    """Send seeded with ``profile``'s cookies (caller wins), save Set-Cookie."""
     impersonate = request.session.impersonate
-    ua = (
-        profile.ua
-        if profile is not None
-        else draw_user_agent(kind_for_impersonate(impersonate))
-    )
     jar = dict(profile.cookies) if profile is not None else {}
-    # On the curl path, curl_cffi's impersonate emits a COHERENT User-Agent that
-    # matches its TLS/HTTP-2 fingerprint; seeding a stored/drawn UA here would
-    # override it and make the two disagree (a bot tell). Let impersonate own the
-    # UA on curl; only the stdlib reference path (no impersonation) needs one.
+    # Neither transport takes a UA from here. On curl, curl_cffi's impersonate
+    # emits one COHERENT with its TLS/HTTP-2 fingerprint. On stdlib,
+    # chrome_navigation_headers builds the whole set -- UA and client hints --
+    # from the SAME impersonate target. Seeding a pool-drawn UA over either made
+    # the UA name one browser while the sec-ch-ua beside it named another, which
+    # is a stronger bot tell than any single header value.
     seeded_headers: dict[str, str] = {**(caller_headers or {})}
-    if request.params.policy.transport == "stdlib":
-        seeded_headers = {"User-Agent": ua, **seeded_headers}
     captured: dict[str, str] = {}
 
     request_origin = origin(request.url)
@@ -547,7 +540,14 @@ def _send_as(
         return body  # Keyless: nothing to persist.
     store = ProfileStore.shared()
     if profile is None:
-        store.save(egress, request.domain, Profile(ua=ua, cookies=captured))
+        store.save(
+            egress,
+            request.domain,
+            Profile(
+                ua=draw_user_agent(kind_for_impersonate(impersonate)),
+                cookies=captured,
+            ),
+        )
     elif captured:
         store.update_cookies(egress, request.domain, captured)
     return body
