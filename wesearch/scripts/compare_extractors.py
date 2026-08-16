@@ -1,5 +1,5 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script; CLI output is its product.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
@@ -322,12 +322,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # -- a typo read as "every converter is perfect".
     unknown = sorted(set(args.converter) - set(converters()))
     if unknown:
-        print(f"Unknown converter(s): {', '.join(unknown)}.")  # noqa: T201 -- CLI.
-        print(f"Available: {', '.join(converters())}.")  # noqa: T201 -- CLI.
+        print(f"Unknown converter(s): {', '.join(unknown)}.")
+        print(f"Available: {', '.join(converters())}.")
         return 2
     missing_urls = sorted(set(args.url) - {p.url for p in CORPUS})
     if missing_urls:
-        print(f"URL(s) not in the corpus: {', '.join(missing_urls)}.")  # noqa: T201 -- CLI.
+        print(f"URL(s) not in the corpus: {', '.join(missing_urls)}.")
         return 2
     pages = [p for p in CORPUS if not args.url or p.url in args.url]
     names = [n for n in converters() if not args.converter or n in args.converter]
@@ -337,8 +337,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             html = cached_html(
                 page, cache_dir=args.cache_dir, refresh=bool(args.refresh)
             )
-        except Exception as error:
-            print(f"\n{page.slug}: UNAVAILABLE: {error}")  # noqa: T201 -- CLI output.
+        except Exception as error:  # noqa: BLE001 -- one unreachable page must not end the run.
+            print(f"\n{page.slug}: UNAVAILABLE: {error}")
             continue
         rows.append((page, score_page(page, html, names=names)[1]))
         _write_samples(page, html=html, out_dir=args.samples, names=names)
@@ -407,8 +407,8 @@ def _print_table(
         *(f"{n} d" for n in names),
         *(f"{n} p" for n in names),
     ]
-    print("| " + " | ".join(header) + " |")  # noqa: T201 -- CLI output.
-    print("|" + "|".join(["---"] * len(header)) + "|")  # noqa: T201 -- CLI output.
+    print("| " + " | ".join(header) + " |")
+    print("|" + "|".join(["---"] * len(header)) + "|")
     for page, scores in rows:
         by_name = {s.name: s for s in scores}
         cells = [_page_label(page)]
@@ -420,8 +420,8 @@ def _print_table(
             else f"0/{len(page.probes)}"
             for n in names
         ]
-        print("| " + " | ".join(cells) + " |")  # noqa: T201 -- CLI output.
-    print(  # noqa: T201 -- CLI output.
+        print("| " + " | ".join(cells) + " |")
+    print(
         f"\n`c` = compression: output chars over RAW page chars; lower is cheaper.\n"
         f"`d` = distortion: `1 - F1` of word 5-grams against the page's visible\n"
         f"text; lower is truer. `traf-txt` IS that text, so its `d` is 0.00 by\n"

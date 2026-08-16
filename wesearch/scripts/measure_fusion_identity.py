@@ -1,5 +1,5 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script; CLI output is its product.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
@@ -114,7 +114,7 @@ def main(
             s2_hits, oa_hits = _raw_records(query)
             s2_mag = _raw_mag_s2(query)
         except PaperError as e:
-            print(f"{query!r:26s} SKIPPED ({e})")  # noqa: T201 -- CLI probe output.
+            print(f"{query!r:26s} SKIPPED ({e})")
             continue
         sampled += 1
         by_doi = _cross_backend_joins(s2_hits, oa_hits, _doi_keys)
@@ -134,13 +134,13 @@ def main(
         totals["doi"] += len(by_doi)
         totals["arxiv"] += len(by_arxiv)
         totals["mag_extra"] += len(extra)
-        print(  # noqa: T201 -- CLI probe output.
+        print(
             f"{query!r:26s} doi={len(by_doi):3d} "
             f"doi+arxiv={len(by_arxiv):3d} mag_pairs={len(mag_pairs):3d} "
             f"mag_beyond_doi={len(extra):2d}"
         )
         time.sleep(1.0)
-    print(  # noqa: T201 -- CLI probe output.
+    print(
         f"\nTOTAL queries={sampled}/{len(queries)} doi={totals['doi']} "
         f"doi+arxiv={totals['arxiv']} "
         f"(+{totals['arxiv'] - totals['doi']} from arXiv) "

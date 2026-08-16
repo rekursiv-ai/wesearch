@@ -1,5 +1,5 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script; CLI output is its product.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
@@ -100,7 +100,7 @@ def main(
     for query in queries:
         result = _sampled(query, limit=limit)
         if result is None:
-            print(f"{query!r:26s} SKIPPED (backends unavailable)")  # noqa: T201 -- CLI probe.
+            print(f"{query!r:26s} SKIPPED (backends unavailable)")
             continue
         sampled += 1
         residual = _residual_duplicates(result.records)
@@ -108,13 +108,13 @@ def main(
         total += len(result.records)
         duplicates += residual
         overruns += over
-        print(  # noqa: T201 -- CLI probe output.
+        print(
             f"{query!r:26s} records={len(result.records):3d} "
             f"limit={limit} overrun={over:2d} "
             f"duplicate-identities={residual:2d} total={result.total}"
         )
         time.sleep(1.0)
-    print(  # noqa: T201 -- CLI probe output.
+    print(
         f"\nTOTAL queries={sampled}/{len(queries)} records={total} "
         f"residual-duplicates={duplicates} limit-overruns={overruns}"
     )
