@@ -25,6 +25,7 @@ curl_cffi divergence on the curl backend (see
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
@@ -64,6 +65,8 @@ class EchoOracle:
 
     Attributes:
       url: The base URL clients should request (``https://localhost:<port>/``).
+      port: The bound loopback port, for a client that needs it apart from
+        :attr:`url` (``http.client`` takes host and port separately).
       ca_path: Path to the PEM certificate clients must trust to reach the
         oracle (``SSL_CERT_FILE`` for stdlib, ``verify`` for curl).
 
@@ -71,22 +74,35 @@ class EchoOracle:
 
     def __init__(self, *, client_timeout_sec: float = 10.0) -> None:
         self._client_timeout_sec = client_timeout_sec
-        self._dir = Path(tempfile.mkdtemp(prefix="echo-oracle-"))
-        self.ca_path = self._dir / "cert.pem"
-        key_path = self._dir / "key.pem"
-        self_signed_localhost_cert(self.ca_path, key_path)
-        self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        self._context.load_cert_chain(self.ca_path, key_path)
-        self._context.set_alpn_protocols(["http/1.1"])
-        self._sock = socket.socket()
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(8)
-        self._captures: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
-        self._lock = threading.Lock()
-        self.url = f"https://localhost:{self._sock.getsockname()[1]}/"
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        # Every acquisition registers its own release as it succeeds: a raise
+        # part-way through __init__ leaves the caller no object, hence no way
+        # to reach close(), so anything already acquired would be stranded.
+        self._stack = ExitStack()
+        try:
+            directory = Path(self._stack.enter_context(tempfile.TemporaryDirectory()))
+            self.ca_path = directory / "cert.pem"
+            key_path = directory / "key.pem"
+            self_signed_localhost_cert(self.ca_path, key_path)
+            self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self._context.load_cert_chain(self.ca_path, key_path)
+            self._context.set_alpn_protocols(["http/1.1"])
+            self._sock = self._stack.enter_context(socket.socket())
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._sock.bind(("127.0.0.1", 0))
+            self._sock.listen(8)
+            self._captures: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+            self._lock = threading.Lock()
+            self._handlers: list[threading.Thread] = []
+            self.port = int(self._sock.getsockname()[1])
+            self.url = f"https://localhost:{self.port}/"
+            self._thread = threading.Thread(
+                target=self._serve, name="echo-oracle-accept", daemon=True
+            )
+            self._stack.callback(self._thread.join, timeout=5.0)
+            self._thread.start()
+        except BaseException:
+            self._stack.close()
+            raise
 
     def captured(self) -> tuple[str, ...]:
         """Return the ordered header names of the most recent request to ``/``.
@@ -111,16 +127,19 @@ class EchoOracle:
             return self._captures[-1][1] if self._captures else ()
 
     def close(self) -> None:
-        """Stop the listener and release the socket (idempotent)."""
-        # shutdown() BEFORE close(): closing a listening socket does not wake a
-        # thread blocked in accept() on Linux, so the join below would wait out
-        # its full timeout on every teardown and then abandon the thread.
-        # shutdown() fails the accept immediately.
-        # Already shut down or never connected: close() below still applies.
+        """Stop the listener and release every resource acquired (idempotent)."""
+        # shutdown() BEFORE the stack closes the socket: closing a listening
+        # socket does not wake a thread blocked in accept() on Linux, so the
+        # registered join would wait out its full timeout on every teardown and
+        # then abandon the thread. shutdown() fails the accept immediately.
+        # Already shut down or never connected: the close below still applies.
         with contextlib.suppress(OSError):
             self._sock.shutdown(socket.SHUT_RDWR)
-        self._sock.close()
-        self._thread.join(timeout=5.0)
+        # Handler threads hold a client socket each; a caller that asserts on
+        # teardown must not observe one still inside _handle.
+        for handler in tuple(self._handlers):
+            handler.join(timeout=self._client_timeout_sec + 1.0)
+        self._stack.close()
 
     def __enter__(self) -> Self:
         return self
@@ -143,7 +162,14 @@ class EchoOracle:
             # One thread per connection: Chrome preconnects, leaving sockets
             # open and idle. Served serially, the first such socket parks this
             # loop in recv and starves every client behind it.
-            threading.Thread(target=self._handle, args=(raw,), daemon=True).start()
+            handler = threading.Thread(
+                target=self._handle,
+                args=(raw,),
+                name="echo-oracle-handler",
+                daemon=True,
+            )
+            self._handlers.append(handler)
+            handler.start()
 
     def _handle(self, raw: socket.socket) -> None:
         """TLS-wrap one connection, capture its header order, send a stub reply."""
@@ -211,21 +237,27 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
 
 
 def _read_head(conn: _Recvable, *, max_bytes: int = 1 << 16) -> str:
-    """Read a request up to the end of its header block.
+    """Read a request up to and including the end of its header block.
 
-    Returns ``""`` for a head that never terminated -- the peer hung up or
-    stalled past its timeout mid-request. Returning the PARTIAL bytes instead
-    let ``GET / HTTP`` (Chrome's preconnect, and what the resilience test
-    sends) parse as a request to ``/`` carrying zero headers, which then
-    overwrote the real capture as the most recent one.
+    Returns ``""`` for a head that never terminated -- the peer hung up, stalled
+    past its timeout mid-request, or ran past ``max_bytes`` without ending the
+    block. Returning the PARTIAL bytes instead let ``GET / HTTP`` (Chrome's
+    preconnect, and what the resilience test sends) parse as a request to ``/``
+    carrying zero headers, which then overwrote the real capture as the most
+    recent one.
+
+    Bytes past the terminator are DROPPED: one ``recv`` can deliver head and
+    body together, and a body line containing a colon is indistinguishable from
+    a header to every downstream parser -- letting a request forge the Cookie
+    lines the parity suite counts.
     """
     data = b""
-    while b"\r\n\r\n" not in data and len(data) < max_bytes:
-        chunk = conn.recv(4096)
+    while (end := data.find(b"\r\n\r\n")) == -1 and len(data) < max_bytes:
+        chunk = conn.recv(min(4096, max_bytes - len(data)))
         if not chunk:
             return ""
         data += chunk
-    return data.decode("latin-1") if b"\r\n\r\n" in data else ""
+    return data[: end + 4].decode("latin-1") if end != -1 else ""
 
 
 class _Recvable(Protocol):
@@ -253,5 +285,11 @@ def _header_names(request: str) -> tuple[str, ...]:
 
 
 def _header_lines(request: str) -> tuple[str, ...]:
-    """Verbatim ``name: value`` header lines from a raw HTTP/1.1 request head."""
-    return tuple(line for line in request.split("\r\n")[1:] if ":" in line)
+    """Verbatim ``name: value`` header lines from a raw HTTP/1.1 request head.
+
+    Stops at the blank line ending the block, so a body that arrived in the
+    same read cannot contribute a colon-bearing line as a header.
+    """
+    lines = request.split("\r\n")[1:]
+    end = lines.index("") if "" in lines else len(lines)
+    return tuple(line for line in lines[:end] if ":" in line)

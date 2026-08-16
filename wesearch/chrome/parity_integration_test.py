@@ -60,11 +60,45 @@ if TYPE_CHECKING:
     from curl_cffi.requests import Response
 
 
+# The MODULE, not the `fetch` function of the same name imported above: these
+# tests patch module attributes (`egress_ip`, `curl_session`). A plain
+# `import wesearch.fetch.fetch` binds the package's re-exported function
+# here, so `patch.object` would target the function and fail.
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
 
 # curl_cffi injects the HTTP/2-only Priority header on HTTP/1.1 connections; a
 # real Chrome does not. Dropped from the curl comparison (see module docstring).
 _HTTP2_ONLY = frozenset({"priority"})
+
+# Header values that must match the local Chrome EXACTLY: they encode the
+# navigation intent, not the browser build, so a real Chrome sends these
+# identically regardless of version or platform. Measured against a live
+# Chrome 151 on Linux vs our impersonated Chrome 146 on macOS -- every one
+# agreed. A divergence here is drift, not configuration.
+_INTENT_VALUES = (
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-user",
+    "sec-fetch-dest",
+    "upgrade-insecure-requests",
+)
+
+# The build-identity values (user-agent, sec-ch-ua, sec-ch-ua-platform) are
+# deliberately NOT compared to the local Chrome: the harness browser is
+# whatever the host installed (and announces HeadlessChrome/), while we
+# impersonate a fixed target. Pinning them would fail on browser upgrades
+# instead of on drift. What must hold is that OUR values agree with EACH
+# OTHER -- a UA naming one OS beside a platform hint naming another is the
+# incoherence that gives a bot away.
+_UA_OS_TOKEN = {
+    "Windows": "Windows NT",
+    "Linux": "X11; Linux",
+    "macOS": "Macintosh",
+    "Android": "Android",
+}
 
 _needs_chrome = pytest.mark.skipif(
     not chrome_available(), reason="No Chrome binary on PATH."
@@ -76,8 +110,8 @@ def oracle() -> Iterator[EchoOracle]:
     """A running loopback echo oracle whose CA the fetch backends trust."""
     # A pooled curl Session keys on eTLD+1 (``localhost``), so one cached under a
     # prior oracle's CA would be reused against this oracle's -- and fail TLS.
-    # Drop any localhost pool entry so each oracle gets a fresh, correctly-trusted
-    # session.
+    # No egress key matches "", so this drops EVERY pooled session and each
+    # oracle gets a fresh, correctly-trusted one.
     close_curl_sessions_except("")
     # stdlib (ssl) honors SSL_CERT_FILE; curl_cffi (BoringSSL) honors
     # CURL_CA_BUNDLE. Both must trust the oracle's self-signed CA.
@@ -117,6 +151,7 @@ def test_fetch_wire_request_matches_chrome(
     """
     omit = _HTTP2_ONLY if backend == "curl" else frozenset[str]()
     chrome = _drop(_chrome_headers(oracle), omit)
+    chrome_lines = _drop_lines(oracle.captured_lines(), omit)
     assert chrome, "Chrome sent no request to the oracle; nothing to compare."
     # trust="internal": the oracle is a loopback server, which the default
     # ``untrusted`` SSRF check refuses before any wire bytes exist. The test
@@ -131,6 +166,17 @@ def test_fetch_wire_request_matches_chrome(
         f"wire header set/order diverged from Chrome (transport={backend}).\n"
         f"  chrome: {chrome}\n  ours:   {ours}"
     )
+    # Names alone let a header carry the wrong VALUE and still pass. The
+    # intent-bearing values do not vary by browser build, so they must match
+    # the live Chrome exactly.
+    ours_lines = _drop_lines(oracle.captured_lines(), omit)
+    for name in _INTENT_VALUES:
+        assert _value(ours_lines, name) == _value(chrome_lines, name), (
+            f"{name} value diverged from Chrome (transport={backend}).\n"
+            f"  chrome: {_value(chrome_lines, name)}\n"
+            f"  ours:   {_value(ours_lines, name)}"
+        )
+    _assert_identity_is_coherent(ours_lines, backend=backend)
 
 
 @pytest.mark.integration
@@ -152,7 +198,7 @@ def test_session_threads_across_requests(
     as a fresh one.
     """
     request = RequestParams(policy=PolicyParams(transport=backend, trust="internal"))
-    _first, session = fetch(oracle.url, request=request)
+    _, session = fetch(oracle.url, request=request)
     assert isinstance(session, FetchSession)
     fetch(oracle.url, session=session, request=request)
     reused = oracle.captured()
@@ -237,7 +283,10 @@ def test_browser_backend_fetches_live_page(
         pytest.skip(f"browser subsystem unavailable: {error}")
     finally:
         shutdown_browsers()
-    assert b"Example Domain" in body
+    # Structure, not content: the page belongs to a third party and its wording
+    # is not this backend's contract. Rendered HTML with a body is.
+    assert b"<html" in body.lower()
+    assert b"</body>" in body.lower()
     assert isinstance(session, FetchSession)
 
 
@@ -246,18 +295,68 @@ def _chrome_headers(oracle: EchoOracle) -> tuple[str, ...]:
 
     Read from the oracle, the same server-side record the fetch backends are
     judged by, so both sides of the comparison come from one observer. Call
-    before issuing our own request: ``captured()`` returns only the most recent.
+    before issuing our own request: ``captured()`` returns only the most recent,
+    and the per-test fixture guarantees no earlier capture can be standing.
 
     A Chrome killed at the timeout AFTER navigating still leaves a complete
-    record, so the drive is retried only when the hang produced nothing --
-    otherwise a slow CI runner fails a test about header order.
+    record, so one retry covers only the hang that produced nothing -- otherwise
+    a slow CI runner fails a test about header order.
     """
-    for _attempt in range(2):
-        timed_out = drive_chrome(oracle.url, ignore_certificate_errors=True)
-        captured = oracle.captured()
-        if captured or not timed_out:
-            return captured
+    if _drive(oracle) or oracle.captured():
+        return oracle.captured()
+    _drive(oracle)
     return oracle.captured()
+
+
+def _drive(oracle: EchoOracle) -> bool:
+    """Drive Chrome at the oracle once; whether it finished without a kill."""
+    # disable_sandbox: hosted runners execute as root, where Chrome refuses to
+    # start sandboxed. Scoped to this loopback oracle, never a real host.
+    return not drive_chrome(
+        oracle.url, ignore_certificate_errors=True, disable_sandbox=True
+    )
+
+
+def _assert_identity_is_coherent(lines: tuple[str, ...], *, backend: str) -> None:
+    """Our UA, platform hint, and brand version must describe one browser.
+
+    A request whose ``sec-ch-ua-platform`` says one OS while its User-Agent
+    names another is provably not a real browser, and no header ORDER check can
+    see it -- both headers are present and correctly placed.
+    """
+    user_agent = _value(lines, "user-agent")
+    platform = _value(lines, "sec-ch-ua-platform").strip('"')
+    assert platform in _UA_OS_TOKEN, f"unknown platform hint {platform!r}"
+    assert _UA_OS_TOKEN[platform] in user_agent, (
+        f"sec-ch-ua-platform says {platform!r} but the User-Agent does not "
+        f"(transport={backend}).\n  user-agent: {user_agent}"
+    )
+    major = user_agent.split("Chrome/", 1)[-1].split(".", 1)[0]
+    assert f'v="{major}"' in _value(lines, "sec-ch-ua"), (
+        f"sec-ch-ua brand version disagrees with the User-Agent's Chrome/{major} "
+        f"(transport={backend}).\n  sec-ch-ua: {_value(lines, 'sec-ch-ua')}"
+    )
+
+
+def _drop_lines(lines: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]:
+    """Raw header lines minus the ones :func:`_drop` removes by name."""
+    skip = {"host", "connection"} | omit
+    return tuple(
+        line for line in lines if line.split(":", 1)[0].strip().lower() not in skip
+    )
+
+
+def _value(lines: tuple[str, ...], name: str) -> str:
+    """The value of header ``name`` among raw lines, or ``""`` when absent."""
+    prefix = f"{name}:"
+    return next(
+        (
+            line.split(":", 1)[1].strip()
+            for line in lines
+            if line.lower().startswith(prefix)
+        ),
+        "",
+    )
 
 
 def _drop(names: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]:

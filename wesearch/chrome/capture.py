@@ -33,6 +33,7 @@ def drive_chrome(
     *,
     timeout_sec: float = 40.0,
     ignore_certificate_errors: bool = False,
+    disable_sandbox: bool = False,
 ) -> bool:
     """Load ``url`` in a headless Chrome, returning once it has exited or hung.
 
@@ -42,6 +43,10 @@ def drive_chrome(
       ignore_certificate_errors: Accept an untrusted TLS certificate. Required
         only to reach a loopback oracle serving a self-signed cert; never enable
         against a real host.
+      disable_sandbox: Drop Chrome's process sandbox. Required only where the
+        harness runs as root (a CI container), which is the one environment
+        where Chrome refuses to start otherwise; never enable against a real
+        host, where the sandbox is the containment boundary for hostile pages.
 
     Returns:
       timed_out: Whether Chrome had to be killed at ``timeout_sec``. Reported
@@ -68,9 +73,9 @@ def drive_chrome(
                     binary,
                     "--headless=new",
                     "--disable-gpu",
-                    "--no-sandbox",
                     "--incognito",
                     f"--user-data-dir={profile}",
+                    *(["--no-sandbox"] if disable_sandbox else []),
                     *(
                         ["--ignore-certificate-errors"]
                         if ignore_certificate_errors
@@ -90,7 +95,13 @@ def drive_chrome(
 
 def _chrome_binary() -> str | None:
     """The first available Chrome binary name, or ``None``."""
-    for name in ("google-chrome-stable", "google-chrome", "chromium", "chrome"):
+    for name in (
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium-browser",
+        "chromium",
+        "chrome",
+    ):
         if shutil.which(name) is not None:
             return name
     return None
