@@ -93,6 +93,7 @@ class EchoOracle:
             self._captures: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
             self._lock = threading.Lock()
             self._handlers: list[threading.Thread] = []
+            self._stopped = threading.Event()
             self.port = int(self._sock.getsockname()[1])
             self.url = f"https://localhost:{self.port}/"
             self._thread = threading.Thread(
@@ -135,6 +136,14 @@ class EchoOracle:
         # Already shut down or never connected: the close below still applies.
         with contextlib.suppress(OSError):
             self._sock.shutdown(socket.SHUT_RDWR)
+        self._stopped.set()
+        if self._thread.is_alive():
+            # macOS rejects shutdown() on a listening socket without waking
+            # accept(), so a loopback connection is the portable wake-up.
+            with contextlib.suppress(OSError):
+                wake = socket.create_connection(("127.0.0.1", self.port), timeout=1.0)
+                wake.close()
+            self._thread.join(timeout=1.0)
         # Handler threads hold a client socket each; a caller that asserts on
         # teardown must not observe one still inside _handle.
         for handler in tuple(self._handlers):
@@ -159,6 +168,9 @@ class EchoOracle:
                 raw, _ = self._sock.accept()
             except OSError:
                 return  # Socket closed by close(); normal shutdown.
+            if self._stopped.is_set():
+                raw.close()
+                return
             # One thread per connection: Chrome preconnects, leaving sockets
             # open and idle. Served serially, the first such socket parks this
             # loop in recv and starves every client behind it.

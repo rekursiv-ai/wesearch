@@ -268,6 +268,8 @@ def test_browser_backend_fetches_live_page(
     profile is never touched.
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    body: bytes | None = None
+    session: FetchSession | None = None
     try:
         body, session = fetch(
             "https://example.com/",
@@ -283,6 +285,8 @@ def test_browser_backend_fetches_live_page(
         pytest.skip(f"browser subsystem unavailable: {error}")
     finally:
         shutdown_browsers()
+    assert body is not None
+    assert session is not None
     # Structure, not content: the page belongs to a third party and its wording
     # is not this backend's contract. Rendered HTML with a body is.
     assert b"<html" in body.lower()
