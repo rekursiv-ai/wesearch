@@ -176,26 +176,36 @@ def _query_once[T](
         unreachable_marker.exists()
         and time.time() - unreachable_marker.stat().st_mtime < _UNREACHABLE_TTL_SEC
     ):
-        pytest.skip(f"{backend} already proved unreachable from this egress")
+        raise pytest.skip.Exception(
+            f"{backend} already proved unreachable from this egress"
+        )
     try:
         with _admitted(timeout_sec=timeout_sec):
             return fetch(timeout_sec)
-    except filelock.Timeout:
-        pytest.skip(f"{backend}: every live-search lane busy")
+    except filelock.Timeout as error:
+        raise pytest.skip.Exception(
+            f"{backend}: every live-search lane busy"
+        ) from error
     except BrowserUnavailableError as error:
         # No usable Chrome on this host (CI, headless box): a capability gap,
         # not a parser fault, and retrying cannot conjure a browser.
-        pytest.skip(f"browser subsystem unavailable: {error}")
+        raise pytest.skip.Exception(
+            f"browser subsystem unavailable: {error}"
+        ) from error
     except BotDetectionError as error:
         # An egress-IP CAPTCHA/challenge block is persistent (verified), so this
         # is availability too. Ordered BEFORE FetchError: it subclasses it
         # (``errors.py:47``).
-        pytest.skip(f"{backend} served an automated-access block: {error}")
+        raise pytest.skip.Exception(
+            f"{backend} served an automated-access block: {error}"
+        ) from error
     except FetchError as error:
         if error.status != 0:
             raise
         unreachable_marker.touch()
-        pytest.skip(f"{backend} unreachable from this egress: {error}")
+        raise pytest.skip.Exception(
+            f"{backend} unreachable from this egress: {error}"
+        ) from error
 
 
 # Distinct queries spanning different topics, so a general-web pass reflects the
