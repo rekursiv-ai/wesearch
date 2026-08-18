@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast, override
 from urllib.parse import urlparse
 
 import asyncio
+import atexit
 import hashlib
 import logging
 import os
@@ -568,11 +569,24 @@ _pool_lock = threading.Lock()  # config-globals: ignore -- guards the singleton.
 
 
 def _pool() -> _BrowserPool:
-    """Return the process-wide browser pool, creating it once."""
+    """Return the process-wide browser pool, creating it once.
+
+    Registers teardown WITH the pool that needs it, on the one path that can
+    create one. A browser is ~70 MB across ~17 processes and nothing else ever
+    closes one, so a process that exits without this leaves every browser it
+    opened resident: measured at 378 processes holding 27.5 GiB, 225 of them
+    older than the session that spawned them.
+
+    ``atexit`` and not a parent-death signal, because the exit that leaked was
+    an ORDINARY one -- pytest finished normally. It fires here under plain
+    pytest and under `xdist -n=2` (both measured), and can still drive the
+    pool's daemon loop thread, which is alive until interpreter teardown.
+    """
     global _pool_singleton  # noqa: PLW0603 -- memoize the shared pool.
     with _pool_lock:
         if _pool_singleton is None:
             _pool_singleton = _BrowserPool()
+            atexit.register(shutdown_browsers)
         return _pool_singleton
 
 

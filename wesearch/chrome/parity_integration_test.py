@@ -50,10 +50,7 @@ from wesearch.fetch import (
     fetch,
 )
 from wesearch.fetch.transport.curl import close_curl_sessions_except
-from wesearch.fetch.transport.zendriver import (
-    BrowserUnavailableError,
-    shutdown_browsers,
-)
+from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 
 
 if TYPE_CHECKING:
@@ -283,8 +280,9 @@ def test_browser_backend_fetches_live_page(
         # the DevTools attach that the capture harness above never needs. That
         # is a capability gap, so `_needs_chrome` alone does not cover this test.
         pytest.skip(f"browser subsystem unavailable: {error}")
-    finally:
-        shutdown_browsers()
+    # No `finally: shutdown_browsers()`. The autouse session fixture in
+    # wesearch/conftest.py owns that, and closing here would only protect THIS
+    # test -- which is how 378 browsers from the sibling search tests leaked.
     assert body is not None
     assert session is not None
     # Structure, not content: the page belongs to a third party and its wording

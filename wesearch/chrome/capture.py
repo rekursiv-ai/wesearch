@@ -12,15 +12,40 @@ Requires a ``google-chrome`` / ``google-chrome-stable`` binary; callers gate on
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 
 
 __all__ = [
     "chrome_available",
+    "die_with_parent",
     "drive_chrome",
 ]
+
+
+def _load_libc() -> ctypes.CDLL | None:
+    """Resolve libc once, at import, or ``None`` off Linux.
+
+    Here and not inside :func:`die_with_parent`, which runs between ``fork``
+    and ``exec``: ``CDLL`` is a ``dlopen``, and the loader lock it takes is
+    never released in the child if another thread held it at the fork.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        return ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError:
+        return None
+
+
+# config-globals: ignore -- a process-wide libc handle, not a tunable.
+_libc = _load_libc()
 
 
 def chrome_available() -> bool:
@@ -32,6 +57,7 @@ def drive_chrome(
     url: str,
     *,
     timeout_sec: float = 40.0,
+    reap_timeout_sec: float = 10.0,
     ignore_certificate_errors: bool = False,
     disable_sandbox: bool = False,
 ) -> bool:
@@ -40,6 +66,9 @@ def drive_chrome(
     Args:
       url: The URL to navigate to.
       timeout_sec: How long to wait for Chrome before killing it.
+      reap_timeout_sec: How long to wait for the killed browser's pipes to
+        close. Bounded because a descendant that left the process group survives
+        the kill still holding them; see the call site.
       ignore_certificate_errors: Accept an untrusted TLS certificate. Required
         only to reach a loopback oracle serving a self-signed cert; never enable
         against a real host.
@@ -62,35 +91,69 @@ def drive_chrome(
         raise RuntimeError("No Chrome binary found on PATH.")
     timed_out = False
     with tempfile.TemporaryDirectory(prefix="chrome-capture-") as profile:
-        # Chrome's exit is not what a caller observes -- the request reached the
-        # server before the page rendered. Two headless Chromes cold-starting at
-        # once on a 2-core CI runner routinely blow the timeout AFTER
-        # navigating, so raising here would fail a suite over a browser
-        # shutdown nobody is testing.
+        # `Popen` + explicit group kill, not `subprocess.run`: its timeout path
+        # kills only the direct child, and Chrome forks a zygote and a renderer
+        # per tab, so the rest reparent to init at ~70 MB each.
+        process = subprocess.Popen(  # noqa: S603 -- fixed argv, binary from PATH.
+            [
+                binary,
+                "--headless=new",
+                "--disable-gpu",
+                "--incognito",
+                f"--user-data-dir={profile}",
+                *(["--no-sandbox"] if disable_sandbox else []),
+                *(["--ignore-certificate-errors"] if ignore_certificate_errors else []),
+                "--dump-dom",
+                url,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=die_with_parent,  # noqa: PLW1509 -- bare syscalls only; takes no lock a forked thread could hold.
+        )
         try:
-            subprocess.run(  # noqa: S603 -- fixed argv, binary resolved from PATH.
-                [
-                    binary,
-                    "--headless=new",
-                    "--disable-gpu",
-                    "--incognito",
-                    f"--user-data-dir={profile}",
-                    *(["--no-sandbox"] if disable_sandbox else []),
-                    *(
-                        ["--ignore-certificate-errors"]
-                        if ignore_certificate_errors
-                        else []
-                    ),
-                    "--dump-dom",
-                    url,
-                ],
-                capture_output=True,
-                timeout=timeout_sec,
-                check=False,
-            )
+            process.communicate(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             timed_out = True
+            _kill_group(process)
+            # Bounded: a descendant that left the group survives the kill
+            # holding the inherited pipes, and an unbounded wait for EOF hangs
+            # here forever instead of reporting the timeout.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.communicate(timeout=reap_timeout_sec)
     return timed_out
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL a process and every child it forked.
+
+    :func:`die_with_parent` made it a group leader, so one ``killpg`` reaches
+    the zygote and renderers. A missing group is the normal race between the
+    timeout firing and Chrome finishing, not an error.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def die_with_parent() -> None:
+    """Make the calling child its own group leader, killed when its parent dies.
+
+    Runs in the forked child before ``exec``, so it must never raise and must
+    call nothing that takes a lock -- the ``PLW1509`` hazard. That holds only
+    because ``_libc`` is already resolved; see :func:`_load_libc`.
+
+    ``PR_SET_PDEATHSIG`` is THREAD-scoped: the kernel fires it when the forking
+    thread exits, not the process. Correct here, where the caller blocks on the
+    child, and WRONG for a pool that outlives its launching thread -- measured,
+    a real Chrome died with ``rc=-9`` when only that thread ended.
+    """
+    with contextlib.suppress(OSError):
+        os.setpgid(0, 0)
+    if _libc is None:
+        return
+    with contextlib.suppress(OSError):
+        # PR_SET_PDEATHSIG == 1. Spelled out because the constant lives in
+        # `prctl`, a package we do not depend on.
+        _libc.prctl(1, signal.SIGKILL, 0, 0, 0)
 
 
 def _chrome_binary() -> str | None:

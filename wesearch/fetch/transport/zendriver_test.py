@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
+import atexit
+import importlib
 import subprocess
 import tempfile
 
@@ -34,7 +36,7 @@ _PROFILE = Path("test-profile")
 
 def test_direct_executable_reexecutes_as_module() -> None:
     script = Path(__file__).with_name("zendriver.py")
-    result = subprocess.run(  # noqa: S603 -- fixed argv runs this repo-owned script.
+    result = subprocess.run(  # noqa: S603 -- fixed argv: this repo's own script.
         ["/bin/sh", "-x", str(script), "--help"],
         capture_output=True,
         text=True,
@@ -287,6 +289,102 @@ def test_launch_browser_uses_vanilla_zendriver_config(
     assert not any(
         argument.startswith("--host-resolver-rules=") for argument in browser_args
     )
+
+
+def test_the_pool_leaves_zendriver_spawn_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Launching must NOT patch the vendor's private spawn helper.
+
+    A patch injecting ``preexec_fn=die_with_parent`` lived here, and it armed a
+    parent-death signal that Linux scopes to the LAUNCHING THREAD. Every pooled
+    browser is launched from the pool's disposable loop thread, so the kernel
+    SIGKILLs a live browser the moment that thread exits -- measured on real
+    Chrome as `rc=-9`, against a control where the same launch from a
+    long-lived thread survived.
+
+    Teardown is `atexit` instead: process-scoped, and it fires on the ordinary
+    exit that actually leaked.
+    """
+    util = importlib.import_module("zendriver.core.util")
+    vendor = util._start_process
+
+    async def fake_start(config: Any) -> _FakeBrowser:
+        del config
+        return _FakeBrowser()
+
+    monkeypatch.setattr(zendriver, "start", fake_start)
+    asyncio.run(fz_mod._launch_browser(tmp_path, headless=True))
+
+    assert util._start_process is vendor, (
+        "the pool patched zendriver's spawn; a thread-scoped parent-death "
+        "signal kills pooled browsers when the pool's loop thread exits"
+    )
+
+
+def test_creating_the_pool_registers_process_exit_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool that can open browsers must also close them at process exit.
+
+    Nothing else ever closes one: an ordinary exit left 378 Chrome processes
+    holding 27.5 GiB, and 225 of those outlived the session that spawned them.
+    Registered on pool CREATION, so a process that never fetches pays nothing.
+    """
+    registered: list[object] = []
+
+    def stub_pool() -> object:
+        """Stand in for the pool, so no loop thread or browser is created."""
+        return object()
+
+    monkeypatch.setattr(atexit, "register", registered.append)
+    monkeypatch.setattr(fz_mod, "_pool_singleton", None)
+    monkeypatch.setattr(fz_mod, "_BrowserPool", stub_pool)
+
+    fz_mod._pool()
+
+    assert fz_mod.shutdown_browsers in registered
+
+
+def test_the_pool_never_stops_a_browser_a_caller_still_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only ``shutdown`` may close a pooled browser; nothing may evict one.
+
+    A size cap was added here and reverted: ``browser()`` hands back a raw
+    handle and the caller navigates with it OUTSIDE the pool's lock (see
+    ``_navigate``), so the pool never learns that a browser went idle. Closing
+    one to make room killed a browser mid-fetch -- measured, with the caller
+    still holding the reference.
+
+    Bounding the pool needs a checkout scope or a refcount, not an eviction
+    policy. Until the contract changes, growth is bounded by the CALLER: the
+    autouse ``isolate_user_dirs`` fixture varies ``data_dir()`` per test, and
+    the module-scoped teardown in ``wesearch/conftest.py`` is what keeps a run
+    from accumulating browsers.
+    """
+    launched: list[_FakeBrowser] = []
+
+    async def launch(profile_dir: Path, *, headless: bool) -> zendriver.Browser:
+        del profile_dir, headless
+        launched.append(_FakeBrowser())
+        return cast("zendriver.Browser", launched[-1])
+
+    pool = fz_mod._BrowserPool(serve_control=False)
+    try:
+        monkeypatch.setattr(pool, "_launch", launch)
+        held = pool.run(pool.browser("ip", _PROFILE / "0", headless=True))
+        for index in range(1, 4):
+            pool.run(pool.browser("ip", _PROFILE / str(index), headless=True))
+
+        closed = [index for index, fake in enumerate(launched) if fake.stopped]
+        assert closed == [], (
+            f"the pool closed browsers {closed} while a caller still held one; "
+            f"a browser is idle only when its caller says so"
+        )
+        assert not cast("_FakeBrowser", held).stopped
+    finally:
+        pool.shutdown()
 
 
 # -- headed/backend navigation parity -----------------------------------------
