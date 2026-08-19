@@ -40,6 +40,7 @@ from wesearch.fetch.providers import google_news, reddit, x
 from wesearch.fetch.providers.fallback import fetch_with_reader_fallback
 from wesearch.lib.custom_json import JSONValue
 from wesearch.types.extractor import Extract
+from wesearch.types.params import NO_BODY, NoBody
 
 
 if TYPE_CHECKING:
@@ -98,7 +99,7 @@ def fetch_web(
     url: str,
     *,
     method: HttpMethod = "GET",
-    json_body: JSONValue = None,
+    json_body: JSONValue | NoBody = NO_BODY,
     form_body: dict[str, str] | None = None,
     max_chars: int | None = None,
     policy: PolicyParams | None = None,
@@ -117,7 +118,8 @@ def fetch_web(
     Args:
       url: Target URL to fetch.
       method: HTTP method (``GET`` or ``POST``).
-      json_body: JSON-serializable body for POST requests.
+      json_body: JSON-serializable body for POST requests. Defaults to
+        :data:`NO_BODY`, so ``json_body=None`` sends the JSON literal ``null``.
       form_body: Form-encoded body for POST requests.
       max_chars: Optional cap on the returned text. ``None`` (default) returns
         the full extracted text uncapped -- capping is a caller's presentation
@@ -165,7 +167,7 @@ def _fetch_body(
     url: str,
     *,
     method: HttpMethod,
-    json_body: JSONValue,
+    json_body: JSONValue | NoBody,
     form_body: dict[str, str] | None,
     policy: PolicyParams | None = None,
 ) -> tuple[bytes, str]:
