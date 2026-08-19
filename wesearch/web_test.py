@@ -8,6 +8,7 @@ import pytest
 
 from wesearch.fetch import PolicyParams, RequestParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
+from wesearch.types.params import NO_BODY
 from wesearch.web import (
     _KIND_HTML,
     _KIND_MARKDOWN,
@@ -213,6 +214,24 @@ def test_fetch_web_post_uses_direct_fetch() -> None:
     assert result.kind == _KIND_HTML
     # JSON-looking content is returned as-is (no trafilatura).
     assert '"ok"' in result.text
+
+
+def test_fetch_web_form_post_sends_only_the_form_body() -> None:
+    """A form POST carries no JSON body, so the exclusion guard stays quiet."""
+    with patch("wesearch.web.fetch", return_value=(b"ok", None)) as mock_fetch:
+        fetch_web("https://api.example/x", method="POST", form_body={"a": "b"})
+    content = mock_fetch.call_args.kwargs["request"].content
+    assert content.data == {"a": "b"}
+    assert content.json is NO_BODY
+
+
+def test_fetch_web_json_body_none_sends_the_json_literal_null() -> None:
+    """``json_body=None`` is a body -- the JSON ``null`` -- not its absence."""
+    with patch("wesearch.web.fetch", return_value=(b"ok", None)) as mock_fetch:
+        fetch_web("https://api.example/x", method="POST", json_body=None)
+    content = mock_fetch.call_args.kwargs["request"].content
+    assert content.json is None
+    assert content.has_body
 
 
 def test_fetch_web_json_body_skips_extraction() -> None:
