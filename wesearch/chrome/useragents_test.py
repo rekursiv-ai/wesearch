@@ -127,6 +127,13 @@ class TestRefresh:
             "Mobile Safari/537.36 HuaweiBrowser/15.0.0.0",
             "deviceCategory": "mobile",
         },
+        {  # Facebook in-app browser -- dropped by both
+            "userAgent": "Mozilla/5.0 (Linux; Android 16; motorola razr plus 2025 "
+            "Build/W1UXS36H.72-45-10-8-7) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Version/4.0 Chrome/151.0.7922.102 Mobile Safari/537.36 "
+            "[FB_IAB/FB4A;FBAV/573.0.0.37.74;IABMV/1;]",
+            "deviceCategory": "mobile",
+        },
         {  # embedded newline -- unsafe to serialize as one UA per line
             "userAgent": "Mozilla/5.0 (Linux; Android 14) Chrome/149.0.0.0\n"
             "Injected/1.0 Mobile Safari/537.36",
