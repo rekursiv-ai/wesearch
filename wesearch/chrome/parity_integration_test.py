@@ -125,7 +125,7 @@ def oracle() -> Iterator[EchoOracle]:
         yield running
 
 
-@pytest.mark.integration
+@pytest.mark.browser_chrome
 @_needs_chrome
 @pytest.mark.parametrize(
     "backend",
@@ -176,7 +176,7 @@ def test_fetch_wire_request_matches_chrome(
     _assert_identity_is_coherent(ours_lines, backend=backend)
 
 
-@pytest.mark.integration
+@pytest.mark.browser_chrome
 @pytest.mark.parametrize(
     "backend",
     [
@@ -203,7 +203,7 @@ def test_session_threads_across_requests(
     assert reused == oracle.captured()
 
 
-@pytest.mark.integration
+@pytest.mark.browser_chrome
 def test_pooled_session_does_not_duplicate_cookie_on_wire(oracle: EchoOracle) -> None:
     # On the pooled-curl path, a caller cookie whose name the session jar already
     # holds must NOT be sent twice (jar value + header value). A real browser
@@ -232,7 +232,7 @@ def test_pooled_session_does_not_duplicate_cookie_on_wire(oracle: EchoOracle) ->
     assert joined.count("CONSENT=") == 1, f"CONSENT sent more than once: {joined}"
 
 
-@pytest.mark.integration
+@pytest.mark.browser_chrome
 def test_case_variant_cookie_header_not_duplicated_on_wire(oracle: EchoOracle) -> None:
     # A caller lowercase headers={"cookie":...} plus a cookies= param must not
     # produce two Cookie header lines on the wire.
@@ -248,7 +248,7 @@ def test_case_variant_cookie_header_not_duplicated_on_wire(oracle: EchoOracle) -
     assert len(lines) == 1, f"expected one Cookie header line, got: {lines}"
 
 
-@pytest.mark.integration
+@pytest.mark.browser_chrome
 @_needs_chrome
 def test_browser_backend_fetches_live_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -53,10 +53,7 @@ from wesearch.search.searxng import searxng
 from wesearch.types.errors import BotDetectionError, FetchError
 
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.xdist_group(name="live_search"),
-]
+pytestmark = [pytest.mark.network_searxng, pytest.mark.xdist_group(name="live_search")]
 
 _searxng_required = pytest.mark.skipif(
     not os.environ.get("SEARXNG_URL"),

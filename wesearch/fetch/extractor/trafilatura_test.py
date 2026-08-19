@@ -25,7 +25,7 @@ _MW_PAGE = _CORPUS_CACHE / "www-merriam-webster-com-dictionary-agent-5db0e54b.ht
 _PRONUNCIATION = "\u02c8\u0101-j\u0259nt"
 
 
-@pytest.mark.integration
+@pytest.mark.cli_python_subprocess
 @pytest.mark.skipif(not _MW_PAGE.exists(), reason="corpus page not cached")
 def test_scores_away_content_html2text_keeps() -> None:
     """The measured reason ``html2text`` is the default, not ``trafilatura``.

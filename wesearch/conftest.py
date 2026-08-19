@@ -13,6 +13,7 @@ from collections.abc import Iterator
 import pytest
 
 from wesearch.fetch.transport.zendriver import shutdown_browsers
+from wesearch.lib.testing.resource_markers import pytest_collection_modifyitems
 from wesearch.lib.testing.userdirs_fixture import (
     isolate_user_dirs,
     pytest_configure,
@@ -22,7 +23,12 @@ from wesearch.lib.testing.userdirs_fixture import (
 # Re-exported, not merely imported: an autouse fixture reaches only the
 # directory of the conftest that names it, so binding it here is what widens it
 # to the whole package.
-__all__ = ["close_pooled_browsers", "isolate_user_dirs", "pytest_configure"]
+__all__ = [
+    "close_pooled_browsers",
+    "isolate_user_dirs",
+    "pytest_collection_modifyitems",
+    "pytest_configure",
+]
 
 
 @pytest.fixture(scope="module", autouse=True)
