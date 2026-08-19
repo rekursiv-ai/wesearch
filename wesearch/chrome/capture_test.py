@@ -152,7 +152,7 @@ class TestDriveChrome:
             assert "--no-sandbox" in run.call_args.args[0]
 
 
-@pytest.mark.slow
+@pytest.mark.cli_git
 def test_a_killed_group_takes_the_forked_grandchild_with_it() -> None:
     """One ``killpg`` reaps a process AND whatever it forked.
 
@@ -173,7 +173,7 @@ def test_a_killed_group_takes_the_forked_grandchild_with_it() -> None:
         _reap(process)
 
 
-@pytest.mark.slow
+@pytest.mark.cli_git
 def test_a_child_dies_when_its_parent_is_sigkilled() -> None:
     """A SIGKILLed parent still takes its browser with it.
 
