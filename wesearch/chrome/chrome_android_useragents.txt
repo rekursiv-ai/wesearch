@@ -1,7 +1,6 @@
 Mozilla/5.0 (Linux; Android 11; V2055A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Mobile Safari/537.36
 Mozilla/5.0 (Linux; Android 11; moto g power (2022)) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36
 Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36
-Mozilla/5.0 (Linux; Android 16; motorola razr plus 2025 Build/W1UXS36H.72-45-10-8-7) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/151.0.7922.102 Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/573.0.0.37.74;IABMV/1;]
 Mozilla/5.0 (Linux; Android 5.0; SM-G900P Build/LRX21T) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.1156.1295 Mobile Safari/537.36
 Mozilla/5.0 (Linux; Android 5.0; SM-G900P Build/LRX21T) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.1176.1335 Mobile Safari/537.36
 Mozilla/5.0 (Linux; Android 5.0; SM-G900P Build/LRX21T) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.1462.1952 Mobile Safari/537.36
