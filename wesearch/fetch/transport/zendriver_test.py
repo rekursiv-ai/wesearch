@@ -548,6 +548,59 @@ def test_navigate_returns_body_and_domain_cookies(
     assert browser.last_tab.closed is True
 
 
+def test_navigate_unwraps_chromes_json_viewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON response must come back as JSON, not as Chrome's viewer shell.
+
+    ``get_content`` serializes the DOM, and for a non-HTML body Chrome
+    SYNTHESIZES a document to display it: the payload is re-wrapped in
+    ``<html><head>...</head><body><pre>``. A caller that asked a JSON endpoint
+    for JSON then gets markup around valid data and fails to parse it. The
+    original bytes are still there, inside the ``<pre>``.
+    """
+    payload = '{"query": "x", "results": []}'
+    browser = _FakeBrowser(
+        content=(
+            '<html><head><meta name="color-scheme" content="light dark">'
+            '<meta charset="utf-8"></head><body>'
+            f"<pre>{payload}</pre></body></html>"
+        )
+    )
+    _patch_pool(monkeypatch, browser)
+    result = asyncio.run(
+        _navigate(
+            "https://search.example/search?format=json",
+            profile_dir=_PROFILE,
+            egress="1.2.3.4",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+    assert result.body == payload.encode()
+
+
+def test_navigate_leaves_real_html_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine page containing a ``<pre>`` must not be reduced to it."""
+    content = "<html><body><h1>Title</h1><pre>code sample</pre></body></html>"
+    browser = _FakeBrowser(content=content)
+    _patch_pool(monkeypatch, browser)
+    result = asyncio.run(
+        _navigate(
+            "https://example.com/article",
+            profile_dir=_PROFILE,
+            egress="1.2.3.4",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+    assert result.body == content.encode()
+
+
 def test_navigate_seeds_request_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
