@@ -581,6 +581,41 @@ def test_navigate_unwraps_chromes_json_viewer(
     assert result.body == payload.encode()
 
 
+def test_navigate_unwraps_the_real_chrome_viewer_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verbatim shell captured from Chrome, not a hand-written approximation.
+
+    Chrome mounts its JSON formatter in a ``<div>`` AFTER the ``</pre>``, so
+    the payload is not the last node in the body. A pattern requiring
+    ``</pre></body>`` adjacency matched an invented fixture and missed every
+    real response -- the fixture agreed with the code because the same
+    assumption wrote both.
+    """
+    payload = '{"query": "opensource", "results": []}'
+    browser = _FakeBrowser(
+        content=(
+            '<html><head><meta name="color-scheme" content="light dark">'
+            '<meta charset="utf-8"></head><body>'
+            f"<pre>{payload}</pre>"
+            '<div class="json-formatter-container"></div>'
+            "</body></html>"
+        )
+    )
+    _patch_pool(monkeypatch, browser)
+    result = asyncio.run(
+        _navigate(
+            "https://search.example/search?format=json",
+            profile_dir=_PROFILE,
+            egress="1.2.3.4",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+    assert result.body == payload.encode()
+
+
 def test_navigate_leaves_real_html_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
