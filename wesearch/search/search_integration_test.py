@@ -43,6 +43,7 @@ from wesearch.search.custom_types import (
     MediaResult,
     PackageResult,
     PaperResult,
+    SearchError,
     SearchResult,
     SearxngCategory,
     TorrentResult,
@@ -188,6 +189,16 @@ def _query_once[T](
         # not a parser fault, and retrying cannot conjure a browser.
         raise pytest.skip.Exception(
             f"browser subsystem unavailable: {error}"
+        ) from error
+    except SearchError as error:
+        # An edge throttling this egress is availability, exactly like the
+        # bot-detection block below -- the instance is healthy and never saw
+        # the request. It arrives as SearchError rather than FetchError
+        # because Cloudflare serves its rate-limit page as HTTP 200.
+        if "rate-limit" not in str(error):
+            raise
+        raise pytest.skip.Exception(
+            f"{backend} is rate-limited from this egress: {error}"
         ) from error
     except BotDetectionError as error:
         # An egress-IP CAPTCHA/challenge block is persistent (verified), so this
