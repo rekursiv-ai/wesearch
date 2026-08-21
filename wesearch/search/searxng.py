@@ -253,15 +253,44 @@ def searxng(
         text = body.decode()
     except UnicodeDecodeError as e:
         raise SearchError(f"searxng returned undecodable bytes: {e}") from e
-    # The typed extractors validate-and-narrow in one call, so a malformed
-    # payload degrades to an empty result without a cast or an isinstance
-    # ladder -- the house rule exists because those casts assert rather than
-    # check, and each one was a place a hostile payload could walk through.
-    # list_val, not dicts_val: the latter drops an EMPTY object, and a result
-    # with no recognized fields is still a result the backend returned.
-    items = list_val(dict_val(json.loads(text)).get("results"))
+    # We asked for format=json, so anything else is an intermediary answering
+    # instead of SearXNG -- and it does NOT arrive as an error status. A
+    # Cloudflare-fronted instance serves its rate-limit interstitial ("error
+    # code: 1015") as HTTP 200 with an HTML body, so ``fetch`` raises nothing
+    # and the page reaches json.loads as a bare "line 1 column 1 (char 0)"
+    # that names neither the backend nor the cause.
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
+    items = list_val(dict_val(payload).get("results"))
     parse = category_parser(categories)
     return [parse(dict_val(item)) for item in items[:num_results]]
+
+
+def _describe_non_json(text: str) -> str:
+    """Name what a non-JSON body actually is, for the error message.
+
+    An operator reading "not JSON" still has to go find out who answered and
+    why. The two cases that occur in practice -- a rate-limit interstitial and
+    some other HTML error page -- are distinguishable from the body, and
+    naming them turns the failure into an instruction.
+    """
+    head = text.lstrip()[:400].lower()
+    # Cloudflare's own code for "rate limited"; nothing else emits it.
+    if "error code: 1015" in head or "rate limited" in head:
+        return (
+            "a rate-limit page instead of JSON (Cloudflare error 1015). The "
+            "edge in front of the instance is throttling this egress IP -- "
+            "slow the query rate or retry later; the instance itself is "
+            "healthy and never saw the request."
+        )
+    if head.startswith(("<!doctype", "<html", "<?xml")):
+        return (
+            "an HTML page instead of JSON, so an intermediary answered rather "
+            f"than SearXNG: {text.strip()[:200]!r}"
+        )
+    return f"a body that is not JSON: {text.strip()[:200]!r}"
 
 
 def _searxng_web(item: dict[str, object]) -> SearchResult:

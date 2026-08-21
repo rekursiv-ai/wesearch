@@ -223,6 +223,38 @@ class TestSearchSearxng:
         with _patch_searxng_fetch({"results": "oops"}):
             assert searxng("test") == []
 
+    def test_html_body_raises_search_error(self) -> None:
+        """A 200 that carries HTML must not reach ``json.loads``.
+
+        Cloudflare serves its rate-limit interstitial ("error code: 1015") as
+        HTTP 200 with an HTML body, so no ``FetchError`` is raised and the
+        page flowed into the JSON parser -- surfacing as a bare
+        ``JSONDecodeError: line 1 column 1 (char 0)`` that names neither the
+        backend nor the cause. Measured against the live instance: 12 rapid
+        requests all returned 200 with ``<!DOCTYPE html>``.
+        """
+        with (
+            patch.dict(os.environ, {"SEARXNG_URL": "https://search.example.test/"}),
+            _patch_fetch(
+                module="searxng",
+                return_value=b"<!DOCTYPE html><html><body>Bad Gateway</body></html>",
+            ),
+            pytest.raises(SearchError, match="HTML page instead of JSON"),
+        ):
+            _ = searxng("test")
+
+    def test_html_error_body_names_the_rate_limit(self) -> None:
+        """The message must name the cause, not just the malformed shape."""
+        with (
+            patch.dict(os.environ, {"SEARXNG_URL": "https://search.example.test/"}),
+            _patch_fetch(
+                module="searxng",
+                return_value=b"error code: 1015",
+            ),
+            pytest.raises(SearchError, match="rate-limit"),
+        ):
+            _ = searxng("test")
+
     def test_missing_env_raises_search_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
