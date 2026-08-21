@@ -574,7 +574,11 @@ def _unwrap_viewer(body: str) -> str:
 # that merely opens with a <pre> does not match.
 _VIEWER_SHELL = re.compile(
     r"^<html[^>]*>\s*<head>.*?color-scheme.*?</head>\s*"
-    r"<body[^>]*>\s*<pre[^>]*>(?P<payload>.*)</pre>\s*</body>\s*</html>$",
+    r"<body[^>]*>\s*<pre[^>]*>(?P<payload>.*)</pre>"
+    # Chrome appends its own JSON-formatter mount AFTER the </pre>, so the
+    # payload is not the last thing in the body. Requiring </pre></body>
+    # adjacency matched the synthetic fixture and missed every real response.
+    r"(?:\s*<div[^>]*></div>)*\s*</body>\s*</html>$",
     re.DOTALL | re.IGNORECASE,
 )
 
