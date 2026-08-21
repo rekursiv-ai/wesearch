@@ -276,16 +276,19 @@ def _describe_non_json(text: str) -> str:
     some other HTML error page -- are distinguishable from the body, and
     naming them turns the failure into an instruction.
     """
-    head = text.lstrip()[:400].lower()
+    # Whole body, not a head slice: the live 1015 response is the bare 17-byte
+    # string "error code: 1015", while the HTML variant carries the code far
+    # past any fixed prefix window. A slice classified both as generic HTML.
+    lowered = text.lower()
     # Cloudflare's own code for "rate limited"; nothing else emits it.
-    if "error code: 1015" in head or "rate limited" in head:
+    if "error code: 1015" in lowered or "rate limited" in lowered:
         return (
             "a rate-limit page instead of JSON (Cloudflare error 1015). The "
             "edge in front of the instance is throttling this egress IP -- "
             "slow the query rate or retry later; the instance itself is "
             "healthy and never saw the request."
         )
-    if head.startswith(("<!doctype", "<html", "<?xml")):
+    if lowered.lstrip().startswith(("<!doctype", "<html", "<?xml")):
         return (
             "an HTML page instead of JSON, so an intermediary answered rather "
             f"than SearXNG: {text.strip()[:200]!r}"

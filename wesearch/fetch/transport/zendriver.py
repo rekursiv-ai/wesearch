@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
+from html import unescape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast, override
 from urllib.parse import urlparse
@@ -31,6 +32,7 @@ import atexit
 import hashlib
 import logging
 import os
+import re
 import socket
 import socketserver
 import sys
@@ -546,7 +548,35 @@ async def _navigate(
             cookies = await _domain_cookies(browser, url)
         finally:
             await tab.close()
-    return BrowserResult(body=body.encode(), cookies=cookies)
+    return BrowserResult(body=_unwrap_viewer(body).encode(), cookies=cookies)
+
+
+def _unwrap_viewer(body: str) -> str:
+    """Return the original payload when Chrome wrapped it in its viewer shell.
+
+    ``get_content`` serializes the DOM, and a non-HTML response has no DOM of
+    its own -- Chrome SYNTHESIZES one to display it, re-emitting the bytes
+    inside ``<pre>`` under a generated ``<head>``. A caller that asked a JSON
+    endpoint for JSON would otherwise receive markup wrapped around valid data
+    and fail to parse it, reporting a malformed response the server never sent.
+
+    Matched on the synthesized shell specifically, not on "contains a ``<pre>``":
+    a real HTML page carrying a code sample must come back whole.
+    """
+    match = _VIEWER_SHELL.match(body.strip())
+    if match is None:
+        return body
+    return unescape(match.group("payload"))
+
+
+# Chrome's generated viewer: a color-scheme meta it inserts itself, then the
+# payload as the document's ONLY content. Anchored at both ends so a real page
+# that merely opens with a <pre> does not match.
+_VIEWER_SHELL = re.compile(
+    r"^<html[^>]*>\s*<head>.*?color-scheme.*?</head>\s*"
+    r"<body[^>]*>\s*<pre[^>]*>(?P<payload>.*)</pre>\s*</body>\s*</html>$",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 async def _domain_cookies(browser: zendriver.Browser, url: str) -> dict[str, str]:
