@@ -1,16 +1,3 @@
-"""Typed overrides for the two ``lxml.html`` helpers this repo calls.
-
-``lxml-stubs`` declares ``fromstring(..., **kw)`` with the kwargs unannotated
-(``lxml-stubs/html/__init__.pyi:83``), which makes basedpyright report the whole
-function as partially unknown and poisons the inferred type of its result.
-
-Deliberately NO ``__getattr__``: a catch-all returning ``Any`` would silence
-type checking for every member this file does not name, and a local stub module
-SHADOWS the upstream one rather than chaining to it -- so the fallback such a
-hook appears to provide does not exist. A caller needing another ``lxml.html``
-member declares it here.
-"""
-
 from typing import Literal, overload
 
 from lxml.etree import _BaseParser, _Element

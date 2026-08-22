@@ -1,12 +1,3 @@
-"""Typed overrides for the ``trafilatura`` symbols this repo calls.
-
-trafilatura ships no ``py.typed``, so every symbol resolves to Unknown and
-poisons anything derived from it. Only the members used here are declared:
-adding a local stub SHADOWS the package, so a member that is missing from this
-file is missing from the checker's view of it entirely -- add rather than
-assume a fallback.
-"""
-
 def extract(
     filecontent: str | bytes,
     url: str | None = ...,
