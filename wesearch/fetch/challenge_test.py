@@ -159,6 +159,38 @@ def test_http_error_preserves_plain_failure() -> None:
     assert not isinstance(error, BotDetectionError)
 
 
+def test_cloudflare_rate_limit_is_not_a_challenge() -> None:
+    # Verbatim from a live rate-limited SearXNG instance: Cloudflare error 1015
+    # is a RATE LIMIT the site owner configured, not an automated-access
+    # challenge. Classifying it as one made callers "recover" by re-fetching
+    # through a browser, which renders a JSON API into HTML and breaks parsing.
+    error = classify_http_error(
+        "https://search.example/search?format=json",
+        429,
+        {
+            "server": "cloudflare",
+            "cf-ray": "a2e5f1ad0fe14aad-SJC",
+            "retry-after": "10",
+            "content-type": "text/plain; charset=UTF-8",
+        },
+        b"error code: 1015",
+    )
+    assert type(error) is FetchError
+    assert not isinstance(error, BotDetectionError)
+
+
+def test_cloudflare_challenge_at_429_is_still_a_challenge() -> None:
+    # Dropping 429 from the mitigation statuses must not blind the body check:
+    # an interstitial served WITH a 429 is proven by its own markup.
+    error = classify_http_error(
+        "https://x.com",
+        429,
+        {"server": "cloudflare"},
+        b"<html><head><title>Just a moment...</title></head></html>",
+    )
+    assert isinstance(error, CloudflareChallengeError)
+
+
 if __name__ == "__main__":
     from wesearch.lib.testing.main import test_main
 

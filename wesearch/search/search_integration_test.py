@@ -208,6 +208,14 @@ def _query_once[T](
             f"{backend} served an automated-access block: {error}"
         ) from error
     except FetchError as error:
+        if error.status == 429:
+            # The edge throttled this egress: availability, like the 200-served
+            # interstitial above. No marker file -- a rate limit expires on its
+            # own timescale, so suppressing later cases would retire the test
+            # for a condition that has already passed.
+            raise pytest.skip.Exception(
+                f"{backend} rate-limited this egress: {error}"
+            ) from error
         if error.status != 0:
             raise
         unreachable_marker.touch()

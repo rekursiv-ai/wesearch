@@ -236,8 +236,14 @@ def searxng(
         f"{base_url}/search?{params}",
         request=RequestParams(
             content=ContentParams(headers=headers),
+            # A retry budget, because the edge in front of an instance rate-
+            # limits a burst with a 429 + Retry-After and the retry loop already
+            # honors that header. Without one, a throttled burst surfaces as a
+            # hard failure the advertised wait would have cleared.
             retry=RetryParams(
-                timeout_sec=timeout_sec, connect_timeout_sec=connect_timeout_sec
+                retries=1,
+                timeout_sec=timeout_sec,
+                connect_timeout_sec=connect_timeout_sec,
             ),
             # trust="internal": SEARXNG_URL names an instance the OPERATOR
             # runs, which is exactly the private-network case the untrusted

@@ -94,7 +94,7 @@ def classify_http_error(
     headers: dict[str, str],
     body: bytes,
     *,
-    mitigation_statuses: tuple[int, ...] = (403, 429, 503),
+    mitigation_statuses: tuple[int, ...] = (403, 503),
 ) -> FetchError:
     """Build the most specific error proven by an HTTP failure.
 
@@ -104,6 +104,14 @@ def classify_http_error(
       headers: Response headers.
       body: Decompressed response body.
       mitigation_statuses: Statuses where a Cloudflare front proves mitigation.
+        429 is deliberately ABSENT: it is the site owner's rate limit (error
+        1015), not an automated-access challenge, and Cloudflare serves it with
+        a ``Retry-After`` rather than any challenge markup. Reading it as a
+        challenge made callers "recover" through the browser transport, which
+        renders a JSON API's response into HTML and breaks the parse; it also
+        persisted the domain as browser-only, so one throttled burst wedged
+        every later fetch. A genuine interstitial served WITH a 429 is still
+        caught -- ``classify_challenge`` reads the body first, unconditionally.
 
     Returns:
       error: A challenge error when detected, otherwise ``FetchError``.
