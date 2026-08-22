@@ -156,7 +156,9 @@ markers = [
     "gpu_torch_cuda: requires torch CUDA execution",
     "gpu_triton: requires Triton kernels",
     "network_anthropic: reaches Anthropic over the network",
+    "network_duckduckgo: reaches DuckDuckGo over the network",
     "network_gemini: reaches Gemini over the network",
+    "network_google_search: reaches Google Search over the network",
     "network_github: reaches GitHub over the network",
     "network_huggingface: reaches Hugging Face over the network",
     "network_kaggle: reaches Kaggle over the network",
@@ -367,7 +369,7 @@ ignore = [
     # === INTENTIONALLY VIOLATE: fixable in principle, kept by choice. ===
     # Deleting a "locally unused" private is unsafe: it may be re-exported and
     # consumed by another stub (e.g. `_size as _size`), and a stub must be correct
-    # independent of its consumers. loop/tools/ruff_check_extra_autofix.py can fix
+    # independent of its consumers. tools/ruff_check_extra_autofix.py can fix
     # these with a `# noqa` escape hatch, but we leave them rather than risk it.
     "PYI046",   #     4 -- unused-private-protocol -- may be re-exported cross-stub.
     "PYI047",   #    45 -- unused-private-type-alias -- may be re-exported cross-stub.
