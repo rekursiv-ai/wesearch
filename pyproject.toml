@@ -192,6 +192,27 @@ norecursedirs = [
     "typings",
 ]
 
+[tool.coverage.run]
+omit = [
+    "*_test.py",
+    "test_*.py",
+    "*/tests/*",
+    "*/.venv/*",
+    "*/typings/*",
+    "*/tools/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+# fail_under = 85
+show_missing = true
+skip_covered = true
+
 [tool.ruff]
 show-fixes = true
 line-length = 88
