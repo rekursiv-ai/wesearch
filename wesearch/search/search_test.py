@@ -289,6 +289,14 @@ class TestSearchSearxng:
         ):
             searxng("test")
 
+    def test_retries_a_throttled_instance(self) -> None:
+        # A Cloudflare-fronted instance rate-limits a burst of queries with a
+        # 429 carrying Retry-After. That is transient, and fetch's retry loop
+        # already honors Retry-After -- but only if given a budget to spend.
+        with _patch_searxng_fetch({"results": []}) as mock:
+            searxng("q")
+        assert mock.call_args.kwargs["request"].retry.retries >= 1
+
     def test_default_category_is_general(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q")
