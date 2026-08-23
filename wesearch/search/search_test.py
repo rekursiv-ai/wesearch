@@ -67,7 +67,7 @@ def _patch_fetch(
 def _tuple_side_effect(side_effect: Any) -> Any:
     """Wrap a byte-valued side_effect so each byte result becomes (bytes, session)."""
     if isinstance(side_effect, list):
-        items = cast("list[object]", side_effect)
+        items = cast(list[object], side_effect)
         return [
             item if isinstance(item, BaseException) else (item, FetchSession())
             for item in items
@@ -168,7 +168,9 @@ class TestSearchSearxng:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("SEARXNG_URL", raising=False)
-        with pytest.raises(RuntimeError, match="SEARXNG_URL"):
+        # SearchError, not the RuntimeError it inherits: asserting the base
+        # class passes even if the specific type regresses away.
+        with pytest.raises(SearchError, match="SEARXNG_URL"):
             _searxng_url()
 
     def test_parses_results(self) -> None:
@@ -288,6 +290,71 @@ class TestSearchSearxng:
             pytest.raises(FetchError),
         ):
             searxng("test")
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_json_bool_is_not_a_coordinate(self, value: bool) -> None:
+        # ``bool`` subclasses ``int``, so a numeric isinstance guard admits a
+        # JSON ``true``; ``float_val`` then rejects it to its 0.0 DEFAULT. That
+        # is exactly the "Gulf of Guinea" failure the parser's own comment says
+        # it prevents -- reintroduced by the guard meant to prevent it.
+        payload = {"results": [{"url": "https://m", "latitude": value}]}
+        with _patch_searxng_fetch(payload):
+            (result,) = searxng("q", categories="map")
+        assert isinstance(result, MapResult)
+        assert result.latitude is None
+
+    def test_non_finite_coordinate_is_unknown(self) -> None:
+        # json.loads accepts NaN/Infinity by default, so both reach the parser.
+        body = b'{"results": [{"url": "https://m", "latitude": NaN}]}'
+        with (
+            patch.dict(os.environ, {"SEARXNG_URL": "https://search.example.test/"}),
+            _patch_fetch(module="searxng", return_value=body),
+        ):
+            (result,) = searxng("q", categories="map")
+        assert isinstance(result, MapResult)
+        assert result.latitude is None
+
+    def test_non_finite_seed_does_not_escape_as_an_exception(self) -> None:
+        # int(nan) raises ValueError and int(inf) OverflowError, neither of
+        # which the dispatcher catches, so a hostile payload crashed the parse.
+        body = (
+            b'{"results": [{"template": "torrent.html", "url": "https://t",'
+            b' "seed": NaN, "leech": Infinity}]}'
+        )
+        with (
+            patch.dict(os.environ, {"SEARXNG_URL": "https://search.example.test/"}),
+            _patch_fetch(module="searxng", return_value=body),
+        ):
+            (result,) = searxng("q", categories="files")
+        assert isinstance(result, TorrentResult)
+        assert result.seed is None
+        assert result.leech is None
+
+    def test_fractional_seed_is_not_silently_truncated(self) -> None:
+        payload = {
+            "results": [{"template": "torrent.html", "url": "https://t", "seed": 1.9}]
+        }
+        with _patch_searxng_fetch(payload):
+            (result,) = searxng("q", categories="files")
+        assert isinstance(result, TorrentResult)
+        assert result.seed is None
+
+    def test_absurd_citation_count_degrades_to_none(self) -> None:
+        # CPython refuses int() on a >4300-digit string, so an unbounded digit
+        # run raised out of a parse whose contract is "else None".
+        payload = {
+            "results": [
+                {
+                    "template": "paper.html",
+                    "url": "https://p",
+                    "comments": "9" * 5000 + " citations",
+                }
+            ]
+        }
+        with _patch_searxng_fetch(payload):
+            (result,) = searxng("q", categories="science")
+        assert isinstance(result, PaperResult)
+        assert result.citations is None
 
     def test_retries_a_throttled_instance(self) -> None:
         # A Cloudflare-fronted instance rate-limits a burst of queries with a

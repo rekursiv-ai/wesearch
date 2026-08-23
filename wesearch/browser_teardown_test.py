@@ -133,6 +133,7 @@ def _calls(tree: ast.AST, name: str) -> bool:
     )
 
 
+@pytest.mark.compute_large_fixture
 def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
     """With the fixture in place, a per-file ``shutdown_browsers`` is a trap.
 

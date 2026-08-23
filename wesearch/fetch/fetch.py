@@ -202,10 +202,10 @@ class FetchSession:
           session: The reconstructed :class:`FetchSession`.
 
         """
-        accept_ch = cast("Mapping[str, list[str]]", data.get("accept_ch", {}))
-        jars = cast("Mapping[str, Mapping[str, str]]", data.get("cookies", {}))
+        accept_ch = cast(Mapping[str, list[str]], data.get("accept_ch", {}))
+        jars = cast(Mapping[str, Mapping[str, str]], data.get("cookies", {}))
         return cls(
-            impersonate=cast("str", data.get("impersonate", "chrome")),
+            impersonate=cast(str, data.get("impersonate", "chrome")),
             cookies={org: dict(jar) for org, jar in jars.items()},
             accept_ch={origin: frozenset(hints) for origin, hints in accept_ch.items()},
         )
@@ -572,6 +572,11 @@ def _send_via_zendriver(
     leaves a narrow window between validation and Chrome's own resolution --
     accepted deliberately, because the alternative (a per-request proxy) costs
     one Chrome process per pin and the measured 32x warm-browser reuse with it.
+
+    That accepted window covers ONE hop's DNS. ``trust`` is therefore passed
+    down rather than consumed here: Chrome follows redirects itself, so only the
+    transport can re-validate the hops it chooses, and checking solely the URL
+    below let a public page redirect Chrome to a private address.
     """
     pinned_host(request.url, request.params.policy.trust)
     egress = egress_ip(cache=True) or egress_ip(cache=False)
@@ -580,9 +585,14 @@ def _send_via_zendriver(
         browser_url,
         profile_dir=data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
         egress=egress or "",
+        # Only the overall budget: ``connect_timeout_sec`` has no counterpart
+        # here, because Chrome owns its own connection setup and exposes no
+        # handshake ceiling. A caller that set a tight one to fail an
+        # unroutable host fast gets it on curl and the full budget here.
         timeout_sec=request.params.retry.timeout_sec,
         headers=headers,
         cookies=cookies,
+        trust=request.params.policy.trust,
         on_redirect=request.params.observe.on_redirect,
     )
     if request.observer is not None:

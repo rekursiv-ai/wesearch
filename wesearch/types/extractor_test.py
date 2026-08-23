@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import get_args
 
+import pytest
+
 from wesearch.types.extractor import Extract
 from wesearch.types.params import Extractor
 from wesearch.web import _EXTRACTORS
@@ -14,6 +16,7 @@ def test_every_extractor_name_is_registered() -> None:
     assert set(get_args(Extractor)) == set(_EXTRACTORS)
 
 
+@pytest.mark.compute_large_fixture
 def test_every_extractor_satisfies_the_protocol() -> None:
     """Each implementation is callable with the protocol's exact signature."""
     for extract in _EXTRACTORS.values():

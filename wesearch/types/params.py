@@ -335,7 +335,7 @@ class PolicyParams:
         del kind
         for field_ in fields(cls):
             if field_.name == name:
-                return cast("T", field_.default)
+                return cast(T, field_.default)
         raise KeyError(f"{cls.__name__} has no field {name!r}.")
 
 

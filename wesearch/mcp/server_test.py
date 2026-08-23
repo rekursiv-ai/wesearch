@@ -85,7 +85,7 @@ def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["complete"] is False
     records = out["records"]
     assert isinstance(records, list)
-    first = cast("dict[str, object]", records[0])
+    first = cast(dict[str, object], records[0])
     assert first["title"] == "Microcanonical Sampling"
 
 
@@ -339,7 +339,7 @@ def test_paper_search_emits_library_records_verbatim(
     out = mcp_server.paper_search("discussion")
     records = out["records"]
     assert isinstance(records, list)
-    assert len(cast("list[object]", records)) == 2
+    assert len(cast(list[object], records)) == 2
 
 
 def test_all_tools_registered() -> None:

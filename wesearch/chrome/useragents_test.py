@@ -147,7 +147,7 @@ class TestRefresh:
             patch.object(useragents, "_download_records", return_value=self._DATASET),
             patch.object(useragents, "_pool_path", return_value=pool_file),
         ):
-            useragents.refresh(cast("UserAgentKind", kind))
+            useragents.refresh(cast(UserAgentKind, kind))
         return pool_file.read_text().splitlines()
 
     def test_desktop_filter_keeps_only_desktop_plain_chrome(

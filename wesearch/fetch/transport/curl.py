@@ -9,6 +9,9 @@ from urllib.parse import urlparse
 
 import threading
 
+from curl_cffi.requests.impersonate import BrowserTypeLiteral
+from curl_cffi.requests.session import HttpMethod
+
 from wesearch.fetch.challenge import classify_http_error
 from wesearch.fetch.common import (
     _REDIRECT_STATUSES,
@@ -24,10 +27,10 @@ from wesearch.types.params import Trust
 
 
 if TYPE_CHECKING:
+    # Type-only: every use is an annotation or a quoted ``cast``. Keeping them
+    # out of the runtime block preserves the lazy ``curl_cffi`` import below.
     from curl_cffi import requests as cc_requests
     from curl_cffi.requests import Response
-    from curl_cffi.requests.impersonate import BrowserTypeLiteral
-    from curl_cffi.requests.session import HttpMethod
 
     import curl_cffi
 else:
@@ -120,7 +123,7 @@ def curl_session(
             session = cast(
                 "cc_requests.Session[Response]",
                 curl_cffi.requests.Session(
-                    impersonate=cast("BrowserTypeLiteral", impersonate),
+                    impersonate=cast(BrowserTypeLiteral, impersonate),
                     curl_options=options,
                 ),
             )
@@ -232,7 +235,7 @@ def _curl_set_cookies(resp: Response) -> list[str]:
     if get_list is None:
         value = resp.headers.get("set-cookie")
         return [value] if value else []
-    return list(cast("list[str]", get_list("set-cookie")))
+    return list(cast(list[str], get_list("set-cookie")))
 
 
 @dataclass(slots=True, kw_only=True)
@@ -343,7 +346,7 @@ def fetch_curl(
     loop = _CurlLoop(
         url=url, method=method, headers=headers, body=body, remaining=max_redirects
     )
-    impers = cast("BrowserTypeLiteral", impersonate)
+    impers = cast(BrowserTypeLiteral, impersonate)
     # curl_cffi reads a (connect, read) pair; a bare float budgets both together.
     timeout = (
         timeout_sec
@@ -357,7 +360,7 @@ def fetch_curl(
         if session is None:
             pinned_host(loop.url, trust)
         try:
-            verb = cast("HttpMethod", loop.method)  # curl types verb as a Literal.
+            verb = cast(HttpMethod, loop.method)  # curl types verb as a Literal.
             resp = (
                 session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **Unpack[RequestParams] TypedDict is unstubbed
                     verb,

@@ -36,7 +36,6 @@ import pytest
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.lib.userdirs import state_dir
 from wesearch.search.custom_types import (
-    CodeResult,
     FileResult,
     ImageResult,
     MapResult,
@@ -54,7 +53,11 @@ from wesearch.search.searxng import searxng
 from wesearch.types.errors import BotDetectionError, FetchError
 
 
-pytestmark = [pytest.mark.network_searxng, pytest.mark.xdist_group(name="live_search")]
+# Only the group is module-wide. The RESOURCE marker is per class, because this
+# file drives three unrelated backends: a module-wide ``network_searxng`` told
+# the resource accounting that the DuckDuckGo and Google cases reach a SearXNG
+# instance, so ``-m network_searxng`` ran live Google traffic.
+pytestmark = [pytest.mark.xdist_group(name="live_search")]
 
 _searxng_required = pytest.mark.skipif(
     not os.environ.get("SEARXNG_URL"),
@@ -259,6 +262,7 @@ def _assert_web_results(results: list[SearchResult], query: str, backend: str) -
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.network_duckduckgo
 class TestDuckDuckGoLive:
     @pytest.mark.parametrize("query", _QUERIES)
     def test_returns_web_results(self, query: str) -> None:
@@ -271,6 +275,7 @@ class TestDuckDuckGoLive:
         _assert_web_results(results, query, "duckduckgo")
 
 
+@pytest.mark.network_searxng
 class TestSearxngLive:
     @_searxng_required
     @pytest.mark.parametrize("query", _QUERIES)
@@ -329,6 +334,7 @@ def _require(results: list[SearchResult], category: str) -> SearchResult:
     return first
 
 
+@pytest.mark.network_searxng
 @_searxng_required
 class TestSearxngCategoriesLive:
     def test_general(self) -> None:
@@ -379,11 +385,9 @@ class TestSearxngCategoriesLive:
     def test_it(self) -> None:
         results = _category_results("it")
         _require(results, "it")
-        # Engines emit packages.html / code.html / default.html; every element
-        # must be one of the typed IT shapes (or the web fallback).
-        assert all(
-            isinstance(r, (PackageResult, CodeResult, SearchResult)) for r in results
-        )
+        # Only the structured assertion carries weight: PackageResult and
+        # CodeResult subclass SearchResult, so an "all are one of these three"
+        # check accepts every possible parser output and proves nothing.
         assert any(isinstance(r, PackageResult) for r in results), (
             "no PackageResult among IT results"
         )
@@ -391,8 +395,12 @@ class TestSearxngCategoriesLive:
     def test_files(self) -> None:
         results = _category_results("files")
         _require(results, "files")
-        assert all(
-            isinstance(r, (FileResult, TorrentResult, SearchResult)) for r in results
+        # At least one STRUCTURED result, not merely "every result is a
+        # SearchResult": FileResult and TorrentResult both subclass it, so a
+        # union with the base accepts literally any parser output -- including a
+        # parser that had stopped reading templates entirely.
+        assert any(isinstance(r, (FileResult, TorrentResult)) for r in results), (
+            "no FileResult or TorrentResult among files results"
         )
 
     def test_social_media(self) -> None:

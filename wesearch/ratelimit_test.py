@@ -7,7 +7,6 @@ from typing import cast, override
 from unittest.mock import patch
 
 import asyncio
-import contextlib
 import os
 import random
 import struct
@@ -114,7 +113,7 @@ def test_pacer_first_acquire_does_not_sleep() -> None:
     # must grant immediately (no sleep).
     clock = FakeClock()
     rng = _FixedRng(7.5)
-    RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng)).acquire()
+    RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng)).acquire()
     assert clock.sleeps == []
 
 
@@ -123,7 +122,7 @@ def test_pacer_second_acquire_sleeps_remaining_interval() -> None:
     # since the 1st grant (work between calls counts toward the spacing).
     clock = FakeClock()
     rng = _FixedRng(7.5)
-    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng))
     pacer.acquire()  # first: free
     clock.now += 2.0  # 2s of work (an HTTP round-trip) elapses between calls
     pacer.acquire()  # second: sleep 7.5 - 2.0 = 5.5
@@ -134,7 +133,7 @@ def test_pacer_second_acquire_no_sleep_when_interval_already_elapsed() -> None:
     # If more than the drawn interval already passed, the 2nd call is free.
     clock = FakeClock()
     rng = _FixedRng(7.5)
-    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng))
     pacer.acquire()
     clock.now += 20.0  # far more than 7.5 elapsed
     pacer.acquire()
@@ -144,7 +143,7 @@ def test_pacer_second_acquire_no_sleep_when_interval_already_elapsed() -> None:
 def test_pacer_async_first_free_then_paces() -> None:
     clock = FakeClock()
     rng = _FixedRng(9.0)
-    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng))
     asyncio.run(pacer.acquire_async())  # first: free
     asyncio.run(pacer.acquire_async())  # second: sleep full 9.0 (no time elapsed)
     assert clock.sleeps == [9.0]
@@ -406,6 +405,7 @@ def test_file_store_holds_no_descriptor_between_transactions(tmp_path: Path) -> 
     assert len(list(fd_dir.iterdir())) <= before
 
 
+@pytest.mark.cli_python_subprocess
 def test_file_store_excludes_a_forked_child(tmp_path: Path) -> None:
     """``flock`` is per-open-file-description, so an INHERITED fd excludes nothing.
 
@@ -440,26 +440,30 @@ def test_pacer_reserves_its_slot_before_sleeping() -> None:
     slot under a lock, two threads observe ``None`` and fire together -- losing
     the jitter the pacer exists to provide.
     """
-    barrier = threading.Barrier(2)
+    contender_started = threading.Event()
 
-    class _BarrierClock(FakeClock):
-        """Blocks in ``time()`` until both threads are inside ``_wait``."""
+    class _CoordinatedClock(FakeClock):
+        """Hold the lock owner until another thread attempts to acquire."""
 
         @override
         def time(self) -> float:
-            # Times out once the loser is parked on the pacer's lock and can no
-            # longer reach the barrier -- which is exactly the fix working.
-            with contextlib.suppress(threading.BrokenBarrierError):
-                _ = barrier.wait(timeout=0.25)
+            assert contender_started.wait(timeout=1)
             return self.now
 
-    clock = _BarrierClock()
+    clock = _CoordinatedClock()
     pacer = RandomUniformPacer(10.0, 10.0, clock=clock)
-    threads = [threading.Thread(target=pacer.acquire) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+
+    owner = threading.Thread(target=pacer.acquire)
+
+    def contend() -> None:
+        contender_started.set()
+        pacer.acquire()
+
+    contender = threading.Thread(target=contend)
+    owner.start()
+    contender.start()
+    owner.join()
+    contender.join()
     assert clock.sleeps == [10.0]  # exactly one free grant, one paced
 
 

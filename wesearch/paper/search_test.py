@@ -244,7 +244,7 @@ class TestS2SearchParams:
             del path
             offset = int(params.get("offset", 0))
             rows = [{"title": f"p{offset + i}"} for i in range(100)]
-            return cast("MutableJSON", {"total": 250, "data": rows})
+            return cast(MutableJSON, {"total": 250, "data": rows})
 
         with patch.object(s2, "get", side_effect=fake_get):
             result = search("q", source="s2", limit=200)

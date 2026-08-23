@@ -196,7 +196,11 @@ class TestTrustEnforcement:
         _Echo.seen.clear()
         server = HTTPServer(("127.0.0.1", 0), _Echo)
         port = server.server_address[1]
-        thread = Thread(target=server.serve_forever, daemon=True)
+        thread = Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
         thread.start()
         try:
             body, _ = fetch_mod.fetch(

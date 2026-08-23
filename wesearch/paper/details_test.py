@@ -46,6 +46,28 @@ class TestCitations:
             listing = citations("doi", "10.1/x", limit=None, year_from=2020)
         assert [r.title for r in listing.records] == ["new"]
 
+    def test_year_filter_excludes_a_bool_year(self) -> None:
+        # ``isinstance(True, int)`` is true, so a JSON ``true`` year passed the
+        # filter and was compared as the value 1.
+        entries: list[MutableJSON] = [
+            {"isInfluential": True, "citingPaper": {"title": "real", "year": 2024}},
+            {"isInfluential": True, "citingPaper": {"title": "bogus", "year": True}},
+        ]
+
+        def fake(
+            path: str,
+            params: dict[str, str | int],
+            *,
+            limit: int | None,
+            keep: Callable[[MutableJSON], bool],
+        ) -> Page:
+            del path, params, limit
+            return Page(entries=[e for e in entries if keep(e)], complete=True)
+
+        with patch.object(s2, "paginate", side_effect=fake):
+            listing = citations("doi", "10.1/x", limit=None, year_from=1)
+        assert [r.title for r in listing.records] == ["real"]
+
     def test_influential_only_filters(self) -> None:
         entries: list[MutableJSON] = [
             {"isInfluential": True, "citingPaper": {"title": "keep"}},

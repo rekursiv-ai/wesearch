@@ -10,7 +10,7 @@ from typing import cast
 
 import functools
 
-from wesearch.lib.custom_json import MutableJSON
+from wesearch.lib.custom_json import MutableJSON, optional_val
 from wesearch.paper.custom_types import AuthorRecord
 from wesearch.paper.details import Listing
 from wesearch.paper.providers import s2
@@ -96,8 +96,8 @@ def _year_in_bounds(
     """Whether ``entry["year"]`` falls within the optional bounds."""
     if year_from is None and year_to is None:
         return True
-    year = entry.get("year")
-    if not isinstance(year, int):
+    year = optional_val(int, entry.get("year"))
+    if year is None:
         return False
     if year_from is not None and year < year_from:
         return False
