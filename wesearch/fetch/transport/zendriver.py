@@ -164,7 +164,9 @@ def _close_orphan_browser(profile_dir: Path) -> None:
             return
         connection.close()
         time.sleep(0.05)
-    raise RuntimeError(f"Chrome on DevTools port {port} did not close.")
+    # A capability condition, not a fetch fault: it blocks every later browser
+    # fetch, so it must be the error such callers already catch.
+    raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
 
 
 def _devtools_port(profile_dir: Path, *, proc_root: Path = Path("/proc")) -> int | None:
@@ -258,12 +260,12 @@ def fetch_zendriver(
       headless: Run Chrome headless (the default); ``False`` opens a window.
       headers: Extra headers applied to this tab before navigation.
       cookies: Cookies seeded for ``url`` before navigation.
-      trust: Provenance of the URL. Under ``"untrusted"`` EVERY request the tab
-        makes -- the navigation, each redirect hop Chrome follows on its own,
-        and each subresource -- is validated to a public address before the
-        socket opens. Required rather than defaulted at the call site because a
-        transport that cannot express the policy cannot be held to it, which is
-        how the browser leg came to check only the caller's own URL.
+      trust: Provenance of the URL. Under ``"untrusted"`` every DOCUMENT request
+        -- the navigation and each redirect hop Chrome follows itself -- is
+        validated to a public address before the socket opens. Subresources are
+        deliberately not intercepted; see :func:`_guard_requests`. Required
+        rather than defaulted, because a transport that cannot express the
+        policy cannot be held to it.
       on_redirect: Called with each document hop before it is followed; raise to
         abort it.
 
@@ -282,7 +284,10 @@ def fetch_zendriver(
             cookies=cookies,
             trust=trust,
             on_redirect=on_redirect,
-        )
+        ),
+        # Above the coroutine's own budget, so a normal timeout still raises
+        # from inside ``_navigate``, which closes its tab and reports the wall.
+        timeout_sec=timeout_sec + 30,
     )
 
 
@@ -412,7 +417,7 @@ async def _guard_requests(
     trust: Trust,
     on_redirect: Callable[[str], None] | None,
 ) -> None:
-    """Validate every request this tab makes BEFORE Chrome opens the socket.
+    """Validate every DOCUMENT request this tab makes BEFORE Chrome connects.
 
     The header transports re-validate each redirect hop (``curl.py`` and
     ``stdlib.py`` both call :func:`pinned_host` per hop) because
@@ -520,6 +525,8 @@ def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
     parent -- means "the document you are reading was replaced".
     """
     navigated = asyncio.Event()
+    # Captured here: the handler below runs on a thread with no running loop.
+    loop = asyncio.get_running_loop()
 
     # Two-arg tolerant on purpose: zendriver calls a handler as
     # ``callback(event, connection)`` and retries as ``callback(event)`` only
@@ -539,7 +546,9 @@ def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
             isinstance(event, zendriver.cdp.page.FrameNavigated)
             and event.frame.parent_id is None
         ):
-            navigated.set()
+            # Not a bare ``set()``: zendriver runs this handler off-loop, and a
+            # cross-thread set flips the flag without waking the selector.
+            loop.call_soon_threadsafe(navigated.set)
 
     # zendriver annotates this parameter as a bare ``Callable`` -- i.e.
     # ``Callable[..., Unknown]`` -- under a suppression of its own in
@@ -608,12 +617,22 @@ async def _settled_content(tab: zendriver.Tab, *, budget_sec: float) -> str:
             return body
         try:
             await asyncio.wait_for(navigated.wait(), timeout=remaining)
+            # The navigation only COMMITS the new document; its markup arrives as
+            # it parses. Without this the next read catches the half-built
+            # 386-byte phase above -- right title, empty body.
+            #
+            # Bounded by the SAME deadline as the wait above, not left open: a
+            # document that commits just before the deadline and then stalls
+            # would otherwise park here with no ceiling of its own, spending the
+            # caller's entire fetch timeout. That is precisely what ``budget_sec``
+            # promises not to do -- give up in time to return the last body and
+            # let the caller classify the wall.
+            await asyncio.wait_for(
+                tab.wait_for_ready_state("complete"),
+                timeout=max(deadline - loop.time(), 0.0),
+            )
         except TimeoutError:
             return await tab.get_content()
-        # The navigation only COMMITS the new document; its markup arrives as it
-        # parses. Without this the next read catches the half-built 386-byte
-        # phase above -- right title, empty body.
-        await tab.wait_for_ready_state("complete")
 
 
 async def _navigate(
@@ -671,10 +690,10 @@ async def _navigate(
             # host dropped exactly the cookies a following fetch to the target
             # needs. ``on_redirect`` already fired per hop in the guard, before
             # each was followed.
-            cookies = await _domain_cookies(browser, final_url)
+            harvested = await _domain_cookies(browser, final_url)
         finally:
             await tab.close()
-    return BrowserResult(body=_unwrap_viewer(body).encode(), cookies=cookies)
+    return BrowserResult(body=_unwrap_viewer(body).encode(), cookies=harvested)
 
 
 def _unwrap_viewer(body: str) -> str:
@@ -778,10 +797,31 @@ class _BrowserPool:
         )
         self._thread.start()
 
-    def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
-        """Run a coroutine on the pool's loop from a sync caller; return its result."""
+    def run(self, coro: Coroutine[Any, Any, _T], *, timeout_sec: float = 0) -> _T:
+        """Run a coroutine on the pool's loop from a sync caller; return its result.
+
+        Args:
+          coro: The browser coroutine to run on the pool's loop.
+          timeout_sec: Ceiling on the WAIT, in seconds; ``0`` waits forever. A
+            self-bounding coroutine still needs it: once the loop stops, the
+            coroutine is never scheduled and its own timeout never arms, so the
+            caller waits on a future nothing will complete.
+
+        Returns:
+          result: Whatever the coroutine returned.
+
+        Raises:
+          TimeoutError: If the wait exceeds ``timeout_sec``.
+
+        """
         future: Future[_T] = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
+        try:
+            return future.result(timeout=timeout_sec or None)
+        except TimeoutError:
+            # A no-op when the coroutine timed out internally; it matters for an
+            # unscheduled one, which must not later drive a tab nobody harvests.
+            future.cancel()
+            raise
 
     async def browser(
         self,
@@ -791,7 +831,9 @@ class _BrowserPool:
         headless: bool,
     ) -> zendriver.Browser:
         """Return the warm browser for one egress and profile."""
-        key = (egress, str(profile_dir))
+        # Resolved, matching ``_control_address``: two spellings of one profile
+        # are one user-data dir, and Chrome allows it a single owner.
+        key = (egress, str(profile_dir.resolve()))  # noqa: ASYNC240 -- one stat
         async with self._launch_lock:
             control_key = _control_address(profile_dir)
             with self._lock:
@@ -823,7 +865,9 @@ class _BrowserPool:
             self._controls.clear()
         for browser in browsers:
             try:
-                self.run(browser.stop())
+                # Bounded: this runs from ``atexit``, where an unreachable
+                # browser would otherwise hold the interpreter open forever.
+                self.run(browser.stop(), timeout_sec=30)
             except Exception:
                 logger.debug("browser stop failed during shutdown", exc_info=True)
         self._loop.call_soon_threadsafe(self._loop.stop)

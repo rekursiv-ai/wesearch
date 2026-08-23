@@ -317,9 +317,10 @@ def apply_redirect(
     - On 301/302/303 of a non-GET, convert to a bodyless GET dropping
       Content-Type (browsers downgrade all three; only 307/308 preserve the
       method -- that is why 307/308 exist).
-    - On a CROSS-ORIGIN hop, drop every origin-bound header (``Cookie`` and the
-      extended client hints), since those belong to the source origin and must
-      not leak to the target. Same-origin hops keep them.
+    - On a CROSS-ORIGIN hop, drop every origin-bound header (``Cookie``,
+      ``Authorization``, and the extended client hints), since those belong to
+      the source origin and must not leak to the target. Same-origin hops keep
+      them.
 
     Casing-insensitive throughout.
     """
@@ -334,8 +335,12 @@ def apply_redirect(
 
 
 # Headers scoped to the origin that set/opted-into them; dropped on a
-# cross-origin redirect so the source origin's Cookie and extended client hints
-# never leak to the target (a real browser scopes both per origin).
+# cross-origin redirect so the source origin's credentials and extended client
+# hints never leak to the target (a real browser scopes all of them per origin).
+#
+# ``authorization`` is a live secret rather than a fingerprint: callers attach
+# API keys and OAuth bearers, and userinfo synthesizes a Basic credential.
 _ORIGIN_BOUND: frozenset[str] = frozenset(
-    {"cookie"} | {name.lower() for name in chrome_client_hints(major=1)}
+    {"cookie", "authorization"}
+    | {name.lower() for name in chrome_client_hints(major=1)}
 )

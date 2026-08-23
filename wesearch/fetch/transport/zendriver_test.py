@@ -7,6 +7,7 @@ is exercised with no Chrome and no network.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import GeneratorType
@@ -18,6 +19,8 @@ import importlib
 import inspect
 import subprocess
 import tempfile
+import threading
+import time
 
 import pytest
 import zendriver
@@ -1162,6 +1165,88 @@ def test_navigate_matches_exact_host_cookie(
     assert result.cookies == {"H": "1"}
 
 
+def test_settled_content_returns_promptly_when_the_wall_clears_off_loop() -> None:
+    """A challenge that clears must be observed then, not at the deadline.
+
+    zendriver dispatches sync handlers off-loop, and a cross-thread
+    ``Event.set()`` does not wake the selector. Asserted on elapsed time: the
+    body is identical either way.
+    """
+    wall = "<html><title>Just a moment...</title></html>"
+    handlers: list[Callable[..., None]] = []
+    cleared = False
+
+    class _ClearsOffLoopTab:
+        """Serves the wall until an off-loop navigation event says otherwise.
+
+        Deliberately not ``_FakeTab``: that one advances its document from
+        inside ``get_content``, on the loop thread, which is the arrangement
+        that hides a wakeup delivered from anywhere else.
+        """
+
+        def add_handler(self, event_type: Any, handler: Any) -> None:
+            del event_type
+            handlers.append(cast("Callable[..., None]", handler))
+
+        async def get_content(self) -> str:
+            return "<html>ok</html>" if cleared else wall
+
+        async def wait_for_ready_state(self, until: str = "complete") -> bool:
+            del until
+            return True
+
+    async def go() -> float:
+        tab = _ClearsOffLoopTab()
+        started = time.monotonic()
+
+        def clear_from_another_thread() -> None:
+            nonlocal cleared
+            time.sleep(0.1)  # Let the settle wait park the loop.
+            cleared = True
+            handlers[0](_main_frame_navigated())
+
+        threading.Thread(target=clear_from_another_thread, daemon=True).start()
+        await fz_mod._settled_content(cast(Any, tab), budget_sec=5.0)
+        return time.monotonic() - started
+
+    # Cleared at 0.1s against a 5s budget: finishing under 2s proves the wakeup
+    # arrived, while waiting the budget out lands at ~5s.
+    assert asyncio.run(go()) < 2.0
+
+
+def test_settled_content_bounds_a_stalled_document_parse() -> None:
+    """``budget_sec`` must bound the whole settle, parse included.
+
+    A document that commits near the deadline and then stalls would otherwise
+    spend the caller's entire request timeout in ``wait_for_ready_state``.
+    """
+    wall = "<html><title>Just a moment...</title></html>"
+
+    class _StalledParseTab:
+        def add_handler(self, event_type: Any, handler: Any) -> None:
+            del event_type
+            # Commit a navigation immediately, so the settle loop always
+            # advances to the ready-state wait that has no ceiling.
+            handler(_main_frame_navigated())
+
+        async def get_content(self) -> str:
+            return wall
+
+        async def wait_for_ready_state(self, until: str = "complete") -> bool:
+            del until
+            await asyncio.Event().wait()  # Parses forever.
+            raise AssertionError("unreachable")
+
+    async def go() -> float:
+        started = time.monotonic()
+        await fz_mod._settled_content(cast(Any, _StalledParseTab()), budget_sec=0.2)
+        return time.monotonic() - started
+
+    # Generous multiple of the budget: this must fail on an UNBOUNDED wait, not
+    # on scheduler jitter around a bound that is working.
+    assert asyncio.run(asyncio.wait_for(go(), timeout=10.0)) < 3.0
+
+
 # -- _navigate: redirect callback --------------------------------------------
 
 
@@ -1330,6 +1415,55 @@ def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> Non
         assert len(launched) == 2
     finally:
         pool.shutdown()
+
+
+def test_pool_run_gives_up_when_its_loop_stopped() -> None:
+    """A stopped loop must surface a timeout, never an unbounded wait.
+
+    The coroutine's own ``asyncio.timeout`` bounds the fetch only while the loop
+    is running it; a stopped loop never schedules it, so nothing arms.
+    """
+    pool = _BrowserPool(serve_control=False)
+    try:
+        pool._loop.call_soon_threadsafe(pool._loop.stop)
+        # Joining the thread is what proves the loop is DONE running, rather
+        # than sampling ``is_running`` in a spin that can observe the gap
+        # between the callback firing and the loop actually stopping.
+        pool._thread.join(timeout=5)
+        assert not pool._thread.is_alive()
+
+        async def never_scheduled() -> str:
+            raise AssertionError("A stopped loop must not run the coroutine.")
+
+        with pytest.raises(TimeoutError):
+            pool.run(never_scheduled(), timeout_sec=0.05)
+    finally:
+        pool.shutdown()
+
+
+def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer ceiling must exceed the coroutine's own budget.
+
+    At or below it the outer wait fires first, cancelling a ``_navigate`` that
+    was about to report a wall and turning it into an opaque timeout.
+    """
+    waits: list[float] = []
+
+    class _RecordingPool:
+        def run(self, coro: Any, *, timeout_sec: float = 0) -> BrowserResult:
+            coro.close()
+            waits.append(timeout_sec)
+            return BrowserResult(body=b"", cookies={})
+
+    pool = _RecordingPool()
+    monkeypatch.setattr(fz_mod, "_pool", lambda: pool)
+    fz_mod.fetch_zendriver(
+        "https://example.com/", profile_dir=_PROFILE, egress="e", timeout_sec=30.0
+    )
+
+    assert waits == [pytest.approx(60.0)]
 
 
 def test_pool_shutdown_joins_thread_and_closes_loop() -> None:

@@ -223,6 +223,59 @@ class TestFetchCurlBackend:
         assert [domain for domain, _pin, _port in pins] == ["example.com", "other.com"]
         assert all(pin is not None for _d, pin, _p in pins)
 
+    def test_one_shot_request_pins_the_ip_it_validated(self) -> None:
+        """A keyless request must connect to the address it validated.
+
+        Discarding the resolved IP leaves curl to look the host up a second
+        time, which is the DNS-rebinding window ``pinned_host`` exists to close.
+        """
+        resp = self._mock_response(content=b"hello")
+        with (
+            patch.object(
+                curl_mod,
+                "pinned_host",
+                return_value=ValidatedHost(host="example.com", ip="93.184.216.34"),
+            ),
+            patch("curl_cffi.requests.request", return_value=resp) as mock_req,
+        ):
+            fetch(
+                "https://example.com/x",
+                request=RequestParams(
+                    content=ContentParams(raw_headers=True, headers={}),
+                    policy=PolicyParams(transport="curl"),
+                ),
+            )
+
+        options = dict(mock_req.call_args.kwargs.get("curl_options") or {})
+        assert options.get(CurlOpt.RESOLVE) == ["example.com:443:93.184.216.34"]
+
+    def test_one_shot_request_pins_a_non_default_port(self) -> None:
+        """``RESOLVE`` is per host:port, so the pin must name the real port.
+
+        An entry naming 443 simply does not apply to a request on 8443 -- curl
+        falls back to its own resolution and the connection is unpinned, with
+        nothing in the request reporting that the guard lapsed.
+        """
+        resp = self._mock_response(content=b"hello")
+        with (
+            patch.object(
+                curl_mod,
+                "pinned_host",
+                return_value=ValidatedHost(host="example.com", ip="93.184.216.34"),
+            ),
+            patch("curl_cffi.requests.request", return_value=resp) as mock_req,
+        ):
+            fetch(
+                "https://example.com:8443/x",
+                request=RequestParams(
+                    content=ContentParams(raw_headers=True, headers={}),
+                    policy=PolicyParams(transport="curl"),
+                ),
+            )
+
+        options = dict(mock_req.call_args.kwargs.get("curl_options") or {})
+        assert options.get(CurlOpt.RESOLVE) == ["example.com:8443:93.184.216.34"]
+
     def test_pin_brackets_ipv6_resolve_entry(self) -> None:
         # REV2-002: a v6 pin must be "host:port:[v6]" -- curl mis-parses an
         # unbracketed IPv6 (its colons collide with the host:port delimiters).
