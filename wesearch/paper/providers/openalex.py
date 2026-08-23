@@ -297,7 +297,8 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
             r"(?:arxiv\.org/abs/|arxiv:)?([\w.-]+/\d+|\d{4}\.\d{4,5})", arxiv_raw
         )
         if m:
-            arxiv = m.group(1)
+            arxiv_raw = m.group(1)
+            arxiv = arxiv_raw if isinstance(arxiv_raw, str) else None
     if arxiv is None and doi is not None:
         # OpenAlex indexes an arXiv preprint as its own work whose DOI is
         # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
@@ -308,7 +309,8 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         # exists to prevent.
         m = re.match(r"10\.48550/arxiv\.(.+?)(?:v\d+)?$", doi, re.IGNORECASE)
         if m:
-            arxiv = m.group(1)
+            arxiv_raw = m.group(1)
+            arxiv = arxiv_raw if isinstance(arxiv_raw, str) else None
 
     primary = dict_val(work.get("primary_location"))
     source = dict_val(primary.get("source"))

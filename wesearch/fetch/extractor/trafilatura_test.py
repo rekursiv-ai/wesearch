@@ -45,6 +45,7 @@ def test_scores_away_content_html2text_keeps() -> None:
     assert _PRONUNCIATION not in extract_trafilatura(html)
 
 
+@pytest.mark.compute_large_fixture
 def test_extracts_article_prose() -> None:
     """An article-shaped page yields its body."""
     body = "This is a paragraph of article prose long enough to be scored as content."
@@ -54,6 +55,7 @@ def test_extracts_article_prose() -> None:
     assert body in text
 
 
+@pytest.mark.compute_large_fixture
 def test_empty_document_yields_no_text() -> None:
     """A document with no article yields empty text, not ``None``."""
     assert extract_trafilatura("") == ""

@@ -1358,7 +1358,7 @@ class TestEgressIp:
         # mock so a bytes return becomes (bytes, session) and an exception still
         # raises (the echo-cascade paths this test exercises).
         def adapt(*args: Any, **kwargs: Any) -> tuple[bytes, FetchSession]:
-            return cast("bytes", fetch_mock(*args, **kwargs)), FetchSession()
+            return cast(bytes, fetch_mock(*args, **kwargs)), FetchSession()
 
         with patch.object(fetch_mod, "fetch", side_effect=adapt):
             return _real_egress_ip(cache=False, ipv6=ipv6)

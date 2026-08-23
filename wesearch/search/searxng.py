@@ -29,9 +29,8 @@ from wesearch.fetch import (
 from wesearch.lib.custom_json import (
     datetime_val,
     dict_val,
-    float_val,
-    int_val,
     list_val,
+    optional_val,
     str_val,
 )
 from wesearch.search.custom_types import (
@@ -364,8 +363,8 @@ def _searxng_map(item: dict[str, object]) -> MapResult:
         # Presence of the key is not presence of a NUMBER: a null or malformed
         # value took float_val's 0.0 default, turning "unknown" into the Gulf of
         # Guinea. Absent and unparseable both mean None here.
-        latitude=_optional_float(item.get("latitude")),
-        longitude=_optional_float(item.get("longitude")),
+        latitude=optional_val(float, item.get("latitude")),
+        longitude=optional_val(float, item.get("longitude")),
         address=MappingProxyType(dict_val(item.get("address"), str)),
     )
 
@@ -444,8 +443,8 @@ def _searxng_torrent(item: dict[str, object]) -> TorrentResult:
         snippet=clean_text(str_val(item.get("content"))),
         magnet_url=str_val(item.get("magnetlink")),
         torrent_url=str_val(item.get("torrentfile")),
-        seed=_optional_int(item.get("seed")),
-        leech=_optional_int(item.get("leech")),
+        seed=optional_val(int, item.get("seed")),
+        leech=optional_val(int, item.get("leech")),
         filesize=str_val(item.get("filesize")),
     )
 
@@ -457,7 +456,13 @@ def _searxng_torrent(item: dict[str, object]) -> TorrentResult:
 # At least one DIGIT, not just comma-ish characters: the looser `[\d,]+`
 # matched a bare "," on hostile JSON, and the int() below then raised
 # ValueError out of a parse that must degrade to "unknown citations".
-_CITATIONS_RE = re.compile(r"^\s*(\d[\d,]*)")
+# BOUNDED, because format is not magnitude: the unbounded run still matched, and
+# CPython refuses int() on a string past 4300 digits -- the same ValueError, out
+# of the same parse, on the same hostile-comments input the DIGIT fix addressed.
+# A trailing guard so a longer run does not match its own prefix: past ~24
+# digits the field is not a count at all, and reading its first 24 would
+# fabricate one.
+_CITATIONS_RE = re.compile(r"^\s*(\d[\d,]{0,23})(?![\d,])")
 
 
 def _searxng_paper(item: dict[str, object]) -> PaperResult:
@@ -558,13 +563,3 @@ def _searxng_url() -> str:
             f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
         )
     return url
-
-
-def _optional_float(value: object) -> float | None:
-    """Return ``value`` as a float, or ``None`` when it is absent or unparseable."""
-    return float_val(value) if isinstance(value, (int, float)) else None
-
-
-def _optional_int(value: object) -> int | None:
-    """Return ``value`` as an int, or ``None`` when it is absent or unparseable."""
-    return int_val(value, 0) if isinstance(value, (int, float)) else None

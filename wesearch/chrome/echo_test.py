@@ -222,17 +222,18 @@ class TestEchoOracleCleanup:
             EchoOracle()
         assert set(Path(tempfile.gettempdir()).glob("echo-oracle-*")) == before
 
+    @pytest.mark.network_localhost
     def test_close_joins_a_stalled_handler_thread(self) -> None:
         # close() joined the accept thread only, so a handler could still be
         # inside _handle -- holding a client socket -- after teardown returned.
-        oracle = EchoOracle(client_timeout_sec=0.2)
+        oracle = EchoOracle(client_timeout_sec=0.02)
         context = ssl.create_default_context(cafile=str(oracle.ca_path))
         stalled = context.wrap_socket(
             socket.create_connection(("localhost", oracle.port), timeout=5),
             server_hostname="localhost",
         )
         stalled.sendall(b"GET / HTTP")  # A head that never terminates.
-        time.sleep(0.1)
+        time.sleep(0.01)
         oracle.close()
         assert not [t for t in threading.enumerate() if t.name.startswith("echo-")]
         stalled.close()

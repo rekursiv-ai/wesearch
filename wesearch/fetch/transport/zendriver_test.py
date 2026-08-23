@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import GeneratorType
 from typing import Any, cast
 
 import asyncio
 import atexit
 import importlib
+import inspect
 import subprocess
 import tempfile
 
@@ -25,6 +27,8 @@ from wesearch.fetch.transport.zendriver import (
     _BrowserPool,
     _navigate,
 )
+from wesearch.lib.custom_json import dict_val, list_val, str_val
+from wesearch.types.params import Trust
 
 import wesearch.fetch.transport.zendriver as fz_mod
 
@@ -34,6 +38,7 @@ import wesearch.fetch.transport.zendriver as fz_mod
 _PROFILE = Path("test-profile")
 
 
+@pytest.mark.cli_python_subprocess
 def test_direct_executable_reexecutes_as_module() -> None:
     script = Path(__file__).with_name("zendriver.py")
     result = subprocess.run(  # noqa: S603 -- fixed argv: this repo's own script.
@@ -119,6 +124,7 @@ class _FakeTab:
         href: str,
         documents: list[str] | None = None,
         parsing: str | None = None,
+        paused_events: list[Any] | None = None,
     ) -> None:
         self._documents = documents if documents is not None else [content]
         self._parsing = parsing
@@ -127,6 +133,11 @@ class _FakeTab:
         self.navigations: list[str] = []
         self.commands: list[Any] = []
         self.handlers: list[Any] = []
+        self.paused_handlers: list[Any] = []
+        self.continued_requests: list[str] = []
+        self.failed_requests: list[str] = []
+        self._paused_events: list[Any] = list(paused_events or [])
+        self.wire_commands: list[dict[str, object]] = []
         self.content_reads = 0
         self._index = 0
         # True between a navigation and its ready-state wait -- the window in
@@ -134,8 +145,18 @@ class _FakeTab:
         self._is_parsing = False
 
     def add_handler(self, event_type: Any, handler: Any) -> None:
-        del event_type
+        # Routed by event type, mirroring zendriver's own dispatch: the
+        # navigation watcher and the per-request guard must not receive each
+        # other's events, which a single handler list cannot express.
+        if event_type is zendriver.cdp.fetch.RequestPaused:
+            self.paused_handlers.append(handler)
+            return
         self.handlers.append(handler)
+
+    def pause_request(self, event: Any) -> None:
+        """Deliver one intercepted request to the transport's guard."""
+        for handler in self.paused_handlers:
+            handler(event)
 
     def _navigate_main_frame(self) -> None:
         """Advance to the next document and notify the transport's handler."""
@@ -147,11 +168,45 @@ class _FakeTab:
 
     async def send(self, command: Any) -> None:
         self.commands.append(command)
+        # A CDP verb is a generator yielding its wire dict; reading that dict is
+        # how the fake records the REAL decision (method + request id) rather
+        # than trusting the transport's own account of what it sent.
+        raw = next(command, None) if isinstance(command, GeneratorType) else None
+        if not isinstance(raw, dict):
+            return
+        # ``dict_val`` rather than a bare ``.get`` ladder: the CDP verbs are
+        # unstubbed, so their wire dict arrives as ``dict[Unknown, Unknown]``
+        # and every read off it is partially unknown.
+        payload = dict_val(cast("object", raw))
+        # Kept: a generator is single-use, so a test that re-reads ``commands``
+        # would find every one exhausted by this very inspection.
+        self.wire_commands.append(payload)
+        request_id = str_val(dict_val(payload.get("params")).get("requestId"))
+        if not request_id:
+            return
+        method = str_val(payload.get("method"))
+        if method == "Fetch.continueRequest":
+            self.continued_requests.append(request_id)
+        elif method == "Fetch.failRequest":
+            self.failed_requests.append(request_id)
 
     async def get(self, url: str) -> _FakeTab:
         self.navigations.append(url)
         if not self._href:
             self._href = url
+        # Chrome pauses intercepted requests DURING navigation, so the scripted
+        # ones are delivered here rather than after the fetch returns -- the
+        # transport answers them on the live loop, which is the only place a
+        # CDP reply can be sent.
+        for event in self._paused_events:
+            self.pause_request(event)
+        self._paused_events = []
+        # Drained by yielding, never by sleeping: the guard's reply crosses two
+        # scheduler stages (``call_soon_threadsafe``, then the task it creates),
+        # and these tests run on a 0.02s budget to prove the settle poll gives
+        # up -- a wall-clock wait spends half of it and times the fetch out.
+        for _ in range(4):
+            await asyncio.sleep(0)
         return self
 
     async def wait_for_ready_state(
@@ -193,11 +248,13 @@ class _FakeBrowser:
         cookies: list[_FakeCookie] | None = None,
         documents: list[str] | None = None,
         parsing: str | None = None,
+        paused_events: list[Any] | None = None,
     ) -> None:
         self._content = content
         self._href = href
         self._documents = documents
         self._parsing = parsing
+        self._paused_events = paused_events or []
         self.cookies = _FakeCookieJar(cookies or [])
         self.stopped = False
         self.gets: list[str] = []
@@ -212,6 +269,10 @@ class _FakeBrowser:
             href=self._href,
             documents=self._documents,
             parsing=self._parsing,
+            # A COPY: the tab drains its list once delivered, and the browser
+            # builds a fresh tab per ``get`` (the blank one, then the real
+            # navigation), so a shared list is empty by the time it matters.
+            paused_events=list(self._paused_events),
         )
         return self.last_tab
 
@@ -368,7 +429,7 @@ def test_the_pool_never_stops_a_browser_a_caller_still_holds(
     async def launch(profile_dir: Path, *, headless: bool) -> zendriver.Browser:
         del profile_dir, headless
         launched.append(_FakeBrowser())
-        return cast("zendriver.Browser", launched[-1])
+        return cast(zendriver.Browser, launched[-1])
 
     pool = fz_mod._BrowserPool(serve_control=False)
     try:
@@ -382,7 +443,7 @@ def test_the_pool_never_stops_a_browser_a_caller_still_holds(
             f"the pool closed browsers {closed} while a caller still held one; "
             f"a browser is idle only when its caller says so"
         )
-        assert not cast("_FakeBrowser", held).stopped
+        assert not cast(_FakeBrowser, held).stopped
     finally:
         pool.shutdown()
 
@@ -636,6 +697,170 @@ def test_navigate_leaves_real_html_alone(
     assert result.body == content.encode()
 
 
+def _request_paused(url: str) -> zendriver.cdp.fetch.RequestPaused:
+    """A real ``RequestPaused`` for a main-frame document request.
+
+    The genuine CDP dataclass, not a look-alike: the guard filters on
+    ``isinstance``, so a stand-in would satisfy the fake and be ignored in
+    production -- the direction a test must never fail in.
+    """
+    request = zendriver.cdp.network.Request(
+        url=url,
+        method="GET",
+        headers=zendriver.cdp.network.Headers({}),
+        initial_priority=zendriver.cdp.network.ResourcePriority.HIGH,
+        referrer_policy="no-referrer",
+    )
+    return zendriver.cdp.fetch.RequestPaused(
+        request_id=zendriver.cdp.fetch.RequestId("req-1"),
+        request=request,
+        frame_id=zendriver.cdp.page.FrameId("main"),
+        resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
+        response_error_reason=None,
+        response_status_code=None,
+        response_status_text=None,
+        response_headers=None,
+        network_id=None,
+        redirected_request_id=None,
+    )
+
+
+class TestBrowserHonorsTrustPerHop:
+    """Chrome follows redirects itself, so each hop must be checked before it runs.
+
+    The header transports re-validate every hop (``curl.py:364``,
+    ``stdlib.py:213``) because ``common.py`` states the rule: "A redirect target
+    is a URL like any other and must be re-checked; skipping that is the classic
+    SSRF bypass." The browser leg reached the same rule through a different
+    door -- it validated the URL the CALLER passed and then handed navigation to
+    Chrome, which fetched every subsequent hop with nothing watching.
+    """
+
+    def test_fetch_zendriver_accepts_trust(self) -> None:
+        # The signature IS the enforcement: a transport that cannot express the
+        # policy cannot be held to it, and no reviewer of the call site sees the
+        # gap because that line does call ``pinned_host``.
+        assert "trust" in inspect.signature(fz_mod.fetch_zendriver).parameters
+
+    @staticmethod
+    def _run(
+        browser: _FakeBrowser,
+        *,
+        url: str = "https://public.example/start",
+        trust: Trust = "untrusted",
+        on_redirect: Any = None,
+    ) -> _FakeTab:
+        """Drive one navigation and return the tab that served it."""
+        asyncio.run(
+            _navigate(
+                url,
+                profile_dir=_PROFILE,
+                egress="1.2.3.4",
+                timeout_sec=5.0,
+                headless=True,
+                trust=trust,
+                on_redirect=on_redirect,
+            )
+        )
+        assert browser.last_tab is not None
+        return browser.last_tab
+
+    def test_private_redirect_target_is_refused_before_it_is_fetched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("http://127.0.0.1:1/secret")]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser)
+        # Failed, not continued: the loopback hop must never reach the socket.
+        assert tab.failed_requests == ["req-1"]
+        assert tab.continued_requests == []
+
+    def test_public_redirect_target_is_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("https://example.com/next")]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser)
+        assert tab.continued_requests == ["req-1"]
+        assert tab.failed_requests == []
+
+    def test_internal_trust_permits_a_private_target(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``internal`` is the caller's statement that it authored the URL, so a
+        # loopback SearXNG instance must still be reachable through the browser.
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("http://127.0.0.1:8888/next")]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser, url="http://127.0.0.1:8888/search", trust="internal")
+        assert tab.continued_requests == ["req-1"]
+        assert tab.failed_requests == []
+
+    def test_on_redirect_fires_before_the_hop_is_followed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ObserveParams documents on_redirect as "called with the redirect target
+        # URL before following; raise to abort". Firing it after the load makes
+        # the abort unreachable.
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("https://example.com/next")]
+        )
+        _patch_pool(monkeypatch, browser)
+        seen: list[str] = []
+        tab = self._run(browser, on_redirect=seen.append)
+        assert seen == ["https://example.com/next"]
+        assert tab.continued_requests == ["req-1"]
+
+    def test_on_redirect_raising_aborts_the_hop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(url: str) -> None:
+            del url
+            raise RuntimeError("caller refused the hop")
+
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("https://example.com/next")]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser, on_redirect=refuse)
+        assert tab.failed_requests == ["req-1"]
+        assert tab.continued_requests == []
+
+    def test_interception_is_scoped_to_documents(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only navigations are paused, and that scoping is load-bearing.
+
+        Intercepting every request pauses each subresource until the handler
+        answers, and answering costs a DNS resolution on zendriver's connection
+        thread; measured against live Google, the page never reached
+        ``readyState == "complete"`` and the fetch timed out. Documents are also
+        the entire SSRF surface -- a redirect chain is documents, and a
+        subresource cannot redirect the navigation anywhere.
+        """
+        browser = _FakeBrowser()
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser)
+        enable = next(
+            (
+                c
+                for c in tab.wire_commands
+                if str_val(c.get("method")) == "Fetch.enable"
+            ),
+            None,
+        )
+        assert enable is not None
+        patterns = list_val(dict_val(enable.get("params")).get("patterns"))
+        shapes = [dict_val(p) for p in patterns]
+        assert [str_val(s.get("resourceType")) for s in shapes] == ["Document"]
+        assert [str_val(s.get("requestStage")) for s in shapes] == ["Request"]
+
+
 def test_navigate_seeds_request_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -656,7 +881,9 @@ def test_navigate_seeds_request_identity(
     assert browser.cookies.seeded[0].name == "CONSENT"
     assert browser.cookies.seeded[0].value == "YES+"
     assert browser.last_tab is not None
-    assert len(browser.last_tab.commands) == 2
+    # Three: the request guard's ``Fetch.enable`` precedes the two header
+    # commands, because every tab is guarded whether or not headers are set.
+    assert len(browser.last_tab.commands) == 3
 
 
 def test_navigate_timeout_includes_browser_acquisition(
@@ -751,7 +978,7 @@ def test_navigate_returns_rendered_page_without_semantic_classification(
             # its whole budget (half the timeout) before giving up. The exact
             # budget is irrelevant to what this asserts -- that the transport
             # returns the page rather than classifying it -- so keep it cheap.
-            timeout_sec=0.2,
+            timeout_sec=0.02,
             headless=True,
             on_redirect=None,
         )
@@ -866,7 +1093,7 @@ def test_navigate_gives_up_on_an_unclearable_challenge(
             egress="e",
             # Deliberately small: giving up is what this asserts, and the budget
             # is real time. A production-sized 30s would sleep 15s per run.
-            timeout_sec=0.2,
+            timeout_sec=0.02,
             headless=True,
             on_redirect=None,
         )
@@ -905,7 +1132,7 @@ def test_navigate_closes_tab_after_returning_rendered_page(
             "https://walled.example/",
             profile_dir=_PROFILE,
             egress="e",
-            timeout_sec=0.2,  # An unclearable wall; see the note above.
+            timeout_sec=0.02,  # An unclearable wall; see the note above.
             headless=True,
             on_redirect=None,
         )
@@ -938,11 +1165,21 @@ def test_navigate_matches_exact_host_cookie(
 # -- _navigate: redirect callback --------------------------------------------
 
 
-def test_navigate_fires_on_redirect_when_final_url_differs(
+def test_navigate_fires_on_redirect_per_hop_not_on_the_landing_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The callback reports each hop BEFORE it is followed, not the final URL.
 
-    browser = _FakeBrowser(href="https://example.com/landing")
+    Reading ``document.location.href`` after the load could only ever report
+    where the page ENDED UP -- one notification, after every hop had already
+    been fetched, which is unusable for the abort ``ObserveParams`` promises.
+    The hops themselves are now observed, so a fetch that merely lands
+    elsewhere without an intercepted document request reports nothing.
+    """
+    browser = _FakeBrowser(
+        href="https://example.com/landing",
+        paused_events=[_request_paused("https://example.com/landing")],
+    )
     _patch_pool(monkeypatch, browser)
     seen: list[str] = []
     asyncio.run(
@@ -1085,7 +1322,7 @@ def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> Non
 
         async def go() -> None:
             first = await pool.browser("e", _PROFILE, headless=True)
-            cast("Any", first).stopped = True  # simulate Chrome exit
+            cast(Any, first).stopped = True  # simulate Chrome exit
             second = await pool.browser("e", _PROFILE, headless=True)
             assert second is not first
 

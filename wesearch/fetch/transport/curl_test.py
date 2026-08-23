@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-from typing import TYPE_CHECKING, Any, cast, override
+from typing import Any, cast, override
 from unittest.mock import Mock, patch
 
 import importlib
@@ -17,6 +17,7 @@ from curl_cffi import (
     CurlOpt,
     requests as cc_requests,
 )
+from curl_cffi.requests import Response
 
 import pytest
 
@@ -47,10 +48,6 @@ import wesearch.fetch.transport.curl as curl_mod
 
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
-
-
-if TYPE_CHECKING:
-    from curl_cffi.requests import Response
 
 
 # Captured before any fixture stubs it, so the pool-locking tests can invoke the
@@ -680,7 +677,7 @@ class TestSeedSessionJar:
         # RFC 6265bis: a __Secure-/__Host- prefixed cookie is only valid Secure;
         # seeding it without secure=True made curl_cffi emit a CurlCffiWarning
         # (which the live Google-search integration path surfaced as a failure).
-        session = cast("cc_requests.Session[Response]", cc_requests.Session())
+        session = cast(cc_requests.Session[Response], cc_requests.Session())
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error")

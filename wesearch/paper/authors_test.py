@@ -57,6 +57,27 @@ class TestAuthors:
             listing = author_papers("1", limit=None, year_from=2020)
         assert [r.title for r in listing.records] == ["new"]
 
+    def test_author_papers_excludes_a_bool_year(self) -> None:
+        # ``bool`` subclasses ``int``, so ``isinstance(True, int)`` admitted a
+        # JSON ``true`` as a publication year and then compared it as 1.
+        entries: list[MutableJSON] = [
+            {"title": "real", "year": 2024},
+            {"title": "bogus", "year": True},
+        ]
+
+        def fake(
+            author_id: str,
+            *,
+            limit: int | None,
+            keep: Callable[[MutableJSON], bool],
+        ) -> Page:
+            del author_id, limit
+            return Page(entries=[e for e in entries if keep(e)], complete=True)
+
+        with patch.object(s2, "author_papers", side_effect=fake):
+            listing = author_papers("1", limit=None, year_from=1, year_to=9999)
+        assert [r.title for r in listing.records] == ["real"]
+
     def test_author_papers_no_filter_keeps_all(self) -> None:
         entries: list[MutableJSON] = [{"title": "a"}, {"title": "b"}]
 

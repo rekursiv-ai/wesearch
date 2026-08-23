@@ -181,7 +181,7 @@ def _download_records() -> list[object]:
     parsed: object = json.loads(gzip.decompress(body))
     if not isinstance(parsed, list):
         raise RuntimeError(f"expected JSON array from {url}; upstream shape changed?")  # noqa: TRY004
-    return cast("list[object]", parsed)
+    return cast(list[object], parsed)
 
 
 def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[str]:
@@ -191,7 +191,7 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
     for record in records:
         if not isinstance(record, dict):
             continue
-        record = cast("dict[str, object]", record)
+        record = cast(dict[str, object], record)
         ua = record.get("userAgent")
         device = record.get("deviceCategory")
         if (

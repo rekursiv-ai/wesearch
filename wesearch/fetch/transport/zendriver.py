@@ -42,8 +42,10 @@ import time
 import warnings
 
 from wesearch.fetch.challenge import classify_challenge
+from wesearch.fetch.common import pinned_host
 from wesearch.lib.userdirs import data_dir
 from wesearch.ratelimit import clear_domain_cooldowns
+from wesearch.types.params import Trust
 
 
 if TYPE_CHECKING:
@@ -108,7 +110,7 @@ class _PoolControlHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         if self.rfile.readline(64) != b"release\n":
             return
-        cast("_PoolControlServer", self.server).release()
+        cast(_PoolControlServer, self.server).release()
 
 
 def _control_address(profile_dir: Path, platform: str = sys.platform) -> str:
@@ -237,6 +239,7 @@ def fetch_zendriver(
     headless: bool = True,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
+    trust: Trust = "untrusted",
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
     """Fetch ``url`` in a pooled headless Chrome; return its body and cookies.
@@ -255,8 +258,14 @@ def fetch_zendriver(
       headless: Run Chrome headless (the default); ``False`` opens a window.
       headers: Extra headers applied to this tab before navigation.
       cookies: Cookies seeded for ``url`` before navigation.
-      on_redirect: Called with the final URL when navigation lands somewhere
-        other than ``url`` (a redirect); observational.
+      trust: Provenance of the URL. Under ``"untrusted"`` EVERY request the tab
+        makes -- the navigation, each redirect hop Chrome follows on its own,
+        and each subresource -- is validated to a public address before the
+        socket opens. Required rather than defaulted at the call site because a
+        transport that cannot express the policy cannot be held to it, which is
+        how the browser leg came to check only the caller's own URL.
+      on_redirect: Called with each document hop before it is followed; raise to
+        abort it.
 
     Returns:
       result: The rendered body and the browser's cookies for the URL's domain.
@@ -271,6 +280,7 @@ def fetch_zendriver(
             headless=headless,
             headers=headers,
             cookies=cookies,
+            trust=trust,
             on_redirect=on_redirect,
         )
     )
@@ -373,10 +383,13 @@ async def _navigate_tab(
     url: str,
     *,
     headers: dict[str, str] | None = None,
+    trust: Trust = "untrusted",
+    on_redirect: Callable[[str], None] | None = None,
 ) -> zendriver.Tab:
-    """Open a blank tab, apply headers, then navigate normally."""
+    """Open a blank tab, arm the per-request guard, apply headers, navigate."""
     tab = await browser.get("about:blank", new_tab=True)
     try:
+        await _guard_requests(tab, url, trust=trust, on_redirect=on_redirect)
         if headers:
             await tab.send(zendriver.cdp.network.enable())
             await tab.send(
@@ -390,6 +403,112 @@ async def _navigate_tab(
         await tab.close()
         raise
     return tab
+
+
+async def _guard_requests(
+    tab: zendriver.Tab,
+    url: str,
+    *,
+    trust: Trust,
+    on_redirect: Callable[[str], None] | None,
+) -> None:
+    """Validate every request this tab makes BEFORE Chrome opens the socket.
+
+    The header transports re-validate each redirect hop (``curl.py`` and
+    ``stdlib.py`` both call :func:`pinned_host` per hop) because
+    :func:`wesearch.fetch.common.pinned_host` states the rule: a redirect
+    target is a URL like any other, and skipping the re-check is the classic
+    SSRF bypass. Chrome follows redirects ITSELF, so validating only the URL the
+    caller passed left every subsequent hop -- and every subresource -- reaching
+    the network with nothing watching. A public URL redirecting to
+    ``169.254.169.254`` or loopback was fetched, and the transport learned of it
+    only after the response had already been read.
+
+    ``Fetch.requestPaused`` is the one seam that runs before the connection, so
+    the same ``pinned_host`` that guards curl guards Chrome, and ``on_redirect``
+    regains the pre-follow abort :class:`~wesearch.types.params.ObserveParams`
+    documents. A rejected request is failed with ``AccessDenied`` rather than
+    silently continued: Chrome surfaces that as a navigation error, which is the
+    honest outcome for a target policy forbids.
+    """
+    origin_url = url
+    # Captured here, where a running loop is guaranteed: zendriver invokes the
+    # handler from its own connection thread, which has no running loop of its
+    # own, so a ``get_running_loop`` inside the callback raises.
+    loop = asyncio.get_running_loop()
+
+    def on_paused(event: object, *_unused: object) -> None:
+        # Two-arg tolerant and isinstance-guarded for the same reasons as
+        # ``_main_frame_navigations``: zendriver retries a one-arg callback
+        # through an exception path, and dispatches by ``type(event)``.
+        if not isinstance(event, zendriver.cdp.fetch.RequestPaused):
+            return
+        target = event.request.url
+        # Interception is scoped to documents (see the pattern below), so every
+        # event here is a navigation; only a CHANGE of URL is a redirect the
+        # caller should hear about.
+        is_hop = target != origin_url
+        try:
+            pinned_host(target, trust)
+            if is_hop and on_redirect is not None:
+                on_redirect(target)
+        except Exception:  # noqa: BLE001 -- any refusal aborts the request.
+            # ``on_redirect`` is documented as "raise to abort", so its
+            # exception is a decision, not a fault, and is handled identically
+            # to a failed host validation.
+            _dispatch(loop, tab, _fail(event.request_id))
+            return
+        _dispatch(loop, tab, _continue(event.request_id))
+
+    event_type = zendriver.cdp.fetch.RequestPaused
+    register = cast(
+        "Callable[[type[object], Callable[..., None]], None]", tab.add_handler
+    )
+    register(event_type, on_paused)
+    # DOCUMENT requests only. Intercepting everything pauses each subresource
+    # until this handler answers, and the answer costs a DNS resolution on
+    # zendriver's connection thread -- measured as a page that never finished
+    # loading (Google's live fetch timed out waiting for readyState). Documents
+    # are also the whole SSRF surface: a redirect chain is documents, and a
+    # subresource cannot redirect the NAVIGATION anywhere.
+    pattern = zendriver.cdp.fetch.RequestPattern(
+        url_pattern="*",
+        resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
+        request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
+    )
+    await tab.send(zendriver.cdp.fetch.enable(patterns=[pattern]))
+
+
+def _fail(request_id: object) -> object:
+    """The CDP verb refusing one intercepted request."""
+    return zendriver.cdp.fetch.fail_request(
+        cast("Any", request_id), zendriver.cdp.network.ErrorReason.ACCESS_DENIED
+    )
+
+
+def _continue(request_id: object) -> object:
+    """The CDP verb releasing one intercepted request."""
+    return zendriver.cdp.fetch.continue_request(cast("Any", request_id))
+
+
+def _dispatch(
+    loop: asyncio.AbstractEventLoop, tab: zendriver.Tab, command: object
+) -> None:
+    """Send a CDP command from the synchronous event-handler thread.
+
+    The handler is invoked by zendriver's callback machinery, which is not a
+    coroutine context, so the command is scheduled on the tab's own loop rather
+    than awaited here. A handler that blocked on the send would deadlock the
+    connection it is trying to answer.
+    """
+    coroutine = tab.send(cast("Any", command))
+    if loop.is_closed():
+        coroutine.close()  # Nothing left to answer; do not warn on a stray task.
+        return
+    # ``call_soon_threadsafe``, not ``create_task``: the callback runs on
+    # zendriver's connection thread, and creating a task on another thread's
+    # loop is not safe.
+    loop.call_soon_threadsafe(lambda: loop.create_task(coroutine))
 
 
 def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
@@ -431,7 +550,7 @@ def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
     # is the narrowest fix, and it keeps ``event.frame.parent_id`` checked above.
     event_type = zendriver.cdp.page.FrameNavigated
     register = cast(
-        "Callable[[type[object], Callable[..., None]], None]", tab.add_handler
+        Callable[[type[object], Callable[..., None]], None], tab.add_handler
     )
     register(event_type, on_navigated)
     return navigated
@@ -506,6 +625,7 @@ async def _navigate(
     headless: bool,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
+    trust: Trust = "untrusted",
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
     """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies.
@@ -534,18 +654,24 @@ async def _navigate(
                     for name, value in cookies.items()
                 ]
             )
-        tab = await _navigate_tab(browser, url, headers=headers)
+        tab = await _navigate_tab(
+            browser, url, headers=headers, trust=trust, on_redirect=on_redirect
+        )
         try:
             # Half the overall budget: the settle poll must be able to give up
             # and still leave time to harvest cookies and return the wall, so a
             # blocked page surfaces its BotDetectionError instead of a timeout.
             body = await _settled_content(tab, budget_sec=timeout_sec / 2)
             final_url = cast("str", await tab.evaluate("document.location.href")) or url
-            if on_redirect is not None and final_url != url:
-                on_redirect(final_url)
             # Cookies are browser-wide (shared jar), so harvest before closing the
             # tab; the closed tab's cookies persist in the profile regardless.
-            cookies = await _domain_cookies(browser, url)
+            #
+            # Keyed on the FINAL url, not the requested one: a cross-origin
+            # redirect seats the target's cookies, and filtering by the source
+            # host dropped exactly the cookies a following fetch to the target
+            # needs. ``on_redirect`` already fired per hop in the guard, before
+            # each was followed.
+            cookies = await _domain_cookies(browser, final_url)
         finally:
             await tab.close()
     return BrowserResult(body=_unwrap_viewer(body).encode(), cookies=cookies)
