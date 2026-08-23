@@ -410,7 +410,7 @@ ignore = [
     "S301",    # Pickle usage.
     "T201",    # Print found.
 ]
-"{**/docs/**,**/scripts/**,loop/tools/**,website/**}" = [
+"{**/docs/**,**/scripts/**,website/**}" = [
     "INP001",  # Standalone example scripts.
     "T201",    # Print found. (Eval scripts use print for output.)
 ]

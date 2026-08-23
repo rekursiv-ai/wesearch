@@ -198,6 +198,38 @@ class TestApplyRedirect:
         assert headers.get("Cookie") == "SID=x"
         assert headers.get("sec-ch-ua-arch") == '"x86"'
 
+    @pytest.mark.parametrize("name", ["Authorization", "authorization"])
+    def test_cross_origin_drops_authorization(self, name: str) -> None:
+        """A credential is origin-bound exactly like a cookie.
+
+        Forwarding it hands the source origin's secret to whatever host answered
+        the hop. Both casings: HTTP field names are case-insensitive.
+        """
+        headers, _m, _b = apply_redirect(
+            "https://a.com/1",
+            {name: "Bearer secret", "Accept": "*/*"},
+            "GET",
+            body=None,
+            status=307,
+            redirect_url="https://evil.example/2",
+        )
+
+        assert not any(k.lower() == "authorization" for k in headers)
+        assert headers.get("Accept") == "*/*"
+
+    def test_same_origin_keeps_authorization(self) -> None:
+        """A same-origin hop is still the origin the credential belongs to."""
+        headers, _m, _b = apply_redirect(
+            "https://a.com/1",
+            {"Authorization": "Bearer secret"},
+            "GET",
+            body=None,
+            status=307,
+            redirect_url="https://a.com/2",
+        )
+
+        assert headers.get("Authorization") == "Bearer secret"
+
 
 class TestDecompress:
     def test_gzip(self) -> None:

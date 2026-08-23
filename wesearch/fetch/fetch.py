@@ -251,10 +251,7 @@ class _ResponseLearner:
     everything observed.
     """
 
-    def __init__(
-        self, *, url: str, caller: Callable[[int, dict[str, str]], None] | None
-    ) -> None:
-        self._url = url
+    def __init__(self, *, caller: Callable[[int, dict[str, str]], None] | None) -> None:
         self._caller = caller
         self._cookies: dict[str, dict[str, str]] = {}
         self._accept_ch: dict[str, frozenset[str]] = {}
@@ -337,7 +334,7 @@ class _Request:
             resolved = "zendriver"
         if resolved != p.policy.transport:
             p = replace(p, policy=replace(p.policy, transport=resolved))
-        learner = _ResponseLearner(url=self.url, caller=p.observe.on_response)
+        learner = _ResponseLearner(caller=p.observe.on_response)
         request = replace(self, params=p, observer=learner.observe)
         seeded_cookies = {
             **self.session.cookies_for(self.url),
@@ -410,6 +407,9 @@ def _fetch_with_identity(
         # is bot-blocked -- the one case the browser can clear that curl cannot.
         # A non-block failure (404, timeout) propagates: the browser would not
         # help and must not silently pay Chrome's launch cost.
+        #
+        # Up to TWO curl attempts: the identity path below retries once against
+        # a fresh egress, which is what clears a block caused by a VPN roll.
         try:
             return _fetch_with_identity(
                 replace(

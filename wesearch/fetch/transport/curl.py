@@ -357,8 +357,21 @@ def fetch_curl(
         # A keyless request has no pooled session to have been pinned at build
         # time, so it validates here. Validation is per hop: a redirect can
         # point at a private address, which is the classic SSRF bypass.
+        #
+        # The resolved IP is pinned, not merely checked: discarding it leaves
+        # curl to resolve again, which is the DNS-rebinding window. ``RESOLVE``
+        # is per host:port, so the pin names this hop's port.
+        one_shot_options: dict[int, list[str]] = {}
         if session is None:
-            pinned_host(loop.url, trust)
+            pin = pinned_host(loop.url, trust)
+            if pin is not None:
+                parsed = urlparse(loop.url)
+                pin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                one_shot_options = {
+                    curl_cffi.CurlOpt.RESOLVE: [
+                        f"{pin.host}:{pin_port}:{bracket_ipv6(pin.ip)}"
+                    ]
+                }
         try:
             verb = cast(HttpMethod, loop.method)  # curl types verb as a Literal.
             resp = (
@@ -380,6 +393,7 @@ def fetch_curl(
                     impersonate=impers,
                     timeout=timeout,
                     allow_redirects=False,
+                    curl_options=one_shot_options,
                 )
             )
         except curl_cffi.CurlError as e:
