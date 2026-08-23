@@ -199,6 +199,6 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
 
 
 if __name__ == "__main__":
-    from wesearch.lib.testing import test_main
+    from wesearch.lib.testing.main import test_main
 
     test_main(__file__)
