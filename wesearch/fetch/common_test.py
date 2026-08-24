@@ -17,6 +17,7 @@ from wesearch.fetch.common import (
     apply_redirect,
     bracket_ipv6,
     decompress,
+    origin,
     public_host,
     rewrite_origin,
 )
@@ -105,6 +106,47 @@ class TestPublicHost:
         # The transport re-appends any port itself, so a port here doubles it.
         with patch("socket.getaddrinfo", return_value=_addrinfo("1.2.3.4")):
             assert public_host("example.com:8443").host == "example.com"
+
+
+class TestOrigin:
+    """One URL's origin must have ONE spelling.
+
+    The raw ``scheme://netloc`` kept host case, userinfo, and an explicit
+    default port, so four equivalent URLs produced four keys. This value is the
+    cookie-jar key, the Accept-CH key, and the browser leg's same-origin test:
+    a second spelling fragments the jar and strips a credential from a hop that
+    never left the origin.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://EXAMPLE.com/a",
+            "https://example.com:443/a",
+            "https://User:pw@example.com/a",
+            "https://User:pw@EXAMPLE.com:443/a",
+        ],
+    )
+    def test_equivalent_urls_share_one_origin(self, url: str) -> None:
+        assert origin(url) == "https://example.com"
+
+    def test_a_non_default_port_is_part_of_the_origin(self) -> None:
+        assert origin("https://example.com:8443/a") == "https://example.com:8443"
+        assert origin("http://example.com:8080/a") == "http://example.com:8080"
+
+    def test_an_ipv6_host_stays_bracketed(self) -> None:
+        assert origin("https://[2606:4700::1]/x") == "https://[2606:4700::1]"
+
+    def test_a_credential_survives_a_canonically_same_origin_hop(self) -> None:
+        headers, _m, _b = apply_redirect(
+            "https://User:pw@EXAMPLE.com:443/1",
+            {"Authorization": "Bearer secret"},
+            "GET",
+            body=None,
+            status=307,
+            redirect_url="https://example.com/2",
+        )
+        assert headers.get("Authorization") == "Bearer secret"
 
 
 class TestRewriteOrigin:

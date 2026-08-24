@@ -612,6 +612,35 @@ def test_navigate_returns_body_and_domain_cookies(
     assert browser.last_tab.closed is True
 
 
+def test_navigate_reports_the_url_its_cookies_belong_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The result must name the origin its cookies were harvested for.
+
+    Cookies are keyed to the FINAL url, because a cross-origin redirect seats
+    the target's. Returning them without saying so left the caller filing
+    ``b.example``'s session cookie under ``a.example`` -- and sending it back
+    to ``a.example`` on the next fetch.
+    """
+    browser = _FakeBrowser(
+        href="https://b.example/landing",
+        cookies=[_FakeCookie(name="B_SESSION", value="secret", domain="b.example")],
+    )
+    _patch_pool(monkeypatch, browser)
+    result = asyncio.run(
+        _navigate(
+            "https://a.example/start",
+            profile_dir=_PROFILE,
+            egress="1.2.3.4",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+    assert result.cookies == {"B_SESSION": "secret"}
+    assert result.final_url == "https://b.example/landing"
+
+
 def test_navigate_unwraps_chromes_json_viewer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -700,17 +729,59 @@ def test_navigate_leaves_real_html_alone(
     assert result.body == content.encode()
 
 
-def _request_paused(url: str) -> zendriver.cdp.fetch.RequestPaused:
+def _continued_headers(tab: _FakeTab) -> dict[str, str]:
+    """Return the headers the guard released a continued request with."""
+    payload = next(
+        (
+            c
+            for c in tab.wire_commands
+            if str_val(c.get("method")) == "Fetch.continueRequest"
+        ),
+        None,
+    )
+    assert payload is not None, "the request was never continued"
+    entries = list_val(dict_val(payload.get("params")).get("headers"))
+    return {
+        str_val(dict_val(entry).get("name")).lower(): str_val(
+            dict_val(entry).get("value")
+        )
+        for entry in entries
+    }
+
+
+def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
+    """Return the headers installed tab-wide via ``setExtraHTTPHeaders``."""
+    payload = next(
+        (
+            c
+            for c in tab.wire_commands
+            if str_val(c.get("method")) == "Network.setExtraHTTPHeaders"
+        ),
+        None,
+    )
+    if payload is None:
+        return {}
+    installed = dict_val(dict_val(payload.get("params")).get("headers"))
+    return {name.lower(): str_val(value) for name, value in installed.items()}
+
+
+def _request_paused(
+    url: str, headers: dict[str, str] | None = None
+) -> zendriver.cdp.fetch.RequestPaused:
     """A real ``RequestPaused`` for a main-frame document request.
 
     The genuine CDP dataclass, not a look-alike: the guard filters on
     ``isinstance``, so a stand-in would satisfy the fake and be ignored in
     production -- the direction a test must never fail in.
+
+    ``headers`` are the ones Chrome reports ALREADY on the paused request,
+    which include whatever ``set_extra_http_headers`` installed on the tab --
+    the replay this guard exists to trim.
     """
     request = zendriver.cdp.network.Request(
         url=url,
         method="GET",
-        headers=zendriver.cdp.network.Headers({}),
+        headers=zendriver.cdp.network.Headers(headers or {}),
         initial_priority=zendriver.cdp.network.ResourcePriority.HIGH,
         referrer_policy="no-referrer",
     )
@@ -752,6 +823,7 @@ class TestBrowserHonorsTrustPerHop:
         url: str = "https://public.example/start",
         trust: Trust = "untrusted",
         on_redirect: Any = None,
+        headers: dict[str, str] | None = None,
     ) -> _FakeTab:
         """Drive one navigation and return the tab that served it."""
         asyncio.run(
@@ -762,11 +834,101 @@ class TestBrowserHonorsTrustPerHop:
                 timeout_sec=5.0,
                 headless=True,
                 trust=trust,
+                headers=headers,
                 on_redirect=on_redirect,
             )
         )
         assert browser.last_tab is not None
         return browser.last_tab
+
+    def test_caller_headers_do_not_cross_an_origin_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caller credential must not follow a redirect to another origin.
+
+        ``set_extra_http_headers`` is TAB-scoped, so Chrome re-sends whatever
+        was installed on every hop that tab makes. An ``Authorization`` seeded
+        for the requested origin therefore reached a redirect target the caller
+        never chose. The header transports already refuse this: ``common.py``
+        rewrites ``Origin`` cross-origin for the same reason.
+        """
+        # Chrome reports only what was installed tab-wide, which is the
+        # origin-free subset; the credential is attached by the guard, per hop.
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused("https://evil.example/steal", {"accept": "text/html"})
+            ]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(
+            browser,
+            headers={"Authorization": "Bearer secret", "Accept": "text/html"},
+        )
+        sent = _continued_headers(tab)
+        assert "authorization" not in sent
+        # A non-credential header is not the hazard and must still travel.
+        assert sent.get("accept") == "text/html"
+
+    def test_caller_headers_survive_a_same_origin_hop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same origin is what the header was seeded FOR; stripping there would
+        # break every authenticated fetch that redirects internally.
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("https://public.example/next")]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser, headers={"Authorization": "Bearer secret"})
+        assert "authorization" in _continued_headers(tab)
+
+    def test_origin_bound_headers_are_never_installed_tab_wide(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An origin-bound header must be attached per hop, never tab-wide.
+
+        ``set_extra_http_headers`` applies to EVERY request the tab makes --
+        subresources included, and those are not intercepted (interception is
+        document-scoped, because pausing each subresource for a DNS resolution
+        stalled the page). Trimming at the guard therefore protected redirect
+        hops and nothing else: a cross-origin image or XHR still carried the
+        caller's ``Authorization``. Installing only the origin-free headers
+        removes the leak at its source; the guard re-attaches the rest to the
+        document hops entitled to them.
+        """
+        browser = _FakeBrowser()
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(
+            browser,
+            headers={"Authorization": "Bearer secret", "Accept": "text/html"},
+        )
+        installed = _extra_http_headers(tab)
+        assert "authorization" not in installed
+        assert installed.get("accept") == "text/html"
+
+    def test_origin_bound_headers_use_the_shared_redirect_contract(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The browser leg must drop what the header transports drop.
+
+        ``common.apply_redirect`` drops every origin-bound header cross-origin,
+        and that set includes the extended client hints -- not just credentials.
+        A browser leg with its own shorter list leaks the source origin's
+        fingerprint to a redirect target that the curl leg would never tell.
+        """
+        seeded = {"Sec-CH-UA-Model": "Pixel", "Accept": "text/html"}
+        # Asserted on the SAME-origin hop, which is where the two candidate
+        # sets differ observably: a hint treated as origin-free is installed
+        # tab-wide (so it reaches every origin and never appears here), while
+        # one treated as origin-bound is withheld and re-attached exactly here.
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused("https://public.example/next", {"accept": "text/html"})
+            ]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser, headers=seeded)
+        assert _extra_http_headers(tab).get("sec-ch-ua-model") is None
+        assert _continued_headers(tab).get("sec-ch-ua-model") == "Pixel"
 
     def test_private_redirect_target_is_refused_before_it_is_fetched(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1484,7 +1646,7 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
         def run(self, coro: Any, *, timeout_sec: float = 0) -> BrowserResult:
             coro.close()
             waits.append(timeout_sec)
-            return BrowserResult(body=b"", cookies={})
+            return BrowserResult(body=b"", cookies={}, final_url="")
 
     pool = _RecordingPool()
     monkeypatch.setattr(fz_mod, "_pool", lambda: pool)

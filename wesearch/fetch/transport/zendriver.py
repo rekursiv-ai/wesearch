@@ -20,7 +20,7 @@ profile -- to debug a fetch that errored, or to seat a login.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from html import unescape
 from pathlib import Path
@@ -30,6 +30,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 import asyncio
 import atexit
 import hashlib
+import inspect
 import logging
 import os
 import re
@@ -42,7 +43,7 @@ import time
 import warnings
 
 from wesearch.fetch.challenge import classify_challenge
-from wesearch.fetch.common import pinned_host
+from wesearch.fetch.common import apply_redirect, origin, pinned_host
 from wesearch.lib.userdirs import data_dir
 from wesearch.ratelimit import clear_domain_cooldowns
 from wesearch.types.params import Trust
@@ -223,13 +224,18 @@ class BrowserResult(NamedTuple):
 
     Attributes:
       body: The rendered ``document`` HTML, UTF-8 encoded.
-      cookies: Cookies the browser holds for the fetched URL's domain
+      cookies: Cookies the browser holds for ``final_url``'s domain
         (``name -> value``), for the caller to persist and thread onward.
+      final_url: Where the navigation ENDED UP, which is the origin the cookies
+        belong to. Reported rather than left implicit: Chrome follows its own
+        redirects, so a caller that assumed the requested URL filed the
+        target's session cookie under the source and sent it back there.
 
     """
 
     body: bytes
     cookies: dict[str, str]
+    final_url: str
 
 
 def fetch_zendriver(
@@ -394,12 +400,24 @@ async def _navigate_tab(
     """Open a blank tab, arm the per-request guard, apply headers, navigate."""
     tab = await browser.get("about:blank", new_tab=True)
     try:
-        await _guard_requests(tab, url, trust=trust, on_redirect=on_redirect)
-        if headers:
+        await _guard_requests(
+            tab, url, trust=trust, on_redirect=on_redirect, headers=headers
+        )
+        # Installed tab-wide are ONLY the headers no origin owns. An
+        # origin-bound one (a credential, an extended client hint) is attached
+        # by the guard, per document hop, to the origin entitled to it:
+        # ``set_extra_http_headers`` reaches every request the tab makes,
+        # including the cross-origin subresources the guard never sees.
+        ambient = {
+            name: value
+            for name, value in (headers or {}).items()
+            if name.lower() not in _origin_bound()
+        }
+        if ambient:
             await tab.send(zendriver.cdp.network.enable())
             await tab.send(
                 zendriver.cdp.network.set_extra_http_headers(
-                    zendriver.cdp.network.Headers(headers)
+                    zendriver.cdp.network.Headers(ambient)
                 )
             )
         await tab.get(url)
@@ -416,6 +434,7 @@ async def _guard_requests(
     *,
     trust: Trust,
     on_redirect: Callable[[str], None] | None,
+    headers: dict[str, str] | None = None,
 ) -> None:
     """Validate every DOCUMENT request this tab makes BEFORE Chrome connects.
 
@@ -465,7 +484,14 @@ async def _guard_requests(
             # to a failed host validation.
             _dispatch(loop, tab, _fail(event.request_id))
             return
-        _dispatch(loop, tab, _continue(event.request_id))
+        _dispatch(
+            loop,
+            tab,
+            _continue(
+                event.request_id,
+                _carried_headers(event.request.headers, headers, target, origin_url),
+            ),
+        )
 
     event_type = zendriver.cdp.fetch.RequestPaused
     register = cast(
@@ -493,9 +519,69 @@ def _fail(request_id: object) -> object:
     )
 
 
-def _continue(request_id: object) -> object:
-    """The CDP verb releasing one intercepted request."""
-    return zendriver.cdp.fetch.continue_request(cast("Any", request_id))
+def _continue(request_id: object, headers: list[object]) -> object:
+    """The CDP verb releasing one intercepted request with ``headers``."""
+    return zendriver.cdp.fetch.continue_request(
+        cast("Any", request_id), headers=cast("Any", headers)
+    )
+
+
+def _carried_headers(
+    request_headers: Mapping[str, str],
+    caller_headers: dict[str, str] | None,
+    target: str,
+    origin_url: str,
+) -> list[object]:
+    """Return this hop's headers: Chrome's own, plus the caller's when entitled.
+
+    An origin-bound header is never installed tab-wide (see
+    :func:`_navigate_tab`), so it must be attached HERE, and only for a hop that
+    stays on the origin it was seeded for.
+
+    Args:
+      request_headers: What Chrome already reports on the paused request.
+      caller_headers: The headers the caller asked this fetch to carry.
+      target: The URL this hop will fetch.
+      origin_url: The URL the caller named, fragment stripped.
+
+    Returns:
+      entries: The CDP header list this request continues with.
+
+    """
+    carried = dict(request_headers)
+    if not caller_headers or origin(target) != origin(origin_url):
+        return _header_entries(carried)
+    bound = _origin_bound()
+    return _header_entries(
+        carried
+        | {
+            name: value
+            for name, value in caller_headers.items()
+            if name.lower() in bound
+        }
+    )
+
+
+def _origin_bound() -> frozenset[str]:
+    """The header names a cross-origin hop may not carry.
+
+    Read off :func:`~wesearch.fetch.common.apply_redirect`'s own default
+    rather than restated: Chrome follows its own redirects, so this transport
+    applies the rule itself instead of through that function, and a second copy
+    is how the two legs came to disagree -- the browser leg dropped credentials
+    and kept the extended client hints the header leg drops.
+    """
+    default = inspect.signature(apply_redirect).parameters["origin_bound"].default
+    assert isinstance(default, frozenset)
+    return cast("frozenset[str]", default)
+
+
+def _header_entries(headers: Mapping[str, str]) -> list[object]:
+    """Render a header mapping as the CDP ``HeaderEntry`` list."""
+    return [
+        cast("object", zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
+        for name, value in headers.items()
+    ]
 
 
 def _dispatch(
@@ -695,7 +781,9 @@ async def _navigate(
             harvested = await _domain_cookies(browser, final_url)
         finally:
             await tab.close()
-    return BrowserResult(body=_unwrap_viewer(body).encode(), cookies=harvested)
+    return BrowserResult(
+        body=_unwrap_viewer(body).encode(), cookies=harvested, final_url=final_url
+    )
 
 
 def _unwrap_viewer(body: str) -> str:

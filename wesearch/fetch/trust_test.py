@@ -127,7 +127,7 @@ class TestBrowserUnderUntrusted:
 
         def browser(url: str, **_kw: Any) -> BrowserResult:
             reached.append(url)
-            return BrowserResult(body=b"<html>ok</html>", cookies={})
+            return BrowserResult(body=b"<html>ok</html>", cookies={}, final_url="")
 
         def walled(*_a: Any, **_kw: Any) -> bytes:
             # ``zendriver`` must never consult curl at all; ``curl-then-zendriver``
