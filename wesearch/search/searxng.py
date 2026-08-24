@@ -81,6 +81,7 @@ def searxng(
     categories: Literal["science"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[PaperResult]: ...
 
@@ -94,6 +95,7 @@ def searxng(
     categories: Literal["images"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[ImageResult]: ...
 
@@ -107,6 +109,7 @@ def searxng(
     categories: Literal["videos"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[VideoResult]: ...
 
@@ -120,6 +123,7 @@ def searxng(
     categories: Literal["news", "music"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[MediaResult]: ...
 
@@ -133,6 +137,7 @@ def searxng(
     categories: Literal["map"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[MapResult]: ...
 
@@ -146,6 +151,7 @@ def searxng(
     categories: Literal["it"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
@@ -159,6 +165,7 @@ def searxng(
     categories: Literal["files"],
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
@@ -172,6 +179,7 @@ def searxng(
     categories: SearxngCategory = ...,
     timeout_sec: float = ...,
     connect_timeout_sec: float = ...,
+    retries: int = ...,
     transport: Transport = ...,
 ) -> Sequence[SearchResult]: ...
 
@@ -184,6 +192,7 @@ def searxng(
     categories: SearxngCategory = "general",
     timeout_sec: float = 15.0,
     connect_timeout_sec: float = 3.0,
+    retries: int = 1,
     transport: Transport = "auto",
 ) -> Sequence[SearxngResult]:
     """Query a SearXNG instance and return parsed, typed JSON results.
@@ -216,6 +225,13 @@ def searxng(
         server-side, so that cost is a READ on this connection and is already
         covered by ``timeout_sec``. The handshake is to the instance itself --
         one hop, however many engines sit behind it.
+      retries: Retry attempts for a transient failure. Defaults to 1 because the
+        edge in front of an instance rate-limits a burst with a 429 +
+        Retry-After, which the retry loop already honors; without a budget a
+        throttled burst surfaces as a hard failure the advertised wait would
+        have cleared. Exposed, like ``duckduckgo``'s, because it MULTIPLIES
+        ``timeout_sec``: a caller that lowered the ceiling to bound a wedged
+        egress otherwise still pays ``(retries + 1)`` times what it asked for.
       transport: Retrieval transport; ``"auto"`` applies domain routing.
 
     Returns:
@@ -235,12 +251,8 @@ def searxng(
         f"{base_url}/search?{params}",
         request=RequestParams(
             content=ContentParams(headers=headers),
-            # A retry budget, because the edge in front of an instance rate-
-            # limits a burst with a 429 + Retry-After and the retry loop already
-            # honors that header. Without one, a throttled burst surfaces as a
-            # hard failure the advertised wait would have cleared.
             retry=RetryParams(
-                retries=1,
+                retries=retries,
                 timeout_sec=timeout_sec,
                 connect_timeout_sec=connect_timeout_sec,
             ),

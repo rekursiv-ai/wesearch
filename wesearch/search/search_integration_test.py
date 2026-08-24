@@ -165,8 +165,10 @@ def _query_once[T](
         ``retries=2``) one DuckDuckGo case took 94s against an unroutable
         egress, tripping the 60s pytest-timeout as a FAILURE rather than the
         availability skip it is. The HANDSHAKE ceiling is deliberately NOT set
-        here -- the library's ``connect_timeout_sec`` default already fails an
-        unroutable host in 3s, and a value restated here would drift from it.
+        here -- each BACKEND defaults it to 3s, which already fails an
+        unroutable host in a handshake, and a value restated here would drift
+        from theirs. (Not the library's: ``RetryParams.connect_timeout_sec``
+        defaults to ``None``, which shares ``timeout_sec``.)
 
     Returns:
       results: The backend's results, empty when it served none.
