@@ -58,6 +58,19 @@ def test_widget_marker_is_found_past_an_earlier_mention() -> None:
     assert classify_challenge(body) is PuzzleChallengeError
 
 
+def test_a_marker_on_the_script_tag_itself_is_structural() -> None:
+    # ``trk_jschal_js`` is a default Cloudflare marker and lives on the SCRIPT
+    # TAG, not in a div. Removing whole script ELEMENTS to hide their text also
+    # removed the opening tag's attributes, so the browser settle loop -- which
+    # calls this with ``on_success_body=True`` -- read the interstitial as the
+    # finished page and returned the wall.
+    body = (
+        '<script id="trk_jschal_js" '
+        'src="/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1"></script>'
+    )
+    assert classify_challenge(body, on_success_body=True) is CloudflareChallengeError
+
+
 def test_widget_markup_inside_a_script_is_content() -> None:
     # The tag scanner reads raw HTML, so a template literal or a string in JS
     # looks exactly like served markup. A script's contents are not the DOM.

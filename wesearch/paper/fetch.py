@@ -207,5 +207,4 @@ def download(
     body = _fetch_open_access(kind, canonical, oa_url=oa_url, looked_up=oa_looked_up)
     if body is not None:
         return body, "open_access"
-
     raise NotFoundError(f"No source returned a PDF for {kind}:{canonical}.")

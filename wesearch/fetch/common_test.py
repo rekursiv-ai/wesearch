@@ -137,6 +137,14 @@ class TestOrigin:
     def test_an_ipv6_host_stays_bracketed(self) -> None:
         assert origin("https://[2606:4700::1]/x") == "https://[2606:4700::1]"
 
+    def test_the_rewritten_origin_header_is_the_canonical_one(self) -> None:
+        # ``apply_redirect`` decides same-origin with ``origin()`` and then
+        # writes the header with ``rewrite_origin()``. Two spellings of one
+        # origin means the value announced to the target disagrees with the
+        # value the hop was judged against.
+        out = rewrite_origin({"Origin": "https://a.com"}, "https://b.com:443/x")
+        assert out["Origin"] == origin("https://b.com:443/x")
+
     def test_a_credential_survives_a_canonically_same_origin_hop(self) -> None:
         headers, _m, _b = apply_redirect(
             "https://User:pw@EXAMPLE.com:443/1",
