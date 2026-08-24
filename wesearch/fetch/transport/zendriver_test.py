@@ -1280,6 +1280,35 @@ def test_navigate_fires_on_redirect_per_hop_not_on_the_landing_url(
     assert seen == ["https://example.com/landing"]
 
 
+def test_navigate_treats_fragment_only_difference_as_no_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fragment is never sent, so its absence on the wire is not a hop.
+
+    ``on_redirect`` is documented raise-to-abort, and Google's callback raises
+    on ``/sorry`` -- so a false hop on the initial navigation aborts an ordinary
+    fetch.
+    """
+    url = "https://example.com/page#section"
+    browser = _FakeBrowser(
+        href=url,
+        paused_events=[_request_paused("https://example.com/page")],
+    )
+    _patch_pool(monkeypatch, browser)
+    seen: list[str] = []
+    asyncio.run(
+        _navigate(
+            url,
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=seen.append,
+        )
+    )
+    assert seen == []
+
+
 def test_navigate_no_redirect_when_url_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

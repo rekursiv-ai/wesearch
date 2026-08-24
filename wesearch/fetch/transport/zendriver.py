@@ -25,7 +25,7 @@ from concurrent.futures import Future
 from html import unescape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast, override
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import asyncio
 import atexit
@@ -436,7 +436,9 @@ async def _guard_requests(
     silently continued: Chrome surfaces that as a navigation error, which is the
     honest outcome for a target policy forbids.
     """
-    origin_url = url
+    # Fragment stripped: it never reaches the wire, so the initial request would
+    # compare unequal and read as a redirect.
+    origin_url = urlunsplit(urlsplit(url)._replace(fragment=""))
     # Captured here, where a running loop is guaranteed: zendriver invokes the
     # handler from its own connection thread, which has no running loop of its
     # own, so a ``get_running_loop`` inside the callback raises.
