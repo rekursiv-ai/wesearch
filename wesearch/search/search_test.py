@@ -364,6 +364,15 @@ class TestSearchSearxng:
             searxng("q")
         assert mock.call_args.kwargs["request"].retry.retries >= 1
 
+    def test_a_caller_can_bound_the_retry_budget(self) -> None:
+        # ``retries`` multiplies ``timeout_sec``: this hardcodes 1, so a caller
+        # that lowered the ceiling to bound a wedged egress still pays twice
+        # what it asked for. ``duckduckgo`` exposes the knob; this did not, so
+        # the two backends answer the same question differently.
+        with _patch_searxng_fetch({"results": []}) as mock:
+            searxng("q", retries=0)
+        assert mock.call_args.kwargs["request"].retry.retries == 0
+
     def test_default_category_is_general(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q")
