@@ -51,6 +51,27 @@ def test_recaptcha_mentioned_in_prose_is_content() -> None:
     assert classify_challenge(body) is None
 
 
+def test_widget_marker_is_found_past_an_earlier_mention() -> None:
+    # Only the FIRST occurrence in a tag was examined, so a marker appearing in
+    # an unrelated attribute masked the real class that followed it.
+    body = '<div data-provider="hcaptcha" class="hcaptcha"></div>'
+    assert classify_challenge(body) is PuzzleChallengeError
+
+
+def test_widget_markup_inside_a_script_is_content() -> None:
+    # The tag scanner reads raw HTML, so a template literal or a string in JS
+    # looks exactly like served markup. A script's contents are not the DOM.
+    body = '<script>const t = `<div class="g-recaptcha"></div>`;</script>'
+    assert classify_challenge(body) is None
+
+
+def test_data_marker_in_a_url_is_content() -> None:
+    # Any marker beginning ``data-`` was accepted anywhere in a tag, so a link
+    # to documentation about the attribute read as a served widget.
+    assert classify_challenge('<a href="/docs/data-sitekey">API docs</a>') is None
+    assert classify_challenge('<div data-sitekey="x"></div>') is PuzzleChallengeError
+
+
 def test_success_body_captcha_widget_is_content() -> None:
     body = '<form><div class="g-recaptcha" data-sitekey="x"></div></form>'
     assert classify_challenge(body, on_success_body=True) is None
@@ -143,14 +164,48 @@ def test_http_error_uses_body_challenge() -> None:
     assert isinstance(error, PuzzleChallengeError)
 
 
-def test_http_error_uses_cloudflare_front_on_mitigation_status() -> None:
+def test_http_error_uses_cloudflare_mitigation_header() -> None:
+    # ``cf-mitigated: challenge`` is Cloudflare's own signal, documented as
+    # present on every challenge page type and carrying no other value.
+    # https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/
     error = classify_http_error(
         "https://x.com",
         403,
-        {"server": "cloudflare", "cf-ray": "a1"},
+        {"server": "cloudflare", "cf-ray": "a1", "cf-mitigated": "challenge"},
         b"Temporarily unavailable",
     )
     assert isinstance(error, CloudflareChallengeError)
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, b'{"error":"invalid API token"}'),
+        (403, b'{"message":"forbidden"}'),
+        (503, b"Service Temporarily Unavailable"),
+        (503, b'{"error":"upstream at capacity"}'),
+    ],
+)
+def test_cloudflare_fronted_origin_error_is_not_a_challenge(
+    status: int, body: bytes
+) -> None:
+    """A response Cloudflare PROXIES is the origin's, not Cloudflare's.
+
+    Every Cloudflare-fronted response carries ``server: cloudflare`` and a
+    ``cf-ray``, so those headers prove only that Cloudflare is in front -- never
+    that it authored the body. Treating them as proof made an expired API token
+    a bot wall, which sends the caller to the browser and PERMANENTLY pins the
+    domain to it (``fetch.py`` remembers the domain, and the routing list has no
+    expiry). That is the wedge the 1015 rate-limit fix already removed once.
+    """
+    error = classify_http_error(
+        "https://api.example/v1/x",
+        status,
+        {"server": "cloudflare", "cf-ray": "a1b2c3d4e5f6-SJC"},
+        body,
+    )
+    assert type(error) is FetchError
+    assert not isinstance(error, BotDetectionError)
 
 
 def test_http_error_preserves_plain_failure() -> None:

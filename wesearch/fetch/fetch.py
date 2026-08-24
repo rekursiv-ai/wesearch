@@ -33,7 +33,7 @@ from urllib.parse import unquote, urlencode, urlparse, urlsplit, urlunsplit
 import base64
 import functools
 import ipaddress
-import json as json_lib
+import json
 import logging
 import threading
 import time
@@ -595,10 +595,18 @@ def _send_via_zendriver(
         trust=request.params.policy.trust,
         on_redirect=request.params.observe.on_redirect,
     )
+    # Everything below is scoped to where the navigation LANDED, not to what the
+    # caller asked for: Chrome follows its own redirects, and a cross-origin hop
+    # seats the TARGET's cookies. Attributing those to the requested origin put
+    # b.example's session cookie in a.example's jar and profile, and the next
+    # fetch to a.example sent it there.
+    landed_url = result.final_url or request.url
+    landed_domain = urlparse(landed_url).hostname or ""
     if request.observer is not None:
         # Fold the harvested jar into the returned session (and the caller's
-        # on_response) as a synthesized Set-Cookie for this origin, so the
-        # session warms exactly as a header-level backend's would.
+        # on_response) as a synthesized Set-Cookie for the landed origin, so the
+        # session warms exactly as a header-level backend's would -- the per-hop
+        # observer files by responding URL for this same reason.
         #
         # Called even with an empty jar: ObserveParams.on_response promises a callback
         # for every response, and gating on cookies meant a successful
@@ -607,14 +615,14 @@ def _send_via_zendriver(
         # navigation response to this layer.
         synthesized = "\n".join(f"{k}={v}" for k, v in result.cookies.items())
         request.observer(
-            200, {"set-cookie": synthesized} if result.cookies else {}, request.url
+            200, {"set-cookie": synthesized} if result.cookies else {}, landed_url
         )
-    if egress is not None and request.domain and result.cookies:
+    if egress is not None and landed_domain and result.cookies:
         store = ProfileStore.shared()
-        if store.load(egress, request.domain) is None:
+        if store.load(egress, landed_domain) is None:
             store.save(
                 egress,
-                request.domain,
+                landed_domain,
                 Profile(
                     ua=draw_user_agent(
                         kind_for_impersonate(request.session.impersonate)
@@ -623,7 +631,7 @@ def _send_via_zendriver(
                 ),
             )
         else:
-            store.update_cookies(egress, request.domain, result.cookies)
+            store.update_cookies(egress, landed_domain, result.cookies)
     return result.body
 
 
@@ -838,7 +846,7 @@ def _fetch_once(
         body_bytes = urlencode(params.content.data).encode()
         body_content_type = "application/x-www-form-urlencoded"
     elif params.content.json is not NO_BODY:
-        body_bytes = json_lib.dumps(params.content.json).encode()
+        body_bytes = json.dumps(params.content.json).encode()
         body_content_type = "application/json"
     merged = _build_headers(
         method=params.content.method,

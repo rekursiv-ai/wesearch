@@ -1136,6 +1136,44 @@ class TestRedirectIdentityScoping:
         # a.com is the request origin; FOREIGN belongs to b.com, not a.com's jar.
         assert "FOREIGN" not in session.cookies
 
+    def test_browser_target_cookie_is_not_attributed_to_the_source(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """The browser leg must scope a redirect target's cookies like curl does.
+
+        Chrome follows its own redirects, so the transport harvests cookies for
+        where it LANDED. Filing them under the requested domain -- which the
+        caller has no way to know is wrong -- stored ``b.example``'s session
+        cookie in ``a.example``'s profile and jar, and the next fetch to
+        ``a.example`` sent it there.
+        """
+        store = ProfileStore(base_dir=tmp_path)
+
+        def fixed_egress(**_kw: Any) -> str:
+            return "9.9.9.9"
+
+        def landed_elsewhere(*_a: Any, **_kw: Any) -> BrowserResult:
+            return BrowserResult(
+                body=b"<html>ok</html>",
+                cookies={"B_SESSION": "secret"},
+                final_url="https://b.example/landing",
+            )
+
+        monkeypatch.setattr(ProfileStore, "shared", classmethod(lambda _cls: store))
+        monkeypatch.setattr(fetch_mod, "egress_ip", fixed_egress)
+        monkeypatch.setattr(
+            fetch_mod.zendriver_backend, "fetch_zendriver", landed_elsewhere
+        )
+        _body, session = fetch(
+            "https://a.example/start",
+            request=RequestParams(policy=PolicyParams(transport="zendriver")),
+        )
+        assert "B_SESSION" not in session.cookies_for("https://a.example/start")
+        assert session.cookies_for("https://b.example/landing") == {
+            "B_SESSION": "secret"
+        }
+        assert store.load("9.9.9.9", "a.example") is None
+
 
 class TestIdentityLayer:
     """``fetch`` transparently backs each call with a persistent per-(egress,
@@ -1517,7 +1555,7 @@ class TestBrowserBackend:
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch(
                 "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
-                return_value=BrowserResult(body=b"ok", cookies={}),
+                return_value=BrowserResult(body=b"ok", cookies={}, final_url=""),
             ),
         ):
             fetch(
@@ -1530,7 +1568,7 @@ class TestBrowserBackend:
         assert len(seen) == 1
 
     def test_browser_fetch_forwards_url_params_headers_and_cookies(self) -> None:
-        result = BrowserResult(body=b"ok", cookies={})
+        result = BrowserResult(body=b"ok", cookies={}, final_url="")
         with (
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch(
@@ -1564,7 +1602,11 @@ class TestBrowserBackend:
         # A browser fetch must return the rendered bytes AND fold the browser's
         # harvested cookies into the returned FetchSession, so a following curl
         # fetch on the same session is warm (the review's key requirement).
-        result = BrowserResult(body=b"<html>rendered</html>", cookies={"SID": "xyz"})
+        result = BrowserResult(
+            body=b"<html>rendered</html>",
+            cookies={"SID": "xyz"},
+            final_url="https://walled.example/x",
+        )
         store = Mock()
         with (
             patch.object(fetch_mod, "egress_ip", return_value=None),
@@ -1585,7 +1627,11 @@ class TestBrowserBackend:
         store.save.assert_not_called()
 
     def test_browser_fetch_persists_cookies_to_profile_store(self) -> None:
-        result = BrowserResult(body=b"ok", cookies={"cf_clearance": "tok"})
+        result = BrowserResult(
+            body=b"ok",
+            cookies={"cf_clearance": "tok"},
+            final_url="https://walled.example/x",
+        )
         store = Mock()
         store.load.return_value = None
         with (
@@ -1656,7 +1702,11 @@ class TestCurlThenZendriverBackend:
 
     def test_curl_then_zendriver_falls_back_to_zendriver_on_bot_block(self) -> None:
         # A curl BotDetectionError triggers the zendriver leg; its body is returned.
-        result = BrowserResult(body=b"rendered", cookies={"cf_clearance": "t"})
+        result = BrowserResult(
+            body=b"rendered",
+            cookies={"cf_clearance": "t"},
+            final_url="https://walled.example/",
+        )
         with (
             patch.object(fetch_mod, "_send_as", side_effect=CloudflareChallengeError()),
             patch.object(fetch_mod, "egress_ip", return_value=None),
@@ -1679,7 +1729,7 @@ class TestCurlThenZendriverBackend:
         remember.assert_called_once_with("walled.example")
 
     def test_success_body_challenge_falls_back_and_remembers_domain(self) -> None:
-        result = BrowserResult(body=b"rendered", cookies={})
+        result = BrowserResult(body=b"rendered", cookies={}, final_url="")
 
         def validate_body(body: bytes) -> None:
             if b"enablejs" in body:
@@ -1732,7 +1782,7 @@ class TestCurlThenZendriverBackend:
 
     def test_auto_reuses_persisted_zendriver_fallback(self) -> None:
         domains: set[str] = set()
-        result = BrowserResult(body=b"rendered", cookies={})
+        result = BrowserResult(body=b"rendered", cookies={}, final_url="")
         with (
             patch.object(
                 fetch_mod, "_send_as", side_effect=CloudflareChallengeError()

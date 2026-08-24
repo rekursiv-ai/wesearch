@@ -156,15 +156,25 @@ def origin(url: str) -> str:
     The Accept-CH opt-in key and the unit of same-origin cookie/hint scoping,
     shared by the fetch orchestrator and the redirect transform.
 
+    Canonical, not the raw netloc: RFC 6454 defines an origin as the
+    scheme/host/port TRIPLE, so ``https://User:pw@EXAMPLE.com:443/a`` and
+    ``https://example.com/a`` are one origin. Spelling them differently gave
+    one host several jar keys -- a cookie set under one was never sent back --
+    and made a hop that never left the origin read as cross-origin, which
+    strips the credential it was entitled to keep.
+
     Args:
       url: The URL to reduce to its origin.
 
     Returns:
-      origin: The ``scheme://netloc`` prefix of ``url``.
+      origin: The canonical ``scheme://host[:port]`` of ``url``.
 
     """
     parsed = urlparse(url)
-    return f"{parsed.scheme}://{parsed.netloc}"
+    # ``.hostname`` already lowercases and drops userinfo; ``host_header``
+    # owns the omit-the-default-port rule.
+    host = bracket_ipv6(parsed.hostname or "")
+    return f"{parsed.scheme}://{host_header(host, parsed.port, parsed.scheme)}"
 
 
 def decompress(body: bytes, encoding: str) -> bytes:
@@ -307,6 +317,10 @@ def apply_redirect(
     body: bytes | None,
     status: int,
     redirect_url: str,
+    origin_bound: frozenset[str] = frozenset(
+        {"cookie", "authorization"}
+        | {name.lower() for name in chrome_client_hints(major=1)}
+    ),
 ) -> tuple[dict[str, str], str, bytes | None]:
     """Compute the (headers, method, body) for the next hop of a redirect.
 
@@ -323,6 +337,25 @@ def apply_redirect(
       them.
 
     Casing-insensitive throughout.
+
+    Args:
+      current_url: The URL this hop is leaving.
+      headers: The headers the current hop carried.
+      method: The current HTTP method.
+      body: The current request body, if any.
+      status: The redirect status that triggered this hop.
+      redirect_url: The target of the redirect.
+      origin_bound: Lower-cased header names no cross-origin hop may carry.
+        ``authorization`` is a live secret rather than a fingerprint: callers
+        attach API keys and OAuth bearers, and userinfo synthesizes a Basic
+        credential. The browser leg passes the same value, because Chrome
+        follows its own redirects and applies the rule itself.
+
+    Returns:
+      headers: The headers for the next hop.
+      method: The method for the next hop.
+      body: The body for the next hop, or ``None``.
+
     """
     headers = rewrite_origin(headers, redirect_url)
     if status in (301, 302, 303) and method != "GET":
@@ -330,17 +363,5 @@ def apply_redirect(
         body = None
         headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
     if origin(current_url) != origin(redirect_url):
-        headers = {k: v for k, v in headers.items() if k.lower() not in _ORIGIN_BOUND}
+        headers = {k: v for k, v in headers.items() if k.lower() not in origin_bound}
     return headers, method, body
-
-
-# Headers scoped to the origin that set/opted-into them; dropped on a
-# cross-origin redirect so the source origin's credentials and extended client
-# hints never leak to the target (a real browser scopes all of them per origin).
-#
-# ``authorization`` is a live secret rather than a fingerprint: callers attach
-# API keys and OAuth bearers, and userinfo synthesizes a Basic credential.
-_ORIGIN_BOUND: frozenset[str] = frozenset(
-    {"cookie", "authorization"}
-    | {name.lower() for name in chrome_client_hints(major=1)}
-)
