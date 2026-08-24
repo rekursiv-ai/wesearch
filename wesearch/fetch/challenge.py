@@ -25,13 +25,6 @@ from wesearch.types.errors import (
 
 __all__ = ["classify_challenge", "classify_http_error"]
 
-_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.DOTALL)
-_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
-# Script and style bodies are TEXT, not markup: a template literal or a string
-# constant holding ``<div class="g-recaptcha">`` is indistinguishable from
-# served markup to a tag regex, and read as a challenge on ordinary pages.
-_SCRIPT_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.DOTALL)
-
 
 def classify_challenge(
     content: str | bytes,
@@ -138,33 +131,41 @@ def _text(content: str | bytes) -> str:
     return decoded.lower()
 
 
-def _page_title(text: str) -> str | None:
-    match = _TITLE_RE.search(text)
+def _page_title(
+    text: str,
+    *,
+    title: re.Pattern[str] = re.compile(r"<title[^>]*>(.*?)</title>", re.DOTALL),
+) -> str | None:
+    match = title.search(text)
     if match is None:
         return None
-    title = match[1]
-    assert isinstance(title, str)
-    return title.strip()
+    found = match[1]
+    assert isinstance(found, str)
+    return found.strip()
 
 
-def _tags(text: str) -> list[str]:
+def _tags(
+    text: str,
+    *,
+    tag: re.Pattern[str] = re.compile(r"<[^>]+>", re.DOTALL),
+    # Script and style CONTENTS are text, not markup: a template literal holding
+    # ``<div class="g-recaptcha">`` is indistinguishable from served markup to a
+    # tag regex, and read as a challenge on ordinary pages. Only the body
+    # between the tags is removed -- the tags themselves stay, because
+    # Cloudflare's own ``trk_jschal_js`` marker is an attribute ON the script
+    # element.
+    script_body: re.Pattern[str] = re.compile(
+        r"(<(script|style)\b[^>]*>).*?(</\2>)", re.DOTALL | re.IGNORECASE
+    ),
+) -> list[str]:
     """The rendered tags of ``text``, with script/style bodies removed."""
     # ``finditer`` + ``group(0)``, not ``findall``: typeshed types the latter's
     # result as ``list[Any]``, which erases the element type downstream.
-    return [match.group(0) for match in _TAG_RE.finditer(_SCRIPT_RE.sub("", text))]
+    return [match.group(0) for match in tag.finditer(script_body.sub(r"\1\3", text))]
 
 
 def _has_markup_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in tag for tag in _tags(text) for marker in markers)
-
-
-# A served CAPTCHA widget is a marker used as an element identity -- a class or
-# id value (``class="h-captcha"``) or the ``data-sitekey`` attribute -- inside a
-# rendered tag. A marker inside a ``src``/``href`` URL (``js.hcaptcha.com``) or a
-# JSON string (Wikipedia's ``mw.config`` names its edit-captcha backend) is a
-# mention, not a challenge; matching those raised a false PuzzleChallengeError on
-# ordinary pages. This restricts the match to the widget's structural anatomy.
-_ATTR_CONTEXT_RE = re.compile(r'(?:class|id)\s*=\s*["\'][^"\']*$')
 
 
 def _has_widget_marker(text: str, markers: tuple[str, ...]) -> bool:
@@ -196,7 +197,19 @@ def _occurrences(tag: str, marker: str) -> list[int]:
     return found
 
 
-def _is_widget_occurrence(tag: str, marker: str, index: int) -> bool:
+def _is_widget_occurrence(
+    tag: str,
+    marker: str,
+    index: int,
+    *,
+    # A served CAPTCHA widget is a marker used as an element identity -- a class
+    # or id value (``class="h-captcha"``) or the ``data-sitekey`` attribute --
+    # inside a rendered tag. A marker inside a ``src``/``href`` URL
+    # (``js.hcaptcha.com``) or a JSON string (Wikipedia's ``mw.config`` names
+    # its edit-captcha backend) is a mention, not a challenge; matching those
+    # raised a false PuzzleChallengeError on ordinary pages.
+    attr_context: re.Pattern[str] = re.compile(r'(?:class|id)\s*=\s*["\'][^"\']*$'),
+) -> bool:
     """Whether ``marker`` at ``index`` names this tag's element, not its text.
 
     Two positions count. A marker inside a class/id attribute VALUE identifies
@@ -204,7 +217,7 @@ def _is_widget_occurrence(tag: str, marker: str, index: int) -> bool:
     but only in that position: accepted anywhere in the tag, a link to
     ``/docs/data-sitekey`` read as a served widget.
     """
-    if _ATTR_CONTEXT_RE.search(tag[:index]) is not None:
+    if attr_context.search(tag[:index]) is not None:
         return True
     if not marker.startswith("data-"):
         return False

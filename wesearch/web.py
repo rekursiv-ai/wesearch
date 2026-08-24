@@ -238,7 +238,6 @@ def _extract_text(
         asked for.
     """
     content = body.decode("utf-8", errors="replace")
-
     if kind == _KIND_RSS:
         return _format_rss(body)
     if kind == _KIND_MARKDOWN:

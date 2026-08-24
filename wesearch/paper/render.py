@@ -152,7 +152,6 @@ def _id_prefix(rec: PaperRecord) -> str:
         parts.append(f"doi:{rec.doi}")
     if rec.arxiv_id:
         parts.append(f"arXiv:{rec.arxiv_id}")
-
     inner = " | ".join(parts) if parts else "no-id"
     return f"[{inner}]"
 

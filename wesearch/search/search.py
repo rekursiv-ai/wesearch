@@ -246,7 +246,6 @@ def search(
             )
         if backend == "duckduckgo":
             return duckduckgo(query, num_results, headers, transport=transport)
-
     except BotDetectionError:
         # A bot-detection block carries actionable, type-specific guidance
         # (solve captcha / rotate IP). It is-a FetchError, so it MUST be caught

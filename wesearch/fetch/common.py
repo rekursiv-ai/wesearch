@@ -301,12 +301,11 @@ def rewrite_origin(headers: dict[str, str], target_url: str) -> dict[str, str]:
     origin_key = next((k for k in headers if k.lower() == "origin"), None)
     if origin_key is None:
         return headers
-    parsed = urlparse(target_url)
-    scheme = parsed.scheme or "https"
-    # Bracket a v6 host: an unbracketed IPv6 literal is not a valid Origin
-    # (the colons collide with the scheme/port delimiters).
-    netloc = _netloc(bracket_ipv6(parsed.hostname or ""), parsed.port)
-    return {**headers, origin_key: f"{scheme}://{netloc}"}
+    # The value ANNOUNCED must be the value the hop was JUDGED against:
+    # ``apply_redirect`` decides same-origin with ``origin()``, so building a
+    # second spelling here told the target an origin this module does not
+    # consider equal to the one it compared.
+    return {**headers, origin_key: origin(target_url)}
 
 
 def apply_redirect(
