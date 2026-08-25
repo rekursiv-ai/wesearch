@@ -749,6 +749,31 @@ def _continued_headers(tab: _FakeTab) -> dict[str, str]:
     }
 
 
+def _continue_override(tab: _FakeTab) -> dict[str, str] | None:
+    """Return the header OVERRIDE the guard sent, or ``None`` if it sent none.
+
+    Distinct from :func:`_continued_headers`, which reports what the override
+    said: the question here is whether an override was sent AT ALL. That is the
+    property under test, because an override is unreliable whatever it carries
+    -- ``Cookie`` applies intermittently and no override survives a redirect hop
+    (see :func:`~wesearch.fetch.transport.zendriver._continue`) -- so
+    sending one at all is the hazard, not any value inside it.
+    """
+    payload = next(
+        (
+            c
+            for c in tab.wire_commands
+            if str_val(c.get("method")) == "Fetch.continueRequest"
+        ),
+        None,
+    )
+    assert payload is not None, "the request was never continued"
+    params = dict_val(payload.get("params"))
+    if "headers" not in params:
+        return None
+    return _continued_headers(tab)
+
+
 def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
     """Return the headers installed tab-wide via ``setExtraHTTPHeaders``."""
     payload = next(
@@ -841,6 +866,65 @@ class TestBrowserHonorsTrustPerHop:
         assert browser.last_tab is not None
         return browser.last_tab
 
+    def test_a_hop_adding_no_header_keeps_chromes_own_header_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A guard that adds nothing must not rewrite the request's headers.
+
+        An override on ``Fetch.continueRequest`` is unreliable by documented
+        behavior, so echoing headers back can only subtract:
+
+        - ``Cookie`` is overridden INTERMITTENTLY (crbug 40762053: "only 3 of
+          21 requests ... have the cookie override"), and a clearance cookie
+          that rides only sometimes reads as an unsolved challenge.
+        - Overrides "do not extend to subsequent redirect hops" (CDP ``Fetch``
+          docs), and the clear IS a redirect chain -- measured GET, POST, GET.
+
+        Measured against one live Cloudflare-fronted URL, interleaved with the
+        no-override control on a fresh egress, same browser and profile, the
+        only difference being the continue verb::
+
+            continue_request(id, headers=[echo of request.headers])
+                ->  5619 / 5696 bytes, "Just a moment..."
+            continue_request(id)
+                -> 405954 / 405978 bytes, the real page
+
+        Interleaving is load-bearing: Cloudflare scores the EGRESS, so a
+        sequential A-then-B run degrades under its own probing and the control
+        stops clearing -- which reads as an arm effect and is not one.
+        """
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused("https://public.example/next", {"accept": "text/html"})
+            ]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser)
+        assert tab.continued_requests == ["req-1"]
+        assert _continue_override(tab) is None
+
+    def test_a_cross_origin_hop_drops_the_credential_without_rewriting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Withholding a header is not a reason to replace Chrome's set.
+
+        The credential is dropped by never installing it tab-wide (see
+        ``test_origin_bound_headers_are_never_installed_tab_wide``), so Chrome
+        never had it on this hop to begin with. Overriding here would add the
+        bot-detection tell above while removing nothing.
+        """
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused("https://evil.example/steal", {"accept": "text/html"})
+            ]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(
+            browser,
+            headers={"Authorization": "Bearer secret", "Accept": "text/html"},
+        )
+        assert _continue_override(tab) is None
+
     def test_caller_headers_do_not_cross_an_origin_boundary(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -864,10 +948,14 @@ class TestBrowserHonorsTrustPerHop:
             browser,
             headers={"Authorization": "Bearer secret", "Accept": "text/html"},
         )
-        sent = _continued_headers(tab)
-        assert "authorization" not in sent
+        # Asserted on what the hop CARRIES, not on how it was assembled: the
+        # request continues without an override, so it carries exactly Chrome's
+        # own set, and the credential is absent from that set because it was
+        # never installed tab-wide.
+        assert _continue_override(tab) is None
+        assert "authorization" not in _extra_http_headers(tab)
         # A non-credential header is not the hazard and must still travel.
-        assert sent.get("accept") == "text/html"
+        assert _extra_http_headers(tab).get("accept") == "text/html"
 
     def test_caller_headers_survive_a_same_origin_hop(
         self, monkeypatch: pytest.MonkeyPatch
@@ -880,6 +968,42 @@ class TestBrowserHonorsTrustPerHop:
         _patch_pool(monkeypatch, browser)
         tab = self._run(browser, headers={"Authorization": "Bearer secret"})
         assert "authorization" in _continued_headers(tab)
+
+    def test_an_entitled_header_replaces_chromes_row_rather_than_adding_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One header name must yield ONE row, whatever case the caller used.
+
+        HTTP field names are case-insensitive, but a dict merge is not: Chrome
+        reports the paused request's headers Title-Cased (measured:
+        ``['Accept', 'Cookie', 'Upgrade-Insecure-Requests', 'User-Agent']``),
+        so a caller spelling one lower-case produced BOTH keys and the override
+        emitted two rows for it. ``fetch.py`` collapses exactly this on the curl
+        leg and names the cost: "Two dict keys ... would emit two Cookie lines
+        on the wire -- a bot tell."
+
+        ``Cookie`` is the case that can actually collide, because unlike
+        ``Authorization`` it is not withheld from the tab-wide install, so
+        Chrome holds one of its own.
+        """
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused("https://public.example/next", {"Cookie": "chrome=own"})
+            ]
+        )
+        _patch_pool(monkeypatch, browser)
+        tab = self._run(browser, headers={"cookie": "caller=seeded"})
+        payload = next(
+            c
+            for c in tab.wire_commands
+            if str_val(c.get("method")) == "Fetch.continueRequest"
+        )
+        entries = list_val(dict_val(payload.get("params")).get("headers"))
+        names = [str_val(dict_val(e).get("name")).lower() for e in entries]
+        assert names.count("cookie") == 1, f"duplicate Cookie row: {names}"
+        # The caller's value is the one that must survive: a per-call cookie is
+        # an explicit override, matching ``set_session_cookies`` on the curl leg.
+        assert _continued_headers(tab)["cookie"] == "caller=seeded"
 
     def test_origin_bound_headers_are_never_installed_tab_wide(
         self, monkeypatch: pytest.MonkeyPatch

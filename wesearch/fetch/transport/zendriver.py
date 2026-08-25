@@ -519,8 +519,27 @@ def _fail(request_id: object) -> object:
     )
 
 
-def _continue(request_id: object, headers: list[object]) -> object:
-    """The CDP verb releasing one intercepted request with ``headers``."""
+def _continue(request_id: object, headers: list[object] | None) -> object:
+    """The CDP verb releasing one intercepted request, optionally overriding headers.
+
+    ``headers=None`` sends no override, which is NOT the same as echoing the
+    request's own headers back. An override is unreliable in two documented
+    ways, and both bite a challenge handoff:
+
+    - It is applied INTERMITTENTLY to ``Cookie`` (crbug 40762053: "setting the
+      cookie header override is intermittent -- only 3 of 21 requests ... have
+      the cookie override"). A clearance cookie that rides only sometimes reads
+      as a client that never solved the challenge.
+    - It does "not extend to subsequent redirect hops" (CDP ``Fetch``
+      docs), and the clear IS a redirect chain -- measured as GET, POST, GET.
+
+    So an echo is strictly worse than silence: it can only subtract. Measured
+    on one live Cloudflare-fronted URL, interleaved against the no-override
+    control on a fresh egress, the echo served the wall every run and the
+    omission served the page every run.
+    """
+    if headers is None:
+        return zendriver.cdp.fetch.continue_request(cast("Any", request_id))
     return zendriver.cdp.fetch.continue_request(
         cast("Any", request_id), headers=cast("Any", headers)
     )
@@ -531,12 +550,26 @@ def _carried_headers(
     caller_headers: dict[str, str] | None,
     target: str,
     origin_url: str,
-) -> list[object]:
-    """Return this hop's headers: Chrome's own, plus the caller's when entitled.
+) -> list[object] | None:
+    """Return the header OVERRIDE for this hop, or ``None`` to send none.
 
     An origin-bound header is never installed tab-wide (see
     :func:`_navigate_tab`), so it must be attached HERE, and only for a hop that
     stays on the origin it was seeded for.
+
+    Adding nothing yields ``None`` rather than an echo of ``request_headers``:
+    an override is applied unreliably and does not survive a redirect hop (see
+    :func:`_continue`), so echoing headers back can only lose them. The
+    withholding case is ``None`` too -- a cross-origin hop never carried the
+    credential, since it was never installed tab-wide, so there is nothing here
+    to remove.
+
+    An override that DOES fire is therefore reserved for the one case worth its
+    unreliability: a caller credential the tab cannot hold. It is not a way to
+    restore Chrome's own headers -- interception already costs every client
+    hint (measured: a guarded navigation sends no ``sec-ch-ua`` at all, with or
+    without an override), and no CDP verb adds one header without replacing the
+    set.
 
     Args:
       request_headers: What Chrome already reports on the paused request.
@@ -545,21 +578,31 @@ def _carried_headers(
       origin_url: The URL the caller named, fragment stripped.
 
     Returns:
-      entries: The CDP header list this request continues with.
+      entries: The CDP header list to override with, or ``None`` for no override.
 
     """
-    carried = dict(request_headers)
     if not caller_headers or origin(target) != origin(origin_url):
-        return _header_entries(carried)
+        return None
     bound = _origin_bound()
-    return _header_entries(
-        carried
-        | {
-            name: value
-            for name, value in caller_headers.items()
-            if name.lower() in bound
-        }
-    )
+    entitled = {
+        name: value for name, value in caller_headers.items() if name.lower() in bound
+    }
+    if not entitled:
+        return None
+    # Merged case-INSENSITIVELY, unlike a plain dict union: field names are
+    # case-insensitive on the wire but not as dict keys, and Chrome reports the
+    # paused request Title-Cased, so a caller's lower-case "cookie" beside
+    # Chrome's "Cookie" emitted the header twice. ``fetch.py`` collapses the
+    # same collision on the curl leg for the same reason -- two Cookie lines
+    # are a bot tell. The caller's value wins, matching that leg's
+    # ``set_session_cookies``.
+    replaced = {name.lower() for name in entitled}
+    kept = {
+        name: value
+        for name, value in request_headers.items()
+        if name.lower() not in replaced
+    }
+    return _header_entries(kept | entitled)
 
 
 def _origin_bound() -> frozenset[str]:
@@ -568,8 +611,15 @@ def _origin_bound() -> frozenset[str]:
     Read off :func:`~wesearch.fetch.common.apply_redirect`'s own default
     rather than restated: Chrome follows its own redirects, so this transport
     applies the rule itself instead of through that function, and a second copy
-    is how the two legs came to disagree -- the browser leg dropped credentials
-    and kept the extended client hints the header leg drops.
+    is how the two legs came to disagree.
+
+    Only ``authorization`` and ``cookie`` are live here. The set also names the
+    extended client hints, which matter on the header transports because THOSE
+    build the hints themselves; an intercepted navigation carries none to begin
+    with (measured: zero ``sec-ch-ua`` headers reach the wire, with or without
+    an override), so for this leg those entries are inert. Borrowing the shared
+    set anyway is deliberate -- it cannot drift from the contract, and a hint
+    that Chrome someday does emit under interception is then already covered.
     """
     default = inspect.signature(apply_redirect).parameters["origin_bound"].default
     assert isinstance(default, frozenset)
