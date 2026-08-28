@@ -423,9 +423,47 @@ async def _navigate_tab(
         await tab.get(url)
         await tab.wait_for_ready_state("complete")
     except BaseException:
-        await tab.close()
+        await _closed(tab)
         raise
     return tab
+
+
+async def _closed(tab: zendriver.Tab, *, budget_sec: float = 5.0) -> None:
+    """Close ``tab``, giving up rather than waiting on a wedged connection.
+
+    ``Tab.close`` awaits ``Target.closeTarget``'s reply with no ceiling of its
+    own, so a connection that stopped answering parks here forever. That is
+    survivable only while the caller can still be cancelled -- and on every path
+    that reaches here from a CANCELLED body it cannot: an ``asyncio.timeout``
+    scope delivers exactly one cancellation, the body consumed it, and this
+    cleanup runs unguarded. The enclosing coroutine then never completes, so its
+    ``TimeoutError`` is never raised and the caller waits out
+    :func:`fetch_zendriver`'s ``timeout_sec + 30`` for a wall-less one instead.
+
+    ``shield`` is what makes the bound real here: the cleanup often runs with a
+    cancellation already in flight, and an unshielded await would re-deliver it
+    to the close rather than time the close out.
+
+    ``asyncio.timeout`` rather than ``wait_for``, which measures identically
+    (0.50s against a 0.3s bound, both). ``_navigate`` promises ONE overall
+    budget with no per-step ``wait_for`` resetting it, and
+    ``zendriver_test.py`` enforces that by making ``wait_for`` raise; spending
+    that seam on teardown would trade a real invariant for an equivalent call.
+
+    Args:
+      tab: The tab to close.
+      budget_sec: Seconds allowed for the teardown. Bounds a wedged CDP
+        connection without racing a healthy close, which is one round trip on a
+        live socket.
+
+    """
+    task = asyncio.ensure_future(tab.close())
+    try:
+        async with asyncio.timeout(budget_sec):
+            await asyncio.shield(task)
+    except TimeoutError:
+        task.cancel()
+        logger.debug("tab close timed out; abandoning the tab")
 
 
 async def _guard_requests(
@@ -830,7 +868,7 @@ async def _navigate(
             # each was followed.
             harvested = await _domain_cookies(browser, final_url)
         finally:
-            await tab.close()
+            await _closed(tab)
     return BrowserResult(
         body=_unwrap_viewer(body).encode(), cookies=harvested, final_url=final_url
     )
