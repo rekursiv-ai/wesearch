@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import GeneratorType
-from typing import Any, cast
+from typing import Any, cast, override
 
 import asyncio
 import atexit
@@ -1203,6 +1203,86 @@ def test_navigate_timeout_includes_browser_acquisition(
                 on_redirect=None,
             )
         )
+
+
+class _WedgedTab(_FakeTab):
+    """A tab whose navigation AND close both never return.
+
+    Models one wedged CDP connection: ``Tab.get`` waits on a load event that
+    never arrives, and ``Tab.close`` then sends ``Target.closeTarget`` and
+    awaits a reply with no ceiling of its own (only the ``TargetDestroyed``
+    wait AFTER it is bounded, at 10s).
+    """
+
+    @override
+    async def get(self, url: str) -> _FakeTab:
+        self.navigations.append(url)
+        await asyncio.Event().wait()
+        raise AssertionError("The navigation was never cancelled.")
+
+    @override
+    async def close(self) -> None:
+        self.closed = True
+        await asyncio.Event().wait()
+        raise AssertionError("The close was never bounded.")
+
+
+class _WedgedBrowser(_FakeBrowser):
+    """A browser handing out :class:`_WedgedTab`."""
+
+    @override
+    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+        del new_tab
+        self.gets.append(url)
+        self.last_tab = _WedgedTab(content="<html>ok</html>", href="")
+        return self.last_tab
+
+
+def test_navigate_reports_its_own_timeout_when_teardown_also_wedges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled navigation must still finish, so the caller sees the budget.
+
+    An ``asyncio.timeout`` scope delivers exactly ONE cancellation. When it
+    lands on the navigation, ``_navigate_tab``'s ``except BaseException: await
+    tab.close()`` runs with that cancellation already spent -- so an unbounded
+    close parks there forever and the coroutine NEVER completes. Its
+    ``TimeoutError`` is therefore never raised, and the caller instead waits out
+    ``fetch_zendriver``'s ``timeout_sec + 30`` (``zendriver.py:296``) before
+    ``future.result`` raises a bare, wall-less ``TimeoutError``.
+
+    That is the CI shape: the traceback ended at
+    ``concurrent/futures/_base.py:456 raise TimeoutError()`` rather than at
+    ``asyncio/timeouts.py __aexit__``, which is what a coroutine reporting its
+    own deadline produces.
+    """
+    browser = _WedgedBrowser()
+    _patch_pool(monkeypatch, browser)
+
+    async def go() -> float:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await _navigate(
+                "https://example.com/",
+                profile_dir=_PROFILE,
+                egress="e",
+                timeout_sec=0.2,
+                headless=True,
+                on_redirect=None,
+            )
+        return time.monotonic() - started
+
+    # The bound that matters is the POOL's, not a round number: the coroutine
+    # must finish -- and so raise its own TimeoutError -- before
+    # ``fetch_zendriver`` gives up at ``timeout_sec + 30`` and reports a
+    # wall-less one instead. Derived from the constants rather than restated, so
+    # tuning either budget cannot leave this passing vacuously.
+    close_budget = inspect.signature(fz_mod._closed).parameters["budget_sec"].default
+    ceiling = 0.2 + close_budget
+    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=0.2 + 30))
+    assert elapsed < ceiling + 1.0, (
+        f"teardown outlived its budget: {elapsed:.2f}s against {ceiling:.2f}s"
+    )
 
 
 def test_navigate_uses_one_overall_timeout(

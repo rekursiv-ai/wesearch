@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from typing import Any, ClassVar, cast
@@ -957,6 +957,64 @@ class TestSearchDuckduckgo:
             pytest.raises(FetchError),
         ):
             duckduckgo("test")
+
+
+class TestLiveQueryAvailabilitySkips:
+    """``_query_once`` must classify a wedged backend as availability.
+
+    Lives HERE, not beside the helper it exercises: EVERY test in
+    ``search_integration_test.py`` carries ``integration``, which the default
+    tier deselects (``pyproject.toml:423``). Measured -- a bare passing
+    ``test_probe`` written into that file reports ``1 deselected``, and the
+    identical file without the ``_integration`` suffix reports ``1 passed``. A
+    unit test placed there would therefore never run in the tier that guards
+    this logic.
+    """
+
+    @staticmethod
+    def _run(
+        fetch: Callable[[float], list[str]], *, backend: str, timeout_sec: float
+    ) -> list[str]:
+        """Call the live helper, imported at use so collection stays cheap."""
+        from wesearch.search.search_integration_test import (  # noqa: PLC0415 -- see class docstring
+            _query_once,
+        )
+
+        return _query_once(fetch, backend=backend, timeout_sec=timeout_sec)
+
+    def test_skips_a_backend_that_never_answered(self) -> None:
+        """``search`` classifies this; a direct backend call bypassed it.
+
+        ``TimeoutError`` is in the tuple ``search`` converts to ``SearchError``
+        (``search.py:268``), but the live cases call each backend DIRECTLY and
+        so never reach that facade. Observed in CI: Google served its enablejs
+        shell to curl, the browser fallback never returned, and the run failed
+        on a bare ``TimeoutError`` while the sibling query passed in 6.91s.
+        """
+
+        def never_answers(timeout_sec: float) -> list[str]:
+            del timeout_sec
+            raise TimeoutError
+
+        # A synthetic backend name: the helper keys its unreachable marker by
+        # it, so borrowing "google" would let a marker left by a live run decide
+        # this verdict.
+        with pytest.raises(pytest.skip.Exception, match="did not answer"):
+            self._run(never_answers, backend="wedged-probe", timeout_sec=0.1)
+
+    def test_still_fails_a_malformed_response(self) -> None:
+        """The skip clauses must not swallow a genuine parser regression.
+
+        Guards the widening above: every clause added there trades a failure
+        for a skip, and one too broad retires the live tests silently.
+        """
+
+        def raises_parser_fault(timeout_sec: float) -> list[str]:
+            del timeout_sec
+            raise ValueError("markup changed")
+
+        with pytest.raises(ValueError, match="markup changed"):
+            self._run(raises_parser_fault, backend="wedged-probe", timeout_sec=0.1)
 
 
 class TestHeadersArg:

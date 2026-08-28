@@ -150,8 +150,11 @@ def _query_once[T](
 
     A failure that is availability rather than a parser fault skips: an
     unroutable egress (``FetchError`` with ``status == 0``), a missing browser,
-    a bot-detection block, or a lock another worker holds. A malformed result
-    still fails, which is what the caller asserts on.
+    a bot-detection block, a backend that never answered within the ceiling, or
+    a lock another worker holds. A malformed result still fails, which is what
+    the caller asserts on. Unit coverage for that classification lives in
+    ``search_test.py`` -- everything in THIS file carries ``integration`` and is
+    deselected by default, so a test of the helper placed here would not run.
 
     Args:
       fetch: Performs one live query, given the HTTP ceiling to apply, and
@@ -186,6 +189,8 @@ def _query_once[T](
         with _admitted(timeout_sec=timeout_sec):
             return fetch(timeout_sec)
     except filelock.Timeout as error:
+        # BEFORE the TimeoutError clause below: ``filelock.Timeout`` subclasses
+        # it, so the order is what keeps a busy lane reporting as a busy lane.
         raise pytest.skip.Exception(
             f"{backend}: every live-search lane busy"
         ) from error
@@ -211,6 +216,20 @@ def _query_once[T](
         # (``errors.py:47``).
         raise pytest.skip.Exception(
             f"{backend} served an automated-access block: {error}"
+        ) from error
+    except TimeoutError as error:
+        # A backend that never answered within the ceiling is availability, not
+        # a parser fault: nothing was served, so there is no markup to be wrong
+        # about. ``search`` already classifies it this way (``search.py:268``
+        # converts it to SearchError), but these cases call each backend
+        # DIRECTLY and so never pass through that facade -- which is how CI came
+        # to fail on a bare TimeoutError while the sibling query passed.
+        #
+        # No unreachable marker: unlike a refused connection, a wedged fetch
+        # says nothing about whether the NEXT one lands, and suppressing later
+        # cases on it would retire the test for a condition already over.
+        raise pytest.skip.Exception(
+            f"{backend} did not answer within the ceiling: {error!r}"
         ) from error
     except FetchError as error:
         if error.status == 429:
