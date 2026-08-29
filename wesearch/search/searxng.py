@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 
 import json
 import logging
+import math
 import os
 import re
 
@@ -372,13 +373,16 @@ def _searxng_map(item: dict[str, object]) -> MapResult:
         url=str_val(item.get("url")),
         title=clean_text(str_val(item.get("title"))),
         snippet=clean_text(str_val(item.get("content"))),
-        # Presence of the key is not presence of a NUMBER: a null or malformed
-        # value took float_val's 0.0 default, turning "unknown" into the Gulf of
-        # Guinea. Absent and unparseable both mean None here.
-        latitude=optional_val(float, item.get("latitude")),
-        longitude=optional_val(float, item.get("longitude")),
+        latitude=_coordinate(item.get("latitude")),
+        longitude=_coordinate(item.get("longitude")),
         address=MappingProxyType(dict_val(item.get("address"), str)),
     )
+
+
+def _coordinate(value: object) -> float | None:
+    """Return one finite map coordinate, or None when unknown."""
+    coordinate = optional_val(float, value)
+    return coordinate if coordinate is not None and math.isfinite(coordinate) else None
 
 
 def _searxng_it(item: dict[str, object]) -> PackageResult | CodeResult | SearchResult:
