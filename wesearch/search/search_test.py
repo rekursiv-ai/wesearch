@@ -303,16 +303,20 @@ class TestSearchSearxng:
         assert isinstance(result, MapResult)
         assert result.latitude is None
 
-    def test_non_finite_coordinate_is_unknown(self) -> None:
-        # json.loads accepts NaN/Infinity by default, so both reach the parser.
-        body = b'{"results": [{"url": "https://m", "latitude": NaN}]}'
+    @pytest.mark.parametrize("field", ["latitude", "longitude"])
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_coordinate_is_unknown(self, field: str, literal: str) -> None:
+        body = (
+            f'{{"results": [{{"url": "https://m", "{field}": {literal}}}]}}'
+        ).encode()
         with (
             patch.dict(os.environ, {"SEARXNG_URL": "https://search.example.test/"}),
             _patch_fetch(module="searxng", return_value=body),
         ):
             (result,) = searxng("q", categories="map")
         assert isinstance(result, MapResult)
-        assert result.latitude is None
+        coordinate = result.latitude if field == "latitude" else result.longitude
+        assert coordinate is None
 
     def test_non_finite_seed_does_not_escape_as_an_exception(self) -> None:
         # int(nan) raises ValueError and int(inf) OverflowError, neither of
