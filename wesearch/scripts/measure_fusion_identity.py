@@ -22,7 +22,7 @@ from collections.abc import Callable
 import re
 import time
 
-from wesearch.lib.custom_json import dict_val, list_val, str_val
+from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
@@ -180,11 +180,11 @@ def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
     else:
         raise PaperError(f"Semantic Scholar unavailable for {query!r}")
     out: dict[str, str] = {}
-    for row in list_val(body.get("data")):
-        ids = dict_val(dict_val(row).get("externalIds"))
-        mag = str_val(ids.get("MAG"))
+    for row in ListCodec.coerce(body.get("data")):
+        ids = DictCodec.coerce(DictCodec.coerce(row).get("externalIds"))
+        mag = StrCodec.coerce(ids.get("MAG"))
         if mag:
-            out[mag] = str_val(ids.get("DOI"))
+            out[mag] = StrCodec.coerce(ids.get("DOI"))
     return out
 
 
@@ -200,11 +200,11 @@ def _raw_mag_openalex(query: str) -> dict[str, str]:
             "page": 1,
         },
     )
-    for work in list_val(body.get("results")):
-        work_obj = dict_val(work)
-        mag = str_val(dict_val(work_obj.get("ids")).get("mag"))
+    for work in ListCodec.coerce(body.get("results")):
+        work_obj = DictCodec.coerce(work)
+        mag = StrCodec.coerce(DictCodec.coerce(work_obj.get("ids")).get("mag"))
         if mag:
-            doi = str_val(work_obj.get("doi"))
+            doi = StrCodec.coerce(work_obj.get("doi"))
             out[mag.rsplit("/", 1)[-1]] = doi.rsplit("doi.org/", 1)[-1]
     return out
 

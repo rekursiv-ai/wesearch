@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from wesearch.lib.custom_json import MutableJSON, int_val
+from wesearch.lib.custom_json import IntCodec, MutableJSON
 from wesearch.paper.errors import BackendError
 from wesearch.paper.paginate import Cursor, paginate
 
@@ -89,7 +89,9 @@ class TestPaginate:
         # A keep-filter dropping rows must not make a full page look short.
         pages: list[list[MutableJSON]] = [[{"n": i} for i in range(200)], [{"n": 200}]]
         cursor = _offset_cursor(pages, page_size_max=200)
-        page = paginate(cursor, limit=None, keep=lambda r: int_val(r["n"], 0) % 2 == 0)
+        page = paginate(
+            cursor, limit=None, keep=lambda r: IntCodec.coerce(r["n"], 0) % 2 == 0
+        )
         # Only one page fetched (limit=None), all-even kept, but complete
         # reflects the cursor (full page -> more), not the filtered count.
         assert not page.complete

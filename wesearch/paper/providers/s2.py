@@ -29,7 +29,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import MutableJSON, dict_val, dicts_val, int_val, list_val
+from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
 from wesearch.paper.paginate import (
@@ -370,7 +370,7 @@ def _fetch_offset_page(
 def _next_offset_advance(body: MutableJSON, _offset: int, _size: int) -> int | None:
     """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
     nxt = body.get("next")
-    rows = list_val(body.get("data"))
+    rows = ListCodec.coerce(body.get("data"))
     return nxt if isinstance(nxt, int) and rows else None
 
 
@@ -406,7 +406,7 @@ def search_paginate(
         nonlocal total
         page_params = {**params, "offset": offset, "limit": size}
         body = get("/paper/search", page_params, transport=transport)
-        total = int_val(body.get("total"), 0)
+        total = IntCodec.coerce(body.get("total"), 0)
         return body
 
     cursor = Cursor(
@@ -421,9 +421,9 @@ def search_paginate(
 
 def _search_offset_advance(body: MutableJSON, offset: int, _size: int) -> int | None:
     """Next ``/paper/search`` offset; None once ``total`` is reached or a page empties."""
-    rows = list_val(body.get("data"))
+    rows = ListCodec.coerce(body.get("data"))
     nxt = offset + len(rows)
-    return nxt if rows and nxt < int_val(body.get("total"), 0) else None
+    return nxt if rows and nxt < IntCodec.coerce(body.get("total"), 0) else None
 
 
 def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
@@ -456,10 +456,10 @@ def paper_record_from(
       record: Populated paper record.
 
     """
-    ids = dict_val(data.get("externalIds"))
-    authors_raw = dicts_val(data.get("authors"))
+    ids = DictCodec.coerce(data.get("externalIds"))
+    authors_raw = ListCodec.mappings(data.get("authors"))
     authors = tuple(str(a.get("name") or "") for a in authors_raw if a.get("name"))
-    oa = dict_val(data.get("openAccessPdf"))
+    oa = DictCodec.coerce(data.get("openAccessPdf"))
     doi = ids.get("DOI")
     arxiv = ids.get("ArXiv")
     return PaperRecord(
@@ -486,19 +486,19 @@ def author_record_from(data: MutableJSON) -> AuthorRecord:
 
     """
     author_id = str(data.get("authorId") or "")
-    aliases_raw = list_val(data.get("aliases"))
+    aliases_raw = ListCodec.coerce(data.get("aliases"))
     aliases = tuple(str(a) for a in aliases_raw if a)
 
     # Affiliations can come as a list of strings (common) or a list of dicts
     # with ``name``/``affiliation`` keys (rarer). Handle both.
-    aff_raw = list_val(data.get("affiliations"))
+    aff_raw = ListCodec.coerce(data.get("affiliations"))
     affiliations: list[str] = []
     for a in aff_raw:
         if isinstance(a, str):
             if a.strip():
                 affiliations.append(a.strip())
         else:
-            a_dict = dict_val(a)
+            a_dict = DictCodec.coerce(a)
             name = a_dict.get("name") or a_dict.get("affiliation") or ""
             if isinstance(name, str) and name.strip():
                 affiliations.append(name.strip())
@@ -551,4 +551,4 @@ def search_total(data: MutableJSON) -> int:
       data: A raw S2 search response body.
 
     """
-    return int_val(data.get("total"), 0)
+    return IntCodec.coerce(data.get("total"), 0)
