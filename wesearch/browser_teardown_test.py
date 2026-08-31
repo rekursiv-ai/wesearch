@@ -15,7 +15,7 @@ import ast
 import pytest
 import yaml
 
-from wesearch.lib.custom_json import dict_val, dicts_val, list_val, str_val
+from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -182,15 +182,15 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
     ]
     assert marked, "no test file marks an xdist group; this guard is vacuous"
 
-    config = dict_val(yaml.safe_load(_CONFIG.read_text(encoding="utf-8")))
+    config = DictCodec.coerce(yaml.safe_load(_CONFIG.read_text(encoding="utf-8")))
     integration = [
         hook
-        for repo in dicts_val(config.get("repos", []))
-        for hook in dicts_val(repo.get("hooks", []))
-        if str_val(hook.get("id")) == "pytest-integration-global"
+        for repo in ListCodec.mappings(config.get("repos", []))
+        for hook in ListCodec.mappings(repo.get("hooks", []))
+        if StrCodec.coerce(hook.get("id")) == "pytest-integration-global"
     ]
     assert integration, "no pytest-integration-global hook"
-    script = "\n".join(list_val(integration[0].get("args", []), str))
+    script = "\n".join(ListCodec.coerce(integration[0].get("args", []), str))
 
     assert "--dist=loadgroup" in script, (
         f"{marked} mark an xdist group, but the integration hook no longer "

@@ -30,7 +30,7 @@ from wesearch.fetch.transport.zendriver import (
     _BrowserPool,
     _navigate,
 )
-from wesearch.lib.custom_json import dict_val, list_val, str_val
+from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
 from wesearch.types.params import Trust
 
 import wesearch.fetch.transport.zendriver as fz_mod
@@ -177,17 +177,19 @@ class _FakeTab:
         raw = next(command, None) if isinstance(command, GeneratorType) else None
         if not isinstance(raw, dict):
             return
-        # ``dict_val`` rather than a bare ``.get`` ladder: the CDP verbs are
+        # ``DictCodec.coerce`` rather than a bare ``.get`` ladder: the CDP verbs are
         # unstubbed, so their wire dict arrives as ``dict[Unknown, Unknown]``
         # and every read off it is partially unknown.
-        payload = dict_val(cast("object", raw))
+        payload = DictCodec.coerce(cast("object", raw))
         # Kept: a generator is single-use, so a test that re-reads ``commands``
         # would find every one exhausted by this very inspection.
         self.wire_commands.append(payload)
-        request_id = str_val(dict_val(payload.get("params")).get("requestId"))
+        request_id = StrCodec.coerce(
+            DictCodec.coerce(payload.get("params")).get("requestId")
+        )
         if not request_id:
             return
-        method = str_val(payload.get("method"))
+        method = StrCodec.coerce(payload.get("method"))
         if method == "Fetch.continueRequest":
             self.continued_requests.append(request_id)
         elif method == "Fetch.failRequest":
@@ -735,15 +737,15 @@ def _continued_headers(tab: _FakeTab) -> dict[str, str]:
         (
             c
             for c in tab.wire_commands
-            if str_val(c.get("method")) == "Fetch.continueRequest"
+            if StrCodec.coerce(c.get("method")) == "Fetch.continueRequest"
         ),
         None,
     )
     assert payload is not None, "the request was never continued"
-    entries = list_val(dict_val(payload.get("params")).get("headers"))
+    entries = ListCodec.coerce(DictCodec.coerce(payload.get("params")).get("headers"))
     return {
-        str_val(dict_val(entry).get("name")).lower(): str_val(
-            dict_val(entry).get("value")
+        StrCodec.coerce(DictCodec.coerce(entry).get("name")).lower(): StrCodec.coerce(
+            DictCodec.coerce(entry).get("value")
         )
         for entry in entries
     }
@@ -763,12 +765,12 @@ def _continue_override(tab: _FakeTab) -> dict[str, str] | None:
         (
             c
             for c in tab.wire_commands
-            if str_val(c.get("method")) == "Fetch.continueRequest"
+            if StrCodec.coerce(c.get("method")) == "Fetch.continueRequest"
         ),
         None,
     )
     assert payload is not None, "the request was never continued"
-    params = dict_val(payload.get("params"))
+    params = DictCodec.coerce(payload.get("params"))
     if "headers" not in params:
         return None
     return _continued_headers(tab)
@@ -780,14 +782,14 @@ def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
         (
             c
             for c in tab.wire_commands
-            if str_val(c.get("method")) == "Network.setExtraHTTPHeaders"
+            if StrCodec.coerce(c.get("method")) == "Network.setExtraHTTPHeaders"
         ),
         None,
     )
     if payload is None:
         return {}
-    installed = dict_val(dict_val(payload.get("params")).get("headers"))
-    return {name.lower(): str_val(value) for name, value in installed.items()}
+    installed = DictCodec.coerce(DictCodec.coerce(payload.get("params")).get("headers"))
+    return {name.lower(): StrCodec.coerce(value) for name, value in installed.items()}
 
 
 def _request_paused(
@@ -996,10 +998,14 @@ class TestBrowserHonorsTrustPerHop:
         payload = next(
             c
             for c in tab.wire_commands
-            if str_val(c.get("method")) == "Fetch.continueRequest"
+            if StrCodec.coerce(c.get("method")) == "Fetch.continueRequest"
         )
-        entries = list_val(dict_val(payload.get("params")).get("headers"))
-        names = [str_val(dict_val(e).get("name")).lower() for e in entries]
+        entries = ListCodec.coerce(
+            DictCodec.coerce(payload.get("params")).get("headers")
+        )
+        names = [
+            StrCodec.coerce(DictCodec.coerce(e).get("name")).lower() for e in entries
+        ]
         assert names.count("cookie") == 1, f"duplicate Cookie row: {names}"
         # The caller's value is the one that must survive: a per-call cookie is
         # an explicit override, matching ``set_session_cookies`` on the curl leg.
@@ -1139,15 +1145,17 @@ class TestBrowserHonorsTrustPerHop:
             (
                 c
                 for c in tab.wire_commands
-                if str_val(c.get("method")) == "Fetch.enable"
+                if StrCodec.coerce(c.get("method")) == "Fetch.enable"
             ),
             None,
         )
         assert enable is not None
-        patterns = list_val(dict_val(enable.get("params")).get("patterns"))
-        shapes = [dict_val(p) for p in patterns]
-        assert [str_val(s.get("resourceType")) for s in shapes] == ["Document"]
-        assert [str_val(s.get("requestStage")) for s in shapes] == ["Request"]
+        patterns = ListCodec.coerce(
+            DictCodec.coerce(enable.get("params")).get("patterns")
+        )
+        shapes = [DictCodec.coerce(p) for p in patterns]
+        assert [StrCodec.coerce(s.get("resourceType")) for s in shapes] == ["Document"]
+        assert [StrCodec.coerce(s.get("requestStage")) for s in shapes] == ["Request"]
 
 
 def test_navigate_seeds_request_identity(
