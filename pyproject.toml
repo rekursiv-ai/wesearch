@@ -48,7 +48,7 @@ wesearch-mcp = "wesearch.mcp.server:main"
 fetch-zendriver = "wesearch.fetch.transport.zendriver:main"
 
 [dependency-groups]
-# uv sync --all-groups
+# uv sync --all-groups --all-extras --frozen
 
 debug = [
     "ipython",
@@ -61,10 +61,10 @@ stubs = [
     "lxml-stubs>=0.5.1",
 ]
 test = [
-    "nodejs-wheel-binaries>=24.16.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pytest>=7.0",
+    "nodejs-wheel-binaries>=24.16.0",
 ]
 typecheck = [
     "basedpyright>=1.10",
@@ -73,13 +73,13 @@ typecheck = [
 "pre-commit" = [
     "pre-commit>=4.6",
     {include-group = "lint"},
-    {include-group = "stubs"},
     {include-group = "test"},
     {include-group = "typecheck"},
+    {include-group = "stubs"},
 ]
 dev = [
-    {include-group = "debug"},
     {include-group = "pre-commit"},
+    {include-group = "debug"},
 ]
 
 [project.urls]
@@ -152,6 +152,7 @@ markers = [
     "gpu_jax_cuda: requires JAX CUDA execution",
     "gpu_nvidia: requires NVIDIA GPU hardware",
     "gpu_torch_cuda: requires torch CUDA execution",
+    "gpu_torch_mps: requires torch MPS execution",
     "gpu_triton: requires Triton kernels",
     "network_anthropic: reaches Anthropic over the network",
     "network_duckduckgo: reaches DuckDuckGo over the network",
@@ -443,6 +444,7 @@ section-order = [
 typeCheckingMode = "recommended"
 failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
 useLibraryCodeForTypes = false
+extraPaths = ["typings"]
 exclude = [
     "**/.venv/",
     "**/.venv-ci312/",
@@ -545,6 +547,10 @@ package = true
 environments = [
     "sys_platform == 'linux'",
     "sys_platform == 'darwin'",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [tool.uv.pip]
