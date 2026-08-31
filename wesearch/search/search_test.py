@@ -746,7 +746,7 @@ class TestExtractUrlDdg:
         )
 
     def test_rejects_non_http_url(self) -> None:
-        assert _duckduckgo_extract_url("httpx://example.com/page") is None
+        assert _duckduckgo_extract_url("httpx2://example.com/page") is None
 
     def test_wrapped_url(self) -> None:
         assert (
