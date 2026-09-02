@@ -355,8 +355,30 @@ async def _open_instance(url: str, profile_dir: Path) -> None:
         while not browser.stopped:  # noqa: ASYNC110 -- no event source; poll the flag.
             await asyncio.sleep(0.5)
     except BaseException:
-        await browser.stop()
+        await _stopped(browser)
         raise
+
+
+async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> None:
+    """Stop ``browser``, giving up rather than waiting on a wedged connection.
+
+    ``Browser.stop`` awaits ``connection.send(cdp.browser.close())`` with no
+    ceiling; its own ``except Exception`` cannot cover this, because an await
+    that never returns raises nothing to catch. Unbounded, that turns a
+    reportable setup failure into a hang: this runs while the real error is in
+    flight, and nothing above supplies a deadline -- :func:`open_instance` calls
+    ``run`` with no ``timeout_sec``, which waits forever by contract.
+
+    ``budget_sec`` matches :meth:`_BrowserPool.shutdown`'s ceiling on the same
+    call. Long, deliberately: a healthy stop terminates Chrome and waits up to
+    3s for the process, so a tight bound would abandon live browsers that were
+    about to exit.
+    """
+    try:
+        async with asyncio.timeout(budget_sec):
+            await browser.stop()
+    except TimeoutError:
+        logger.debug("browser stop timed out; abandoning the browser")
 
 
 async def _launch_browser(

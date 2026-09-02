@@ -476,6 +476,101 @@ def test_open_instance_uses_blank_tab_before_requested_url(
     assert browser.last_tab.navigations == [url]
 
 
+class _RefusingTab(_FakeTab):
+    """A tab whose navigation fails, driving ``_open_instance``'s cleanup."""
+
+    @override
+    async def get(self, url: str) -> _FakeTab:
+        del url
+        raise RuntimeError("navigation refused")
+
+
+class _HangingStopBrowser(_FakeBrowser):
+    """A browser whose ``stop`` never returns, as a wedged connection's does.
+
+    ``Browser.stop`` awaits ``connection.send(cdp.browser.close())`` with no
+    ceiling of its own; its ``except Exception`` cannot help, because an await
+    that never returns raises nothing to catch.
+    """
+
+    @override
+    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+        del new_tab
+        self.gets.append(url)
+        self.last_tab = _RefusingTab(content="<html>ok</html>", href="")
+        return self.last_tab
+
+    @override
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        await asyncio.Event().wait()
+        raise AssertionError("The browser stop was never bounded.")
+
+
+def test_a_wedged_browser_stop_gives_up_at_its_budget() -> None:
+    """``_stopped`` must return on a stop that never does.
+
+    Driven directly on a SMALL budget: the real default matches the pool's 30s
+    ceiling, and asserting against that would make this test cost 30 seconds to
+    prove a bound that a fraction of a second proves just as well.
+    """
+    browser = _HangingStopBrowser()
+
+    async def go() -> float:
+        started = time.monotonic()
+        await fz_mod._stopped(cast(Any, browser), budget_sec=0.2)
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=10.0))
+    assert browser.stop_calls == 1, "the browser was never asked to stop"
+    assert elapsed < 3.0, f"stop outlived its 0.2s budget: {elapsed:.2f}s"
+
+
+def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed setup must report ITS error, not park in the cleanup.
+
+    ``_open_instance`` stops the browser under ``except BaseException`` when
+    navigation fails, and nothing above supplies a ceiling: ``open_instance``
+    calls ``_pool().run`` with no ``timeout_sec``, which waits forever by
+    contract. Unbounded, a wedged stop therefore turns a reportable navigation
+    error into a CLI that hangs having printed nothing.
+
+    The budget is shrunk rather than waited out -- what this asserts is that
+    the cleanup routes through the bounded helper at all, which the 0.2s
+    substitution shows in the same way 30s would.
+    """
+    browser = _HangingStopBrowser()
+
+    async def fake_launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
+        del profile_dir, headless
+        return browser
+
+    # Bound BEFORE the patch: reading ``fz_mod._stopped`` inside the
+    # replacement would resolve to the replacement itself and recurse.
+    real_stopped = fz_mod._stopped
+
+    async def briefly(browser: Any, *, budget_sec: float = 0.2) -> None:
+        await real_stopped(browser, budget_sec=budget_sec)
+
+    monkeypatch.setattr(fz_mod, "_launch_browser", fake_launch)
+    monkeypatch.setattr(fz_mod, "_stopped", briefly)
+
+    async def go() -> float:
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="navigation refused"):
+            await fz_mod._open_instance("https://gated.example/page", _PROFILE)
+        return time.monotonic() - started
+
+    # Ten seconds stands in for the ceiling the real chain lacks: without a
+    # bound the cleanup never returns and THIS fires, surfacing as TimeoutError
+    # instead of the navigation's own error.
+    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=10.0))
+    assert browser.stop_calls == 1, "the browser was never asked to stop"
+    assert elapsed < 3.0, f"cleanup outlived its budget: {elapsed:.2f}s"
+
+
 def test_open_instance_releases_profile_then_clears_domain_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
