@@ -329,7 +329,7 @@ def test_launch_browser_caps_dead_browser_connect_budget(
     # surfacing as a fast skip.
     captured: dict[str, float] = {}
 
-    async def fake_start(config: Any) -> _FakeBrowser:
+    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
         captured["timeout"] = config.browser_connection_timeout
         captured["max_tries"] = config.browser_connection_max_tries
         return _FakeBrowser()
@@ -348,7 +348,7 @@ def test_launch_browser_uses_vanilla_zendriver_config(
     browser = _FakeBrowser()
     browser_args: list[str] = []
 
-    async def fake_start(config: Any) -> _FakeBrowser:
+    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
         browser_args.extend(config())
         return browser
 
@@ -363,6 +363,62 @@ def test_launch_browser_uses_vanilla_zendriver_config(
     assert not any(
         argument.startswith("--host-resolver-rules=") for argument in browser_args
     )
+
+
+@pytest.mark.parametrize("headless", [True, False])
+def test_launch_browser_uses_the_browser_that_claims_no_url_scheme(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, headless: bool
+) -> None:
+    """Chrome must come from the build that does not claim ``https``.
+
+    On zendriver's default the launch runs the installed Chrome under
+    ``com.google.Chrome``, which then receives every ``open https://...`` the
+    user's clicks produce and drops them. Headed too: the capture follows the
+    bundle id, not the window count.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+        captured["executable"] = config.browser_executable_path
+        captured["args"] = config()
+        return _FakeBrowser()
+
+    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr(fz_mod, "_fetch_browser", lambda: "/cache/ChromeForTesting")
+    asyncio.run(fz_mod._launch_browser(tmp_path, headless=headless))
+
+    assert captured["executable"] == "/cache/ChromeForTesting"
+    # Without it Chrome for Testing raises a Safe Storage modal and blocks in
+    # startup: the process is alive, so this surfaces as a browser that
+    # launched and never exposed DevTools.
+    assert "--use-mock-keychain" in cast(list[str], captured["args"])
+
+
+def test_launch_browser_falls_back_when_no_reidentified_chrome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Linux, or a macOS host whose clone failed: launch exactly as before.
+
+    ``Config`` resolves an installed Chrome for a falsy path, so ``""`` is
+    already "find Chrome yourself" and needs no ``or None`` at the call site.
+    Asserted against a default ``Config`` rather than a literal: the point is
+    that the empty path is indistinguishable from passing nothing.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+        captured["executable"] = config.browser_executable_path
+        captured["args"] = config()
+        return _FakeBrowser()
+
+    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr(fz_mod, "_fetch_browser", lambda: "")
+    asyncio.run(fz_mod._launch_browser(tmp_path, headless=True))
+
+    assert captured["executable"] == zendriver.Config().browser_executable_path
+    # Stock Chrome already holds its Keychain entry, so mocking it here would
+    # cut the operator's own browser off from cookies it legitimately has.
+    assert "--use-mock-keychain" not in cast(list[str], captured["args"])
 
 
 def test_the_pool_leaves_zendriver_spawn_alone(
@@ -383,7 +439,7 @@ def test_the_pool_leaves_zendriver_spawn_alone(
     util = importlib.import_module("zendriver.core.util")
     vendor = util._start_process
 
-    async def fake_start(config: Any) -> _FakeBrowser:
+    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
         del config
         return _FakeBrowser()
 
@@ -2052,6 +2108,142 @@ def test_pool_keys_separate_egress(monkeypatch: pytest.MonkeyPatch) -> None:
         assert len(launched) == 2  # distinct egress -> distinct browser
     finally:
         pool.shutdown()
+
+
+def _fetch_browser_install(
+    root: Path,
+    build: str,
+    *,
+    name: str = "Google Chrome for Testing",
+    arch: str = "chrome-mac-arm64",
+) -> Path:
+    """Write a stub browser where the download roots put a real one."""
+    binary = root / build / arch / f"{name}.app" / "Contents" / "MacOS"
+    binary.mkdir(parents=True, exist_ok=True)
+    executable = binary / name
+    _ = executable.write_text("#!/bin/sh\n")
+    return executable
+
+
+@pytest.fixture
+def roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Redirect both download roots, as ``(puppeteer, playwright)``."""
+    puppeteer = tmp_path / "home" / ".cache" / "puppeteer" / "chrome"
+    playwright = tmp_path / "cache" / "ms-playwright"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(fz_mod, "cache_dir", lambda: tmp_path / "cache")
+    return puppeteer, playwright
+
+
+def test_non_macos_hosts_need_no_separate_browser() -> None:
+    """Linux and Windows keep the ordinary browser -- there is no capture.
+
+    A URL there reaches a browser through ``xdg-open`` and the desktop file
+    rather than a running process, and a headless server has only the stock
+    Chrome installed anyway.
+    """
+    assert fz_mod._fetch_browser(platform="linux") == ""
+    assert fz_mod._fetch_browser(platform="win32") == ""
+
+
+def test_non_macos_hosts_launch_with_no_extra_flags() -> None:
+    # Chrome on a headless server has no keychain to mock, so a flag leaking
+    # onto that path would break the only browser it has.
+    assert fz_mod._fetch_browser_args(fz_mod._fetch_browser(platform="linux")) == []
+
+
+def test_no_install_falls_back_to_zendriver(roots: tuple[Path, Path]) -> None:
+    # A miss must cost click capture, never the fetch: "" means "let zendriver
+    # find Chrome".
+    del roots
+
+    assert fz_mod._fetch_browser(platform="darwin") == ""
+
+
+def test_a_puppeteer_install_is_found(roots: tuple[Path, Path]) -> None:
+    expected = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
+
+    assert fz_mod._fetch_browser(platform="darwin") == str(expected)
+
+
+def test_a_playwright_install_is_found(roots: tuple[Path, Path]) -> None:
+    expected = _fetch_browser_install(roots[1], "chromium-1217")
+
+    assert fz_mod._fetch_browser(platform="darwin") == str(expected)
+
+
+def test_the_newest_build_wins(roots: tuple[Path, Path]) -> None:
+    # Builds accumulate across upgrades; a stale one eventually cannot read a
+    # profile the current browser wrote.
+    _ = _fetch_browser_install(roots[0], "mac_arm-131.0.6778.85")
+    newest = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
+
+    assert fz_mod._fetch_browser(platform="darwin") == str(newest)
+
+
+@pytest.mark.parametrize(
+    ("older", "newer"),
+    [
+        ("mac_arm-99.0.4844.51", "mac_arm-100.0.4896.60"),
+        ("chromium-999", "chromium-1000"),
+    ],
+)
+def test_build_order_is_numeric_not_lexical(
+    roots: tuple[Path, Path], older: str, newer: str
+) -> None:
+    # Text comparison ranks "99" above "100", which silently pins fetches to
+    # the older browser at every version rollover past a digit boundary.
+    _ = _fetch_browser_install(roots[0], older)
+    expected = _fetch_browser_install(roots[0], newer)
+
+    assert fz_mod._fetch_browser(platform="darwin") == str(expected)
+
+
+def test_unversioned_build_directories_still_order_deterministically() -> None:
+    # Filesystem iteration order is arbitrary, so names carrying no digits
+    # must not leave the choice to it. Ranked directly rather than through a
+    # fixture: a fixture would have to observe the very order in question.
+    unversioned = [Path("beta"), Path("alpha"), Path("dev")]
+
+    ranked = sorted(unversioned, key=fz_mod._build_order, reverse=True)
+
+    assert [path.name for path in ranked] == ["dev", "beta", "alpha"]
+
+
+def test_a_directory_without_the_binary_is_skipped(roots: tuple[Path, Path]) -> None:
+    # Playwright's roots include ``ffmpeg-*`` and other non-browser payloads,
+    # and an interrupted download leaves a build directory with no binary.
+    (roots[1] / "ffmpeg-1011").mkdir(parents=True)
+    expected = _fetch_browser_install(roots[1], "chromium-1217")
+
+    assert fz_mod._fetch_browser(platform="darwin") == str(expected)
+
+
+def test_an_intel_download_is_found(roots: tuple[Path, Path]) -> None:
+    # The only build on an Intel Mac, and runnable under Rosetta on Apple
+    # silicon, so keying discovery to the host arch would skip a usable one.
+    expected = _fetch_browser_install(
+        roots[0], "mac-147.0.7727.57", arch="chrome-mac-x64"
+    )
+
+    assert fz_mod._fetch_browser(platform="darwin") == str(expected)
+
+
+def test_chrome_for_testing_gets_the_mock_keychain_flag() -> None:
+    """Pinned verbatim: a typo yields a silent hang, not an error.
+
+    Chrome ignores an unknown flag rather than rejecting it, so a misspelling
+    restores the keychain prompt and the launch blocks behind it.
+    """
+    assert fz_mod._fetch_browser_args("/cache/ChromeForTesting") == [
+        "--use-mock-keychain"
+    ]
+
+
+def test_stock_chrome_keeps_its_own_keychain() -> None:
+    # It owns a real keychain entry, and mocking that cuts it off from cookies
+    # it legitimately has.
+    assert fz_mod._fetch_browser_args("") == []
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ profile -- to debug a fetch that errored, or to seat a login.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from concurrent.futures import Future
 from html import unescape
 from pathlib import Path
@@ -44,7 +44,7 @@ import warnings
 
 from wesearch.fetch.challenge import classify_challenge
 from wesearch.fetch.common import apply_redirect, origin, pinned_host
-from wesearch.lib.userdirs import data_dir
+from wesearch.lib.userdirs import cache_dir, data_dir
 from wesearch.ratelimit import clear_domain_cooldowns
 from wesearch.types.params import Trust
 
@@ -220,6 +220,101 @@ def _sandbox() -> bool:
     return os.geteuid() != 0
 
 
+def _fetch_browser(*, platform: str = sys.platform) -> str:
+    """A Chrome that will not capture the user's link clicks.
+
+    On macOS a headless Chrome launched from the installed bundle registers
+    as ``com.google.Chrome`` and outranks the user's own windows, so
+    LaunchServices hands it every ``open https://...`` -- what a
+    command-click becomes -- and it drops them. Links stop opening
+    system-wide for the duration of a fetch, and ``open`` still exits 0.
+
+    No launch flag avoids this; only a different bundle id does, and it must
+    come from the vendor, since editing a copy's breaks Chrome's signature
+    and the kernel then kills it. Chrome for Testing ships as
+    ``com.google.chrome.for.testing``.
+
+    Args:
+      platform: Platform tag to resolve against; defaults to the running one.
+
+    Returns:
+      executable: Chrome for Testing path, or ``""`` when none is installed
+          and on every non-macOS host. ``zendriver.Config`` reads ``""`` as
+          "find Chrome yourself", so a miss costs click capture, not a fetch.
+
+    """
+    # Elsewhere a URL reaches a browser through xdg-open and the desktop
+    # file, never a running process, so there is no capture to prevent.
+    if platform != "darwin":
+        return ""
+    for candidate in _fetch_browser_candidates():
+        if candidate.is_file():
+            return str(candidate)
+    logger.debug("no Chrome for Testing found; falling back to zendriver's Chrome")
+    return ""
+
+
+def _fetch_browser_candidates() -> Iterator[Path]:
+    """Chrome for Testing binaries, newest build first.
+
+    Read from wherever Puppeteer or Playwright already downloaded one;
+    neither is a dependency, and nothing here installs a browser.
+    """
+    roots = (
+        # Puppeteer hardcodes ~/.cache on every platform, so this one does
+        # NOT follow the macOS convention that ``cache_dir()`` implements.
+        Path.home() / ".cache" / "puppeteer" / "chrome",
+        cache_dir() / "ms-playwright",
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for build in sorted(root.iterdir(), key=_build_order, reverse=True):
+            # Both arches: the tag names the download, and Rosetta runs an
+            # x64 build on Apple silicon.
+            yield from (
+                build / arch / name / "Contents" / "MacOS" / stem
+                for arch in ("chrome-mac-arm64", "chrome-mac-x64")
+                for name, stem in (
+                    ("Google Chrome for Testing.app", "Google Chrome for Testing"),
+                    ("Chromium.app", "Chromium"),
+                )
+            )
+
+
+def _build_order(build: Path) -> tuple[list[int], str]:
+    """Sort key ranking a download directory by version, newest highest.
+
+    Numeric, not lexical: these names carry a dotted version
+    (``mac_arm-147.0.7727.57``) or a bare revision (``chromium-1217``), and
+    comparing them as text ranks 99 above 100.
+    """
+    # The name second, so unversioned directories still order deterministically
+    # rather than by whatever iteration order the filesystem returns.
+    return [int(part) for part in re.findall(r"\d+", build.name)], build.name
+
+
+def _fetch_browser_args(
+    executable: str,
+    *,
+    mock_keychain: str = "--use-mock-keychain",
+) -> list[str]:
+    """Extra Chrome flags the fetch browser needs.
+
+    Args:
+      executable: Path from :func:`_fetch_browser`; ``""`` means stock Chrome.
+      mock_keychain: Encrypts cookies with a throwaway key. Chrome for Testing
+          otherwise blocks in startup on a Safe Storage keychain prompt, which
+          looks like a browser that launched but never exposed DevTools.
+
+    Returns:
+      args: Flags to append. Empty for stock Chrome, which owns a real
+          keychain entry that mocking would cut it off from.
+
+    """
+    return [mock_keychain] if executable else []
+
+
 class BrowserResult(NamedTuple):
     """What a browser fetch yields: the rendered page and the cookies it holds.
 
@@ -390,12 +485,18 @@ async def _launch_browser(
     """Launch vanilla Chrome on the persistent profile."""
     profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
     _tolerate_late_cdp_replies()
+    # Headed too, not just headless: an instance answering for
+    # ``com.google.Chrome`` takes the operator's links either way, and one
+    # rule is easier to keep true than a per-mode one.
+    executable = await asyncio.to_thread(_fetch_browser)
     try:
         return await zendriver.start(
             zendriver.Config(
                 headless=headless,
                 user_data_dir=str(profile_dir),
                 sandbox=_sandbox(),
+                browser_executable_path=executable,
+                browser_args=_fetch_browser_args(executable),
                 # zendriver retries the DevTools connection ``max_tries`` times,
                 # each bounded by ``timeout``; the product is the launch's dead
                 # time when Chrome cannot connect. Healthy Chrome exposes
