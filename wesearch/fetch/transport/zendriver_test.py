@@ -22,6 +22,8 @@ import tempfile
 import threading
 import time
 
+from zendriver.core.connection import Transaction
+
 import pytest
 import zendriver
 
@@ -39,6 +41,12 @@ import wesearch.fetch.transport.zendriver as fz_mod
 # A fake profile dir; the browser is mocked in every test, so it is never
 # touched on disk.
 _PROFILE = Path("test-profile")
+
+# Captured at IMPORT, which is the only moment it is still reachable: arming is
+# class-wide and permanent, and earlier tests in this module launch browsers, so
+# a test that read ``Transaction.__call__`` at call time would restore the guard
+# it means to remove and assert nothing.
+_VENDOR_TRANSACTION_CALL = Transaction.__call__
 
 
 @pytest.mark.cli_python_subprocess
@@ -1962,6 +1970,55 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
     )
 
     assert waits == [pytest.approx(60.0)]
+
+
+def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction() -> None:
+    """A CDP reply arriving after its transaction was cancelled must be dropped.
+
+    ``Transaction.__call__`` sets the result unconditionally, so a reply landing
+    on a cancelled future raises ``InvalidStateError`` inside
+    ``Listener.listener_loop`` and kills the listener for the whole connection.
+    Every fetch here is cancellable (``_navigate`` wraps the navigation in
+    ``asyncio.timeout``) and Chrome answers the in-flight ``Page.navigate``
+    afterwards, so a timed-out fetch leaves the pooled browser deaf to every
+    later one.
+
+    Driven through ``_launch_browser`` rather than by calling the patcher
+    directly: arming it on the launch path is the contract -- a fetch must never
+    reach live CDP traffic with the vendor's unguarded ``__call__`` in place.
+    """
+
+    async def fake_start(config: Any) -> _FakeBrowser:
+        del config
+        return _FakeBrowser()
+
+    async def go() -> None:
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(zendriver, "start", fake_start)
+            # Restored to the VENDOR's own ``__call__``, undoing any arming an
+            # earlier test in this process did: the guard is installed
+            # class-wide, so without this the assertions below pass vacuously.
+            patcher.setattr(Transaction, "__call__", _VENDOR_TRANSACTION_CALL)
+            await fz_mod._launch_browser(_PROFILE, headless=True)
+
+            # ``result`` alone, though the listener splats the whole message:
+            # the vendor reads only ``error`` and ``result``, and its
+            # ``**response: dict[str, Any]`` annotation rejects the integer
+            # ``id`` a real reply also carries.
+            cancelled = Transaction(zendriver.cdp.page.navigate("about:blank"))
+            cancelled.cancel()
+            cancelled(result={"frameId": "F", "loaderId": "L"})
+            assert cancelled.cancelled()
+
+            # The guard must drop only what is already settled: a reply to a
+            # LIVE transaction still has to reach the caller awaiting it.
+            live = Transaction(zendriver.cdp.page.navigate("about:blank"))
+            live(result={"frameId": "F", "loaderId": "L"})
+            assert cast("tuple[object, ...]", live.result())[0] == (
+                zendriver.cdp.page.FrameId("F")
+            )
+
+    asyncio.run(go())
 
 
 def test_pool_shutdown_joins_thread_and_closes_loop() -> None:

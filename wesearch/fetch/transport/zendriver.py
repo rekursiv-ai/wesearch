@@ -51,6 +51,7 @@ from wesearch.types.params import Trust
 
 if TYPE_CHECKING:
     import zendriver
+    import zendriver.core.connection
 else:
     from wrapt import lazy_import
 
@@ -388,6 +389,7 @@ async def _launch_browser(
 ) -> zendriver.Browser:
     """Launch vanilla Chrome on the persistent profile."""
     profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
+    _tolerate_late_cdp_replies()
     try:
         return await zendriver.start(
             zendriver.Config(
@@ -409,6 +411,48 @@ async def _launch_browser(
         # DevTools connection never comes up. Re-raise it typed so callers can
         # tell "no usable browser here" apart from a fetch/parse failure.
         raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
+
+
+def _tolerate_late_cdp_replies() -> None:
+    """Make zendriver drop a CDP reply whose transaction already finished.
+
+    ``Transaction.__call__`` calls ``set_result`` unconditionally
+    (connection.py:127), so a reply that lands after its future was CANCELLED
+    raises ``InvalidStateError`` -- inside ``Listener.listener_loop``, which
+    kills the listener task for the whole connection. Every fetch here is
+    cancellable by construction (:func:`_navigate` wraps the navigation in
+    ``asyncio.timeout``), and Chrome answers the in-flight ``Page.navigate``
+    afterwards, so the race is not exotic: it is what a timed-out fetch does.
+
+    The damage outlives the fetch that caused it. A dead listener stops
+    dispatching CDP replies AND events, so the pooled browser is silently deaf
+    to every later fetch -- the visible symptom is only the "Task exception was
+    never retrieved" traceback pytest prints at teardown.
+
+    Armed on the launch path, before any CDP traffic exists, and idempotent so
+    repeated launches patch once. Upstream carries the same fix as PR #242,
+    which was auto-closed for inactivity rather than merged.
+
+    References:
+      https://github.com/cdpdriver/zendriver/pull/242
+
+    """
+    # Reached through the module, not bound at import: ``zendriver`` here is a
+    # ``lazy_import`` proxy, and a proxied CLASS answers ``__call__`` with its
+    # own construction hook rather than the class attribute -- patching that
+    # leaves the real ``Transaction`` untouched.
+    transaction = zendriver.core.connection.Transaction
+    vendor = cast("Callable[..., None]", transaction.__call__)
+    # Keyed on the DEFINING module, so a second launch does not stack a second
+    # wrapper: an armed class carries this module's function.
+    if vendor.__module__ == __name__:
+        return
+
+    def call(self: zendriver.core.connection.Transaction, **response: Any) -> None:
+        if not self.done():
+            vendor(self, **response)
+
+    transaction.__call__ = call
 
 
 async def _navigate_tab(
