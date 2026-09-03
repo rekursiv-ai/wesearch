@@ -101,6 +101,15 @@ def drive_chrome(
                 "--disable-gpu",
                 "--incognito",
                 f"--user-data-dir={profile}",
+                # Without this, Chrome asks the D-Bus Secret Service for its
+                # password-store key, and a registered-but-locked keyring --
+                # any headless server someone has logged into -- never
+                # answers. Every page load then hangs forever while
+                # about:blank still renders. Safe because this profile is
+                # incognito and discarded per call; the persistent one that
+                # can hold a seated login belongs to the zendriver backend,
+                # which launches its own Chrome.
+                "--password-store=basic",
                 *(["--no-sandbox"] if disable_sandbox else []),
                 *(["--ignore-certificate-errors"] if ignore_certificate_errors else []),
                 "--dump-dom",
