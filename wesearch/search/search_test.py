@@ -968,11 +968,11 @@ class TestLiveQueryAvailabilitySkips:
 
     Lives HERE, not beside the helper it exercises: EVERY test in
     ``search_integration_test.py`` carries ``integration``, which the default
-    tier deselects (``pyproject.toml:423``). Measured -- a bare passing
-    ``test_probe`` written into that file reports ``1 deselected``, and the
-    identical file without the ``_integration`` suffix reports ``1 passed``. A
-    unit test placed there would therefore never run in the tier that guards
-    this logic.
+    tier deselects via ``addopts`` in ``pyproject.toml``. Measured -- a bare
+    passing ``test_probe`` written into that file reports ``1 deselected``, and
+    the identical file without the ``_integration`` suffix reports ``1
+    passed``. A unit test placed there would therefore never run in the tier
+    that guards this logic.
     """
 
     @staticmethod
@@ -989,11 +989,11 @@ class TestLiveQueryAvailabilitySkips:
     def test_skips_a_backend_that_never_answered(self) -> None:
         """``search`` classifies this; a direct backend call bypassed it.
 
-        ``TimeoutError`` is in the tuple ``search`` converts to ``SearchError``
-        (``search.py:268``), but the live cases call each backend DIRECTLY and
-        so never reach that facade. Observed in CI: Google served its enablejs
-        shell to curl, the browser fallback never returned, and the run failed
-        on a bare ``TimeoutError`` while the sibling query passed in 6.91s.
+        ``TimeoutError`` is in the tuple ``search`` converts to ``SearchError``,
+        but the live cases call each backend DIRECTLY and so never reach that
+        facade. Observed in CI: Google served its enablejs shell to curl, the
+        browser fallback never returned, and the run failed on a bare
+        ``TimeoutError`` while the sibling query passed in 6.91s.
         """
 
         def never_answers(timeout_sec: float) -> list[str]:

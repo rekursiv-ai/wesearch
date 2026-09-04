@@ -344,6 +344,7 @@ def fetch_zendriver(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     trust: Trust = "untrusted",
+    max_redirects: int = 10,
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
     """Fetch ``url`` in a pooled headless Chrome; return its body and cookies.
@@ -368,6 +369,9 @@ def fetch_zendriver(
         deliberately not intercepted; see :func:`_guard_requests`. Required
         rather than defaulted, because a transport that cannot express the
         policy cannot be held to it.
+      max_redirects: Document hops Chrome may follow; ``0`` disables redirects,
+        matching :class:`~wesearch.types.params.RetryParams`. Enforced in
+        the request guard, the only seam that sees a hop before it runs.
       on_redirect: Called with each document hop before it is followed; raise to
         abort it.
 
@@ -385,6 +389,7 @@ def fetch_zendriver(
             headers=headers,
             cookies=cookies,
             trust=trust,
+            max_redirects=max_redirects,
             on_redirect=on_redirect,
         ),
         # Above the coroutine's own budget, so a normal timeout still raises
@@ -469,12 +474,19 @@ async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> N
     call. Long, deliberately: a healthy stop terminates Chrome and waits up to
     3s for the process, so a tight bound would abandon live browsers that were
     about to exit.
+
+    Every failure is swallowed, not just the timeout: this runs from an
+    ``except BaseException`` with the real error in flight, so anything raised
+    here REPLACES it -- the operator learns the browser would not close and
+    never learns why the page failed. Cleanup reports nothing over its caller.
     """
     try:
         async with asyncio.timeout(budget_sec):
             await browser.stop()
     except TimeoutError:
         logger.debug("browser stop timed out; abandoning the browser")
+    except Exception:
+        logger.debug("browser stop failed; abandoning the browser", exc_info=True)
 
 
 async def _launch_browser(
@@ -517,10 +529,10 @@ async def _launch_browser(
 def _tolerate_late_cdp_replies() -> None:
     """Make zendriver drop a CDP reply whose transaction already finished.
 
-    ``Transaction.__call__`` calls ``set_result`` unconditionally
-    (connection.py:127), so a reply that lands after its future was CANCELLED
-    raises ``InvalidStateError`` -- inside ``Listener.listener_loop``, which
-    kills the listener task for the whole connection. Every fetch here is
+    ``Transaction.__call__`` calls ``set_result`` unconditionally, so a reply
+    that lands after its future was CANCELLED raises ``InvalidStateError`` --
+    inside ``Listener.listener_loop``, which kills the listener task for the
+    whole connection. Every fetch here is
     cancellable by construction (:func:`_navigate` wraps the navigation in
     ``asyncio.timeout``), and Chrome answers the in-flight ``Page.navigate``
     afterwards, so the race is not exotic: it is what a timed-out fetch does.
@@ -562,13 +574,19 @@ async def _navigate_tab(
     *,
     headers: dict[str, str] | None = None,
     trust: Trust = "untrusted",
+    max_redirects: int = 10,
     on_redirect: Callable[[str], None] | None = None,
 ) -> zendriver.Tab:
     """Open a blank tab, arm the per-request guard, apply headers, navigate."""
     tab = await browser.get("about:blank", new_tab=True)
     try:
         await _guard_requests(
-            tab, url, trust=trust, on_redirect=on_redirect, headers=headers
+            tab,
+            url,
+            trust=trust,
+            on_redirect=on_redirect,
+            max_redirects=max_redirects,
+            headers=headers,
         )
         # Installed tab-wide are ONLY the headers no origin owns. An
         # origin-bound one (a credential, an extended client hint) is attached
@@ -611,11 +629,17 @@ async def _closed(tab: zendriver.Tab, *, budget_sec: float = 5.0) -> None:
     cancellation already in flight, and an unshielded await would re-deliver it
     to the close rather than time the close out.
 
-    ``asyncio.timeout`` rather than ``wait_for``, which measures identically
-    (0.50s against a 0.3s bound, both). ``_navigate`` promises ONE overall
-    budget with no per-step ``wait_for`` resetting it, and
-    ``zendriver_test.py`` enforces that by making ``wait_for`` raise; spending
-    that seam on teardown would trade a real invariant for an equivalent call.
+    An abandoned close is CANCELLED AND AWAITED, never merely cancelled:
+    ``cancel`` only requests it, so returning straight after leaves the task
+    pending on a loop that outlives this call -- the pool's loop runs forever
+    (see :meth:`_BrowserPool._run_loop`), so the task finalizes late or not at
+    all and raises into a loop nobody is watching. Under ``asyncio.run`` the
+    loop dies immediately, which is why a test on one cannot see this.
+
+    Every failure is swallowed, not just the timeout: this runs from
+    :func:`_navigate`'s ``finally`` and :func:`_navigate_tab`'s ``except``, so
+    anything raised here replaces the result or error the caller was about to
+    see. Cleanup reports nothing over its caller.
 
     Args:
       tab: The tab to close.
@@ -630,7 +654,12 @@ async def _closed(tab: zendriver.Tab, *, budget_sec: float = 5.0) -> None:
             await asyncio.shield(task)
     except TimeoutError:
         task.cancel()
+        # Shielded again: this await inherits any cancellation already in
+        # flight, and re-delivering it here would abandon the reaping too.
+        await asyncio.gather(asyncio.shield(task), return_exceptions=True)
         logger.debug("tab close timed out; abandoning the tab")
+    except Exception:
+        logger.debug("tab close failed; abandoning the tab", exc_info=True)
 
 
 async def _guard_requests(
@@ -639,6 +668,7 @@ async def _guard_requests(
     *,
     trust: Trust,
     on_redirect: Callable[[str], None] | None,
+    max_redirects: int,
     headers: dict[str, str] | None = None,
 ) -> None:
     """Validate every DOCUMENT request this tab makes BEFORE Chrome connects.
@@ -659,6 +689,11 @@ async def _guard_requests(
     documents. A rejected request is failed with ``AccessDenied`` rather than
     silently continued: Chrome surfaces that as a navigation error, which is the
     honest outcome for a target policy forbids.
+
+    ``max_redirects`` is enforced here for the same structural reason: Chrome
+    follows hops itself, so this handler is the only place that can refuse one.
+    Without it the browser leg silently ignored a budget both header transports
+    honor, and ``RetryParams`` documents as "0 disables".
     """
     # Fragment stripped: it never reaches the wire, so the initial request would
     # compare unequal and read as a redirect.
@@ -667,6 +702,15 @@ async def _guard_requests(
     # handler from its own connection thread, which has no running loop of its
     # own, so a ``get_running_loop`` inside the callback raises.
     loop = asyncio.get_running_loop()
+    # Where the tab is NOW, not the one URL the caller named. A hop is a
+    # document request that moves off the CURRENT document, which only a
+    # running position can answer: measured against the origin spelling
+    # forever, Chrome's own canonicalization of the initial URL reads as a
+    # redirect, and a genuine hop back to the start reads as none. Mutable
+    # state is safe here -- zendriver dispatches every event for one connection
+    # on a single thread.
+    position = [origin_url]
+    followed = [0]
 
     def on_paused(event: object, *_unused: object) -> None:
         # Two-arg tolerant and isinstance-guarded for the same reasons as
@@ -676,9 +720,21 @@ async def _guard_requests(
             return
         target = event.request.url
         # Interception is scoped to documents (see the pattern below), so every
-        # event here is a navigation; only a CHANGE of URL is a redirect the
-        # caller should hear about.
-        is_hop = target != origin_url
+        # event here is a navigation; only one that LEAVES the current document
+        # is a redirect the caller should hear about.
+        is_hop = not _same_document(target, position[0])
+        position[0] = target
+        if is_hop:
+            followed[0] += 1
+            if followed[0] > max_redirects:
+                # Refused exactly like a forbidden host: Chrome reports it as a
+                # navigation error, which is the honest outcome for a hop the
+                # caller's budget does not cover.
+                logger.debug(
+                    "redirect budget of %d exhausted at %r", max_redirects, target
+                )
+                _dispatch(loop, tab, _fail(event.request_id))
+                return
         try:
             pinned_host(target, trust)
             if is_hop and on_redirect is not None:
@@ -715,6 +771,29 @@ async def _guard_requests(
         request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
     )
     await tab.send(zendriver.cdp.fetch.enable(patterns=[pattern]))
+
+
+def _same_document(target: str, current: str) -> bool:
+    """Whether ``target`` is the document already at ``current``, not a hop.
+
+    Compares what the WIRE carries, so the differences Chrome introduces on its
+    way there are not mistaken for a redirect:
+
+    - The fragment never leaves the client, so ``/page#a`` requests ``/page``.
+    - An empty path is canonicalized to ``/``, so ``https://host`` requests
+      ``https://host/``.
+
+    Both were measured reporting a spurious first hop, and ``on_redirect`` is
+    raise-to-abort -- Google's raises on ``/sorry`` -- so a false hop aborts an
+    ordinary fetch.
+    """
+    return _wire_url(target) == _wire_url(current)
+
+
+def _wire_url(url: str) -> str:
+    """Return ``url`` as it goes on the wire: no fragment, path never empty."""
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(fragment="", path=parts.path or "/"))
 
 
 def _fail(request_id: object) -> object:
@@ -988,6 +1067,7 @@ async def _navigate(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     trust: Trust = "untrusted",
+    max_redirects: int = 10,
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
     """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies.
@@ -1017,7 +1097,12 @@ async def _navigate(
                 ]
             )
         tab = await _navigate_tab(
-            browser, url, headers=headers, trust=trust, on_redirect=on_redirect
+            browser,
+            url,
+            headers=headers,
+            trust=trust,
+            max_redirects=max_redirects,
+            on_redirect=on_redirect,
         )
         try:
             # Half the overall budget: the settle poll must be able to give up

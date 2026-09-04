@@ -69,15 +69,16 @@ _searxng_required = pytest.mark.skipif(
 # user, and "do not burst the search instance", which measurement does not
 # support -- 10 concurrent SearXNG category queries complete in 2.33s wall with
 # zero errors, against 17.55s serialized. Under the repo-default
-# ``--dist=worksteal`` (``pyproject.toml:384``) ``xdist_group`` is IGNORED, so
-# 24 workers piled onto one file and every loser paid the full timeout and then
-# skipped -- the 8.04s cluster, which was queueing, never querying.
+# ``--dist=worksteal`` (``addopts`` in ``pyproject.toml``) ``xdist_group`` is
+# IGNORED, so 24 workers piled onto one file and every loser paid the full
+# timeout and then skipped -- the 8.04s cluster, which was queueing, never
+# querying.
 #
 # Per USER, not per machine. This lived in ``gettempdir()``, which is shared:
 # every checkout and every operator on the host queued on one file, so a
 # colleague's gate run blocked this one.
 _LOCK_DIR = state_dir() / "rekursiv-ai" / "wesearch"
-# ``state_dir`` resolves a path and does not create it (``userdirs.py:138``).
+# ``state_dir`` resolves a path and does not create it.
 _LOCK_DIR.mkdir(parents=True, exist_ok=True)
 
 # Concurrency admitted against the live backends. Sized under the measured
@@ -212,16 +213,15 @@ def _query_once[T](
         ) from error
     except BotDetectionError as error:
         # An egress-IP CAPTCHA/challenge block is persistent (verified), so this
-        # is availability too. Ordered BEFORE FetchError: it subclasses it
-        # (``errors.py:47``).
+        # is availability too. Ordered BEFORE FetchError, which it subclasses.
         raise pytest.skip.Exception(
             f"{backend} served an automated-access block: {error}"
         ) from error
     except TimeoutError as error:
         # A backend that never answered within the ceiling is availability, not
         # a parser fault: nothing was served, so there is no markup to be wrong
-        # about. ``search`` already classifies it this way (``search.py:268``
-        # converts it to SearchError), but these cases call each backend
+        # about. ``search`` already classifies it this way (it converts a
+        # TimeoutError to SearchError), but these cases call each backend
         # DIRECTLY and so never pass through that facade -- which is how CI came
         # to fail on a bare TimeoutError while the sibling query passed.
         #
