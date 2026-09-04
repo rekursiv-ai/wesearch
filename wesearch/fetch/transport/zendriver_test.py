@@ -17,6 +17,7 @@ import asyncio
 import atexit
 import importlib
 import inspect
+import re
 import subprocess
 import tempfile
 import threading
@@ -635,6 +636,137 @@ def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
     assert elapsed < 3.0, f"cleanup outlived its budget: {elapsed:.2f}s"
 
 
+class _RaisingStopBrowser(_FakeBrowser):
+    """A browser whose ``stop`` fails outright rather than hanging."""
+
+    @override
+    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+        del new_tab
+        self.gets.append(url)
+        self.last_tab = _RefusingTab(content="<html>ok</html>", href="")
+        return self.last_tab
+
+    @override
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        raise RuntimeError("stop blew up")
+
+
+def test_a_failing_browser_stop_does_not_replace_the_error_it_cleans_up_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup must never outrank the failure that triggered it.
+
+    ``_stopped`` bounds a stop that HANGS, but an ordinary exception from it
+    propagates out of the ``except BaseException`` block and replaces the
+    navigation error in flight -- so the operator is told the browser would not
+    close, and never told why the page failed. A cleanup that reports its own
+    trouble instead of the caller's is strictly worse than one that says
+    nothing.
+    """
+    browser = _RaisingStopBrowser()
+
+    async def fake_launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
+        del profile_dir, headless
+        return browser
+
+    monkeypatch.setattr(fz_mod, "_launch_browser", fake_launch)
+
+    with pytest.raises(RuntimeError, match="navigation refused"):
+        asyncio.run(fz_mod._open_instance("https://gated.example/page", _PROFILE))
+    assert browser.stop_calls == 1, "the browser was never asked to stop"
+
+
+class _RaisingCloseTab(_FakeTab):
+    """A tab whose ``close`` fails outright rather than hanging."""
+
+    @override
+    async def close(self) -> None:
+        self.closed = True
+        raise RuntimeError("close blew up")
+
+
+class _RaisingCloseBrowser(_FakeBrowser):
+    """A browser handing out :class:`_RaisingCloseTab`."""
+
+    @override
+    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+        del new_tab
+        self.gets.append(url)
+        self.last_tab = _RaisingCloseTab(
+            content="<html><title>Plain</title>ok</html>", href=""
+        )
+        return self.last_tab
+
+
+def test_a_failing_tab_close_does_not_mask_the_fetch_it_cleans_up_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule for the tab: teardown reports nothing over the caller.
+
+    ``_closed`` runs from ``_navigate``'s ``finally``, so an exception it lets
+    escape replaces whatever the fetch was about to return OR raise -- turning
+    a harvested page into a teardown error the caller cannot act on.
+    """
+    browser = _RaisingCloseBrowser()
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://example.com/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+    assert result.body == b"<html><title>Plain</title>ok</html>"
+
+
+class _SlowCancelTab(_FakeTab):
+    """A tab whose close hangs, then does real work while cancelling."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.finalized = False
+
+    @override
+    async def close(self) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A real close releases the target and deregisters its handler;
+            # both are awaits, so cancellation does not finish them instantly.
+            await asyncio.sleep(0)
+            self.finalized = True
+            raise
+
+
+def test_an_abandoned_tab_close_is_reaped_before_the_helper_returns() -> None:
+    """A timed-out close must not outlive the call that gave up on it.
+
+    ``cancel()`` only REQUESTS cancellation; without awaiting the task, the
+    helper returns while it is still pending. Under ``asyncio.run`` the loop
+    dies immediately and hides this, but the pool's loop is persistent
+    (``_BrowserPool._run_loop`` runs forever), so the task survives --
+    finalizing late, or never, and raising into a loop nobody is watching.
+    """
+    tab = _SlowCancelTab(content="<html>ok</html>", href="")
+
+    async def go() -> tuple[int, bool]:
+        before = asyncio.all_tasks()
+        await fz_mod._closed(cast(Any, tab), budget_sec=0.01)
+        leaked = [task for task in asyncio.all_tasks() - before if not task.done()]
+        return len(leaked), tab.finalized
+
+    pending, finalized = asyncio.run(asyncio.wait_for(go(), timeout=10.0))
+    assert pending == 0, (
+        f"{pending} close task(s) still pending after the helper returned"
+    )
+    assert finalized, "the abandoned close never ran its cleanup"
+
+
 def test_open_instance_releases_profile_then_clears_domain_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -952,7 +1084,10 @@ def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
 
 
 def _request_paused(
-    url: str, headers: dict[str, str] | None = None
+    url: str,
+    headers: dict[str, str] | None = None,
+    *,
+    request_id: str = "req-1",
 ) -> zendriver.cdp.fetch.RequestPaused:
     """A real ``RequestPaused`` for a main-frame document request.
 
@@ -972,7 +1107,7 @@ def _request_paused(
         referrer_policy="no-referrer",
     )
     return zendriver.cdp.fetch.RequestPaused(
-        request_id=zendriver.cdp.fetch.RequestId("req-1"),
+        request_id=zendriver.cdp.fetch.RequestId(request_id),
         request=request,
         frame_id=zendriver.cdp.page.FrameId("main"),
         resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
@@ -988,10 +1123,10 @@ def _request_paused(
 class TestBrowserHonorsTrustPerHop:
     """Chrome follows redirects itself, so each hop must be checked before it runs.
 
-    The header transports re-validate every hop (``curl.py:364``,
-    ``stdlib.py:213``) because ``common.py`` states the rule: "A redirect target
-    is a URL like any other and must be re-checked; skipping that is the classic
-    SSRF bypass." The browser leg reached the same rule through a different
+    The header transports re-validate every hop (both call ``pinned_host`` per
+    hop) because ``common.py`` states the rule: "A redirect target is a URL like
+    any other and must be re-checked; skipping that is the classic SSRF
+    bypass." The browser leg reached the same rule through a different
     door -- it validated the URL the CALLER passed and then handed navigation to
     Chrome, which fetched every subsequent hop with nothing watching.
     """
@@ -1285,6 +1420,104 @@ class TestBrowserHonorsTrustPerHop:
         assert tab.failed_requests == ["req-1"]
         assert tab.continued_requests == []
 
+    def test_a_canonicalized_initial_request_is_not_a_hop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chrome normalizes the URL it was given; that is not a redirect.
+
+        A bare host acquires the empty path before it reaches the wire, so
+        comparing the paused target against the caller's SPELLING reports the
+        very first request as a hop. ``on_redirect`` is raise-to-abort and
+        Google's raises on ``/sorry``, so a false hop can abort an ordinary
+        fetch -- the same hazard the fragment case already guards.
+        """
+        browser = _FakeBrowser(
+            href="https://example.com/",
+            paused_events=[_request_paused("https://example.com/")],
+        )
+        _patch_pool(monkeypatch, browser)
+        seen: list[str] = []
+        self._run(browser, url="https://example.com", on_redirect=seen.append)
+        assert seen == []
+
+    def test_a_hop_back_to_the_starting_url_is_still_a_hop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``A -> B -> A`` must report both hops, including the return.
+
+        Comparing each target against the ORIGIN url rather than the previous
+        one makes the second real navigation invisible: a redirect chain that
+        lands back where it started is exactly how a login bounce behaves, and
+        the caller's guard never sees it.
+        """
+        browser = _FakeBrowser(
+            href="https://a.example/start",
+            paused_events=[
+                _request_paused("https://b.example/next"),
+                _request_paused("https://a.example/start"),
+            ],
+        )
+        _patch_pool(monkeypatch, browser)
+        seen: list[str] = []
+        self._run(browser, url="https://a.example/start", on_redirect=seen.append)
+        assert seen == ["https://b.example/next", "https://a.example/start"]
+
+    def test_a_redirect_budget_of_zero_refuses_the_hop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``max_redirects=0`` must stop the browser leg too.
+
+        ``RetryParams`` documents the knob as "Maximum redirects to follow; 0
+        disables" and both header transports honor it (each threads it into its
+        own redirect loop). The browser leg cannot even express it, so a caller
+        that disabled redirects still had Chrome follow them -- a silently
+        weaker contract on the one transport that follows hops itself.
+        """
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("https://public.example/next")]
+        )
+        _patch_pool(monkeypatch, browser)
+        asyncio.run(
+            _navigate(
+                "https://public.example/start",
+                profile_dir=_PROFILE,
+                egress="1.2.3.4",
+                timeout_sec=5.0,
+                headless=True,
+                max_redirects=0,
+                on_redirect=None,
+            )
+        )
+        assert browser.last_tab is not None
+        assert browser.last_tab.failed_requests == ["req-1"]
+        assert browser.last_tab.continued_requests == []
+
+    def test_a_redirect_budget_bounds_the_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One hop is allowed at ``max_redirects=1``; the second is refused."""
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused("https://public.example/one", request_id="hop-1"),
+                _request_paused("https://public.example/two", request_id="hop-2"),
+            ]
+        )
+        _patch_pool(monkeypatch, browser)
+        asyncio.run(
+            _navigate(
+                "https://public.example/start",
+                profile_dir=_PROFILE,
+                egress="1.2.3.4",
+                timeout_sec=5.0,
+                headless=True,
+                max_redirects=1,
+                on_redirect=None,
+            )
+        )
+        assert browser.last_tab is not None
+        assert browser.last_tab.continued_requests == ["hop-1"]
+        assert browser.last_tab.failed_requests == ["hop-2"]
+
     def test_interception_is_scoped_to_documents(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1415,13 +1648,13 @@ def test_navigate_reports_its_own_timeout_when_teardown_also_wedges(
     tab.close()`` runs with that cancellation already spent -- so an unbounded
     close parks there forever and the coroutine NEVER completes. Its
     ``TimeoutError`` is therefore never raised, and the caller instead waits out
-    ``fetch_zendriver``'s ``timeout_sec + 30`` (``zendriver.py:296``) before
-    ``future.result`` raises a bare, wall-less ``TimeoutError``.
+    ``fetch_zendriver``'s ``timeout_sec + 30`` before ``future.result`` raises a
+    bare, wall-less ``TimeoutError``.
 
-    That is the CI shape: the traceback ended at
-    ``concurrent/futures/_base.py:456 raise TimeoutError()`` rather than at
-    ``asyncio/timeouts.py __aexit__``, which is what a coroutine reporting its
-    own deadline produces.
+    That is the CI shape: the traceback ended at ``concurrent.futures``'
+    ``Future.result`` raising a bare ``TimeoutError()`` rather than at
+    ``asyncio.timeouts``' ``__aexit__``, which is what a coroutine reporting
+    its own deadline produces.
     """
     browser = _WedgedBrowser()
     _patch_pool(monkeypatch, browser)
@@ -1455,14 +1688,32 @@ def test_navigate_reports_its_own_timeout_when_teardown_also_wedges(
 def test_navigate_uses_one_overall_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    browser = _FakeBrowser()
+    """Every step wait must shrink against ONE deadline, never restart it.
+
+    A CHALLENGE page, not a clear one: ``_settled_content`` returns on its
+    first read when the document is already clear, so a clear page never
+    reaches the two step waits and the assertion below has nothing to observe.
+    Measured on the previous fixture: zero ``wait_for`` calls, i.e. the test
+    passed without exercising the invariant it names.
+    """
+    browser = _FakeBrowser(
+        documents=["<html><title>Just a moment...</title></html>", "<html>ok</html>"],
+    )
     _patch_pool(monkeypatch, browser)
 
-    async def reject_step_timeout(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise AssertionError("Per-step timeout resets the request budget.")
+    budgets: list[float] = []
+    real_wait_for = asyncio.wait_for
 
-    monkeypatch.setattr(asyncio, "wait_for", reject_step_timeout)
+    async def record_budget(
+        awaitable: Any,
+        timeout: float | None = None,  # noqa: ASYNC109 -- mirrors asyncio.wait_for
+    ) -> Any:
+        # A per-step timeout that RESET the budget would hand out a constant;
+        # one overall deadline yields a strictly shrinking remainder.
+        budgets.append(-1.0 if timeout is None else timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", record_budget)
     asyncio.run(
         _navigate(
             "https://example.com/",
@@ -1473,6 +1724,15 @@ def test_navigate_uses_one_overall_timeout(
             on_redirect=None,
         )
     )
+
+    assert len(budgets) >= 2, f"the settle path never reached its step waits: {budgets}"
+    assert all(timeout >= 0.0 for timeout in budgets), (
+        f"a step wait was left unbounded: {budgets}"
+    )
+    assert budgets == sorted(budgets, reverse=True), (
+        f"step waits did not shrink against one deadline: {budgets}"
+    )
+    assert max(budgets) <= 5.0 / 2, f"a step wait exceeded the settle budget: {budgets}"
 
 
 def test_navigate_opens_blank_tab_before_requested_url(
@@ -2244,6 +2504,50 @@ def test_stock_chrome_keeps_its_own_keychain() -> None:
     # It owns a real keychain entry, and mocking that cuts it off from cookies
     # it legitimately has.
     assert fz_mod._fetch_browser_args("") == []
+
+
+def test_no_prose_cites_a_line_number_in_this_package() -> None:
+    """A ``file:NNN`` citation in prose rots the moment anything shifts.
+
+    Measured twice. First, four files cited one line of this module for the
+    pool's ``timeout_sec + 30``; inserting the browser-discovery helpers above
+    it moved that code down ~100 lines and left the cited line BLANK. Then a
+    narrower version of THIS guard -- matching only Python files -- passed while
+    two ``pyproject`` citations stayed wrong in the files it had just swept: one
+    claimed ``addopts`` and landed on a GitHub marker, the other claimed
+    ``--dist=worksteal`` and landed on the ``real_llm`` marker.
+
+    A line number is correct for exactly one commit and nothing re-checks it,
+    so name the SYMBOL or the setting instead -- those survive every edit that
+    does not rename them.
+
+    Matched on the repo's OWN file kinds rather than any ``word.word:digits``,
+    which would sweep in ``example.com:443`` and every ``127.0.0.1:8888``: a
+    host and port is not a citation and does not rot. The extension list is the
+    thing that must stay honest -- it is what let the two ``.toml`` citations
+    through -- so it names every kind this repo actually cites.
+
+    Scoped to wesearch, where the drift happened and the convention is being
+    established; the repo-wide sweep is a separate change.
+    """
+    package = Path(__file__).resolve().parent.parent.parent
+    citation = re.compile(
+        r"\b[\w./-]+\.(?:py|pyi|toml|ya?ml|cfg|ini|txt|md|sh|json|lock):\d+"
+    )
+    offenders = [
+        f"{path.relative_to(package)}:{number}: {match.group(0)}"
+        for path in sorted(package.rglob("*.py"))
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        )
+        for match in [citation.search(line)]
+        if match is not None
+    ]
+
+    assert offenders == [], (
+        "prose cites a line number, which silently rots -- name the symbol "
+        f"instead: {offenders}"
+    )
 
 
 if __name__ == "__main__":
