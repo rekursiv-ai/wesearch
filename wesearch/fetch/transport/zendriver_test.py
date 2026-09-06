@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import GeneratorType
 from typing import Any, cast, override
@@ -18,6 +19,7 @@ import atexit
 import importlib
 import inspect
 import re
+import selectors
 import subprocess
 import tempfile
 import threading
@@ -583,12 +585,12 @@ def test_a_wedged_browser_stop_gives_up_at_its_budget() -> None:
 
     async def go() -> float:
         started = time.monotonic()
-        await fz_mod._stopped(cast(Any, browser), budget_sec=0.2)
+        await fz_mod._stopped(cast(zendriver.Browser, browser), budget_sec=0.01)
         return time.monotonic() - started
 
-    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=10.0))
+    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=1.0))
     assert browser.stop_calls == 1, "the browser was never asked to stop"
-    assert elapsed < 3.0, f"stop outlived its 0.2s budget: {elapsed:.2f}s"
+    assert elapsed < 0.5, f"stop outlived its 0.01s budget: {elapsed:.2f}s"
 
 
 def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
@@ -603,7 +605,7 @@ def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
     error into a CLI that hangs having printed nothing.
 
     The budget is shrunk rather than waited out -- what this asserts is that
-    the cleanup routes through the bounded helper at all, which the 0.2s
+    the cleanup routes through the bounded helper at all, which the 0.01s
     substitution shows in the same way 30s would.
     """
     browser = _HangingStopBrowser()
@@ -612,15 +614,8 @@ def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
         del profile_dir, headless
         return browser
 
-    # Bound BEFORE the patch: reading ``fz_mod._stopped`` inside the
-    # replacement would resolve to the replacement itself and recurse.
-    real_stopped = fz_mod._stopped
-
-    async def briefly(browser: Any, *, budget_sec: float = 0.2) -> None:
-        await real_stopped(browser, budget_sec=budget_sec)
-
     monkeypatch.setattr(fz_mod, "_launch_browser", fake_launch)
-    monkeypatch.setattr(fz_mod, "_stopped", briefly)
+    monkeypatch.setattr(fz_mod, "_stopped", partial(fz_mod._stopped, budget_sec=0.01))
 
     async def go() -> float:
         started = time.monotonic()
@@ -628,12 +623,10 @@ def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
             await fz_mod._open_instance("https://gated.example/page", _PROFILE)
         return time.monotonic() - started
 
-    # Ten seconds stands in for the ceiling the real chain lacks: without a
-    # bound the cleanup never returns and THIS fires, surfacing as TimeoutError
-    # instead of the navigation's own error.
-    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=10.0))
+    # The outer ceiling must fail instead of accepting a buried setup error.
+    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=1.0))
     assert browser.stop_calls == 1, "the browser was never asked to stop"
-    assert elapsed < 3.0, f"cleanup outlived its budget: {elapsed:.2f}s"
+    assert elapsed < 0.5, f"cleanup outlived its budget: {elapsed:.2f}s"
 
 
 class _RaisingStopBrowser(_FakeBrowser):
@@ -1658,31 +1651,30 @@ def test_navigate_reports_its_own_timeout_when_teardown_also_wedges(
     """
     browser = _WedgedBrowser()
     _patch_pool(monkeypatch, browser)
+    monkeypatch.setattr(fz_mod, "_closed", partial(fz_mod._closed, budget_sec=0.01))
 
     async def go() -> float:
+        before = asyncio.all_tasks()
         started = time.monotonic()
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError) as error:
             await _navigate(
                 "https://example.com/",
                 profile_dir=_PROFILE,
                 egress="e",
-                timeout_sec=0.2,
+                timeout_sec=0.01,
                 headless=True,
                 on_redirect=None,
             )
+        assert isinstance(error.value.__cause__, asyncio.CancelledError)
+        assert asyncio.all_tasks() - before == set(), "the close task was not reaped"
         return time.monotonic() - started
 
-    # The bound that matters is the POOL's, not a round number: the coroutine
-    # must finish -- and so raise its own TimeoutError -- before
-    # ``fetch_zendriver`` gives up at ``timeout_sec + 30`` and reports a
-    # wall-less one instead. Derived from the constants rather than restated, so
-    # tuning either budget cannot leave this passing vacuously.
-    close_budget = inspect.signature(fz_mod._closed).parameters["budget_sec"].default
-    ceiling = 0.2 + close_budget
-    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=0.2 + 30))
-    assert elapsed < ceiling + 1.0, (
-        f"teardown outlived its budget: {elapsed:.2f}s against {ceiling:.2f}s"
-    )
+    # Outside ``raises``: an unbounded close must fail on the outer deadline.
+    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=1.0))
+    assert elapsed < 0.5, f"teardown outlived its budget: {elapsed:.2f}s"
+    assert browser.last_tab is not None
+    assert browser.last_tab.navigations == ["https://example.com/"]
+    assert browser.last_tab.closed
 
 
 def test_navigate_uses_one_overall_timeout(
@@ -1958,7 +1950,9 @@ def test_navigate_matches_exact_host_cookie(
     assert result.cookies == {"H": "1"}
 
 
-def test_settled_content_returns_promptly_when_the_wall_clears_off_loop() -> None:
+def test_settled_content_returns_promptly_when_the_wall_clears_off_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A challenge that clears must be observed then, not at the deadline.
 
     zendriver dispatches sync handlers off-loop, and a cross-thread
@@ -1967,7 +1961,18 @@ def test_settled_content_returns_promptly_when_the_wall_clears_off_loop() -> Non
     """
     wall = "<html><title>Just a moment...</title></html>"
     handlers: list[Callable[..., None]] = []
-    cleared = False
+    cleared = threading.Event()
+    waiting = threading.Event()
+    selector = selectors.DefaultSelector()
+    real_select = selector.select
+
+    def select(timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
+        if timeout is not None and timeout > 0:
+            waiting.set()
+        return real_select(timeout)
+
+    # Signal only once the loop commits to blocking, so a bare set cannot pass.
+    monkeypatch.setattr(selector, "select", select)
 
     class _ClearsOffLoopTab:
         """Serves the wall until an off-loop navigation event says otherwise.
@@ -1977,34 +1982,42 @@ def test_settled_content_returns_promptly_when_the_wall_clears_off_loop() -> Non
         that hides a wakeup delivered from anywhere else.
         """
 
-        def add_handler(self, event_type: Any, handler: Any) -> None:
+        def add_handler(
+            self, event_type: type[object], handler: Callable[..., None]
+        ) -> None:
             del event_type
-            handlers.append(cast("Callable[..., None]", handler))
+            handlers.append(handler)
 
         async def get_content(self) -> str:
-            return "<html>ok</html>" if cleared else wall
+            return "<html>ok</html>" if cleared.is_set() else wall
 
         async def wait_for_ready_state(self, until: str = "complete") -> bool:
             del until
             return True
 
+    def clear_from_another_thread() -> None:
+        assert waiting.wait(timeout=1.0), "the settle wait never blocked"
+        cleared.set()
+        handlers[0](_main_frame_navigated())
+
     async def go() -> float:
-        tab = _ClearsOffLoopTab()
         started = time.monotonic()
+        thread = threading.Thread(target=clear_from_another_thread)
+        thread.start()
+        try:
+            body = await fz_mod._settled_content(
+                cast(zendriver.Tab, _ClearsOffLoopTab()), budget_sec=1.0
+            )
+            assert body == "<html>ok</html>"
+            return time.monotonic() - started
+        finally:
+            thread.join(timeout=1.0)
+            assert not thread.is_alive()
 
-        def clear_from_another_thread() -> None:
-            nonlocal cleared
-            time.sleep(0.1)  # Let the settle wait park the loop.
-            cleared = True
-            handlers[0](_main_frame_navigated())
-
-        threading.Thread(target=clear_from_another_thread, daemon=True).start()
-        await fz_mod._settled_content(cast(Any, tab), budget_sec=5.0)
-        return time.monotonic() - started
-
-    # Cleared at 0.1s against a 5s budget: finishing under 2s proves the wakeup
-    # arrived, while waiting the budget out lands at ~5s.
-    assert asyncio.run(go()) < 2.0
+    with asyncio.Runner(
+        loop_factory=partial(asyncio.SelectorEventLoop, selector=selector)
+    ) as runner:
+        assert runner.run(go()) < 0.5
 
 
 def test_settled_content_bounds_a_stalled_document_parse() -> None:
@@ -2032,12 +2045,15 @@ def test_settled_content_bounds_a_stalled_document_parse() -> None:
 
     async def go() -> float:
         started = time.monotonic()
-        await fz_mod._settled_content(cast(Any, _StalledParseTab()), budget_sec=0.2)
+        body = await fz_mod._settled_content(
+            cast(zendriver.Tab, _StalledParseTab()), budget_sec=0.01
+        )
+        assert body == wall
         return time.monotonic() - started
 
     # Generous multiple of the budget: this must fail on an UNBOUNDED wait, not
     # on scheduler jitter around a bound that is working.
-    assert asyncio.run(asyncio.wait_for(go(), timeout=10.0)) < 3.0
+    assert asyncio.run(asyncio.wait_for(go(), timeout=1.0)) < 0.5
 
 
 # -- _navigate: redirect callback --------------------------------------------
@@ -2286,9 +2302,12 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
     )
 
     assert waits == [pytest.approx(60.0)]
+    close_budget = inspect.signature(fz_mod._closed).parameters["budget_sec"].default
+    assert isinstance(close_budget, float)
+    assert 0 < close_budget < waits[0] - 30.0
 
 
-def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction() -> None:
+def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) -> None:
     """A CDP reply arriving after its transaction was cancelled must be dropped.
 
     ``Transaction.__call__`` sets the result unconditionally, so a reply landing
@@ -2315,7 +2334,7 @@ def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction() -> None:
             # earlier test in this process did: the guard is installed
             # class-wide, so without this the assertions below pass vacuously.
             patcher.setattr(Transaction, "__call__", _VENDOR_TRANSACTION_CALL)
-            await fz_mod._launch_browser(_PROFILE, headless=True)
+            await fz_mod._launch_browser(tmp_path, headless=True)
 
             # ``result`` alone, though the listener splats the whole message:
             # the vendor reads only ``error`` and ``result``, and its
