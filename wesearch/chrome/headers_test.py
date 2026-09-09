@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import base64
 import hashlib
 
 import pytest
 
 from wesearch.chrome.headers import (
-    ChromePlatform,
     chrome_client_hints,
     chrome_headers_for_google,
     impersonate_version_platform,
@@ -49,7 +46,7 @@ class TestChromeClientHints:
 
     def test_unsupported_platform_rejected(self) -> None:
         with pytest.raises(ValueError, match="platform"):
-            chrome_client_hints(major=146, platform=cast(ChromePlatform, "BeOS"))
+            chrome_client_hints(major=146, platform="BeOS")  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: the invalid platform IS the input under test
 
 
 class TestGoogleChromeHeaders:

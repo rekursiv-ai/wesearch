@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +10,6 @@ import pytest
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.details import (
-    GraphSource,
     citations,
     metadata,
     metadata_batch,
@@ -170,7 +168,12 @@ class TestOpenAlexGraphSource:
         # it were the requested one.
         for verb in (references, citations):
             with pytest.raises(PaperError, match="Unknown citation-graph source"):
-                verb("doi", "10.1/x", limit=1, source=cast(GraphSource, "bogus"))
+                verb(
+                    "doi",
+                    "10.1/x",
+                    limit=1,
+                    source="bogus",  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: the invalid source IS the input under test
+                )
 
     def test_influential_only_rejected_for_openalex(self) -> None:
         with pytest.raises(PaperError, match="S2-only"):
