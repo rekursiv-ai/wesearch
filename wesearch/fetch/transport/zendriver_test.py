@@ -862,7 +862,10 @@ def test_devtools_port_reads_the_macos_profile_owner(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert fz_mod._devtools_port(profile, platform="darwin") == 4567
+    assert (
+        fz_mod._devtools_port(profile, proc_root=tmp_path / "proc", platform="darwin")
+        == 4567
+    )
 
 
 def test_devtools_port_rejects_different_profile_with_shared_prefix(
