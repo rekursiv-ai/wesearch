@@ -836,6 +836,35 @@ def test_devtools_port_falls_back_to_singleton_owner(tmp_path: Path) -> None:
     assert fz_mod._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
 
 
+def test_devtools_port_reads_the_macos_profile_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").symlink_to("tron-123")
+
+    def fake_run(
+        args: list[str], *, capture_output: bool, text: bool, check: bool
+    ) -> subprocess.CompletedProcess[str]:
+        assert args == ["/bin/ps", "-p", "123", "-o", "command="]
+        assert capture_output
+        assert text
+        assert not check
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                "/opt/google/chrome/chrome "
+                f"--user-data-dir={profile} "
+                "--remote-debugging-port=4567 about:blank\n"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert fz_mod._devtools_port(profile, platform="darwin") == 4567
+
+
 def test_devtools_port_rejects_different_profile_with_shared_prefix(
     tmp_path: Path,
 ) -> None:
