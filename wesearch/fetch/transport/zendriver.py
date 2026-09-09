@@ -572,7 +572,7 @@ def _tolerate_late_cdp_replies() -> None:
     # own construction hook rather than the class attribute -- patching that
     # leaves the real ``Transaction`` untouched.
     transaction = zendriver.core.connection.Transaction
-    vendor = cast("Callable[..., None]", transaction.__call__)
+    vendor = cast(Callable[..., None], transaction.__call__)
     # Keyed on the DEFINING module, so a second launch does not stack a second
     # wrapper: an armed class carries this module's function.
     if vendor.__module__ == __name__:
@@ -773,7 +773,7 @@ async def _guard_requests(
 
     event_type = zendriver.cdp.fetch.RequestPaused
     register = cast(
-        "Callable[[type[object], Callable[..., None]], None]", tab.add_handler
+        Callable[[type[object], Callable[..., None]], None], tab.add_handler
     )
     register(event_type, on_paused)
     # DOCUMENT requests only. Intercepting everything pauses each subresource
@@ -816,7 +816,7 @@ def _wire_url(url: str) -> str:
 def _fail(request_id: object) -> object:
     """The CDP verb refusing one intercepted request."""
     return zendriver.cdp.fetch.fail_request(
-        cast("Any", request_id), zendriver.cdp.network.ErrorReason.ACCESS_DENIED
+        cast(Any, request_id), zendriver.cdp.network.ErrorReason.ACCESS_DENIED
     )
 
 
@@ -840,9 +840,9 @@ def _continue(request_id: object, headers: list[object] | None) -> object:
     omission served the page every run.
     """
     if headers is None:
-        return zendriver.cdp.fetch.continue_request(cast("Any", request_id))
+        return zendriver.cdp.fetch.continue_request(cast(Any, request_id))
     return zendriver.cdp.fetch.continue_request(
-        cast("Any", request_id), headers=cast("Any", headers)
+        cast(Any, request_id), headers=cast(Any, headers)
     )
 
 
@@ -924,13 +924,13 @@ def _origin_bound() -> frozenset[str]:
     """
     default = inspect.signature(apply_redirect).parameters["origin_bound"].default
     assert isinstance(default, frozenset)
-    return cast("frozenset[str]", default)
+    return cast(frozenset[str], default)
 
 
 def _header_entries(headers: Mapping[str, str]) -> list[object]:
     """Render a header mapping as the CDP ``HeaderEntry`` list."""
     return [
-        cast("object", zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
+        cast(object, zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
         for name, value in headers.items()
     ]
 
@@ -945,7 +945,7 @@ def _dispatch(
     than awaited here. A handler that blocked on the send would deadlock the
     connection it is trying to answer.
     """
-    coroutine = tab.send(cast("Any", command))
+    coroutine = tab.send(cast(Any, command))
     if loop.is_closed():
         coroutine.close()  # Nothing left to answer; do not warn on a stray task.
         return
@@ -1126,7 +1126,7 @@ async def _navigate(
             # and still leave time to harvest cookies and return the wall, so a
             # blocked page surfaces its BotDetectionError instead of a timeout.
             body = await _settled_content(tab, budget_sec=timeout_sec / 2)
-            final_url = cast("str", await tab.evaluate("document.location.href")) or url
+            final_url = cast(str, await tab.evaluate("document.location.href")) or url
             # Cookies are browser-wide (shared jar), so harvest before closing the
             # tab; the closed tab's cookies persist in the profile regardless.
             #

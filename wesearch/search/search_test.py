@@ -56,12 +56,13 @@ def _patch_fetch(
 ) -> AbstractContextManager[MagicMock | AsyncMock]:
     # fetch returns (body, session); wrap the byte-valued test inputs so the
     # mock matches that shape (an exception side_effect still raises).
-    kwargs: dict[str, Any] = {}
+    # Two direct calls rather than one `**kwargs` splat: the branches set
+    # mutually exclusive keys, and splatting a `dict[str, Any]` into `patch`'s
+    # overload set erases what it returns.
+    target = f"wesearch.search.{module}.fetch"
     if side_effect is not None:
-        kwargs["side_effect"] = _tuple_side_effect(side_effect)
-    else:
-        kwargs["return_value"] = (return_value, FetchSession())
-    return patch(f"wesearch.search.{module}.fetch", **kwargs)  # ty: ignore[unsound-return-statement] -- dynamic **kwargs into patch's overloads erases the return type
+        return patch(target, side_effect=_tuple_side_effect(side_effect))
+    return patch(target, return_value=(return_value, FetchSession()))
 
 
 def _tuple_side_effect(side_effect: Any) -> Any:
@@ -975,9 +976,9 @@ class TestLiveQueryAvailabilitySkips:
     that guards this logic.
     """
 
-    @staticmethod
+    @classmethod
     def _run(
-        fetch: Callable[[float], list[str]], *, backend: str, timeout_sec: float
+        cls, fetch: Callable[[float], list[str]], *, backend: str, timeout_sec: float
     ) -> list[str]:
         """Call the live helper, imported at use so collection stays cheap."""
         from wesearch.search.search_integration_test import (  # noqa: PLC0415 -- see class docstring

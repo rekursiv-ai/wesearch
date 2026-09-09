@@ -785,7 +785,7 @@ class TestFetchSession:
         assert dict(session.cookies) == {}
         assert dict(session.accept_ch) == {}
         with pytest.raises(AttributeError):
-            session.impersonate = "firefox"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]
+            session.impersonate = "firefox"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: the write to a frozen field IS the input under test
 
     def test_with_cookies_returns_a_merged_copy(self) -> None:
         base = FetchSession(cookies={"https://x.com": {"a": "1"}})

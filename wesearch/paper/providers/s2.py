@@ -429,7 +429,7 @@ def _search_offset_advance(body: MutableJSON, offset: int, _size: int) -> int | 
 def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
     """Parse S2 JSON bytes, mapping a decode failure to :class:`BackendError`."""
     try:
-        return cast("MutableJSON | list[object]", json.loads(raw))
+        return cast(MutableJSON | list[object], json.loads(raw))
     except json.JSONDecodeError as e:
         raise BackendError(
             f"Semantic Scholar returned invalid JSON for {what}: {e}"
