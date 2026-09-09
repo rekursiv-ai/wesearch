@@ -12,7 +12,7 @@ that category's record.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal, overload
 
 import json
@@ -235,17 +235,28 @@ def search(
         raise ValueError(
             f"'categories' is only supported by the 'searxng' backend, not {backend!r}."
         )
+    # Table dispatch, not an if-chain: a chain over a closed ``Literal``
+    # exhausts it, so its last test and the unknown-backend guard both become
+    # provably dead -- and at a DIFFERENT branch per build, since the export
+    # drops ``google``. ``Mapping.get`` returns ``V | None`` whatever the
+    # Literal's width, which is what keeps that guard reachable in both.
+    backends: Mapping[str, Callable[[], Sequence[SearxngResult]]] = {
+        "searxng": lambda: searxng(
+            query,
+            num_results,
+            headers,
+            categories=categories,
+            transport=transport,
+        ),
+        "duckduckgo": lambda: duckduckgo(
+            query, num_results, headers, transport=transport
+        ),
+    }
+    run = backends.get(backend)
+    if run is None:
+        raise ValueError(f"Unknown backend: {backend!r}")
     try:
-        if backend == "searxng":
-            return searxng(
-                query,
-                num_results,
-                headers,
-                categories=categories,
-                transport=transport,
-            )
-        if backend == "duckduckgo":
-            return duckduckgo(query, num_results, headers, transport=transport)
+        return run()
     except BotDetectionError:
         # A bot-detection block carries actionable, type-specific guidance
         # (solve captcha / rotate IP). It is-a FetchError, so it MUST be caught
@@ -260,11 +271,3 @@ def search(
         json.JSONDecodeError,
     ) as e:
         raise SearchError(f"{backend} search failed: {e}") from e
-    # Unreachable in EVERY build, not just this one: the branches above exhaust
-    # `SearchBackends`, so basedpyright proves the line dead whether the Literal
-    # has two members (export) or three (monorepo). Kept anyway -- it is what
-    # turns a runtime-invalid backend string into a named error rather than a
-    # silent `None` return.
-    raise ValueError(  # pyright: ignore[reportUnreachable] -- see above
-        f"Unknown backend: {backend!r}"
-    )

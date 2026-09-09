@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from wesearch.lib.custom_json import IntCodec, MutableJSON
+from wesearch.lib.custom_json import IntCodec, MutableJSON, MutableJSONValue
 from wesearch.paper.errors import BackendError
 from wesearch.paper.paginate import Cursor, paginate
 
@@ -29,7 +29,8 @@ def _offset_cursor(
         del size
         idx = offset  # pages are indexed by page number for simplicity
         rows = pages[idx] if idx < len(pages) else []
-        return cast(MutableJSON, {"data": rows})
+        body: MutableJSON = {"data": [*rows]}
+        return body
 
     def advance(body: MutableJSON, position: int, size: int) -> int | None:
         rows = body.get("data") or []
@@ -56,7 +57,9 @@ class TestPaginate:
 
         def do_fetch(offset: int, size: int) -> MutableJSON:
             sizes.append(size)
-            return cast(MutableJSON, {"data": [{"n": offset}] * size})  # always full
+            rows: list[MutableJSONValue] = [{"n": offset}] * size  # always full
+            body: MutableJSON = {"data": rows}
+            return body
 
         cursor = _offset_cursor(
             [], page_size_max=200, fetch=MagicMock(side_effect=do_fetch)

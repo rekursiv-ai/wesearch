@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import cast
 from unittest.mock import patch
 
 import pytest
 
-from wesearch.lib.custom_json import MutableJSON
+from wesearch.lib.custom_json import MutableJSON, MutableJSONValue
 from wesearch.paper import search as search_mod
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
@@ -15,7 +14,7 @@ from wesearch.paper.providers import (
     openalex,
     s2,
 )
-from wesearch.paper.search import Source, search
+from wesearch.paper.search import search
 
 
 def _rec(title: str, source: str) -> PaperRecord:
@@ -49,7 +48,7 @@ class TestSearchDispatch:
 
     def test_unknown_source_raises(self) -> None:
         with pytest.raises(PaperError, match="Unknown search source"):
-            search("q", source=cast(Source, "bogus"))
+            search("q", source="bogus")  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: the invalid source IS the input under test
 
 
 class TestFusedSearch:
@@ -243,8 +242,11 @@ class TestS2SearchParams:
             del transport
             del path
             offset = int(params.get("offset", 0))
-            rows = [{"title": f"p{offset + i}"} for i in range(100)]
-            return cast(MutableJSON, {"total": 250, "data": rows})
+            rows: list[MutableJSONValue] = [
+                {"title": f"p{offset + i}"} for i in range(100)
+            ]
+            body: MutableJSON = {"total": 250, "data": rows}
+            return body
 
         with patch.object(s2, "get", side_effect=fake_get):
             result = search("q", source="s2", limit=200)
