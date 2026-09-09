@@ -36,6 +36,7 @@ import os
 import re
 import socket
 import socketserver
+import subprocess
 import sys
 import tempfile
 import threading
@@ -171,17 +172,17 @@ def _close_orphan_browser(profile_dir: Path) -> None:
     raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
 
 
-def _devtools_port(profile_dir: Path, *, proc_root: Path = Path("/proc")) -> int | None:
+def _devtools_port(
+    profile_dir: Path,
+    *,
+    proc_root: Path = Path("/proc"),
+    platform: str = sys.platform,
+) -> int | None:
     """Read the verified profile owner's active DevTools port."""
     try:
         owner = (profile_dir / "SingletonLock").readlink()
         pid = int(str(owner).rsplit("-", 1)[1])
-        command = (
-            (proc_root / str(pid) / "cmdline")
-            .read_bytes()
-            .replace(b"\0", b" ")
-            .decode()
-        )
+        command = _process_command(pid, proc_root=proc_root, platform=platform)
     except (FileNotFoundError, IndexError, OSError, UnicodeError, ValueError):
         return None
     if _command_flag(command, "--user-data-dir=") != str(profile_dir.resolve()):
@@ -194,6 +195,22 @@ def _devtools_port(profile_dir: Path, *, proc_root: Path = Path("/proc")) -> int
         return int((profile_dir / "DevToolsActivePort").read_text().splitlines()[0])
     except (FileNotFoundError, IndexError, ValueError):
         return None
+
+
+def _process_command(pid: int, *, proc_root: Path, platform: str) -> str:
+    """Read a process command from the host's process interface."""
+    proc_command = proc_root / str(pid) / "cmdline"
+    if proc_command.is_file() or platform != "darwin":
+        return proc_command.read_bytes().replace(b"\0", b" ").decode()
+    result = subprocess.run(  # noqa: S603 -- PID is parsed as an integer.
+        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise OSError(f"Could not inspect process {pid}.")
+    return result.stdout
 
 
 def _command_flag(command: str, marker: str) -> str | None:
