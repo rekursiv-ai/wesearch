@@ -191,7 +191,7 @@ class _FakeTab:
         # ``DictCodec.coerce`` rather than a bare ``.get`` ladder: the CDP verbs are
         # unstubbed, so their wire dict arrives as ``dict[Unknown, Unknown]``
         # and every read off it is partially unknown.
-        payload = DictCodec.coerce(cast("object", raw))
+        payload = DictCodec.coerce(cast(object, raw))
         # Kept: a generator is single-use, so a test that re-reads ``commands``
         # would find every one exhausted by this very inspection.
         self.wire_commands.append(payload)
@@ -1159,8 +1159,9 @@ class TestBrowserHonorsTrustPerHop:
         # gap because that line does call ``pinned_host``.
         assert "trust" in inspect.signature(fz_mod.fetch_zendriver).parameters
 
-    @staticmethod
+    @classmethod
     def _run(
+        cls,
         browser: _FakeBrowser,
         *,
         url: str = "https://public.example/start",
@@ -2378,7 +2379,7 @@ def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) 
             # LIVE transaction still has to reach the caller awaiting it.
             live = Transaction(zendriver.cdp.page.navigate("about:blank"))
             live(result={"frameId": "F", "loaderId": "L"})
-            assert cast("tuple[object, ...]", live.result())[0] == (
+            assert cast(tuple[object, ...], live.result())[0] == (
                 zendriver.cdp.page.FrameId("F")
             )
 

@@ -10,7 +10,7 @@ from curl_cffi import requests as cc_requests
 
 def lower_headers(kw: dict[str, Any]) -> dict[str, str]:
     """Lower-cased request headers from a curl ``request`` mock's kwargs."""
-    headers = cast("dict[str, str] | None", kw.get("headers")) or {}
+    headers = cast(dict[str, str] | None, kw.get("headers")) or {}
     return {k.lower(): v for k, v in headers.items()}
 
 
