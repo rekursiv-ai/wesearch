@@ -9,8 +9,10 @@ leaves every browser it opened resident.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import ast
+import functools
 
 import pytest
 import yaml
@@ -18,10 +20,10 @@ import yaml
 from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
-CONFTEST = PACKAGE_ROOT / "conftest.py"
+_CWD: Final = Path(__file__).resolve().parent
 
 
+@functools.cache
 def _own_repo_config() -> Path | None:
     """Return this checkout's ``.pre-commit-config.yaml``, or ``None``.
 
@@ -36,16 +38,13 @@ def _own_repo_config() -> Path | None:
     an installed package would be a stranger's, and the assertions below would
     then be made against hooks wesearch does not own.
     """
-    for candidate in [PACKAGE_ROOT, *PACKAGE_ROOT.parents]:
+    for candidate in [_CWD, *_CWD.parents]:
         config = candidate / ".pre-commit-config.yaml"
         if config.is_file():
             return config
         if (candidate / ".git").exists():
             return None
     return None
-
-
-_CONFIG = _own_repo_config()
 
 
 def test_the_conftest_imports_at_module_scope() -> None:
@@ -57,7 +56,8 @@ def test_the_conftest_imports_at_module_scope() -> None:
     by a guess about import cost rather than a measurement -- which is also what
     the comment rule rejects.
     """
-    tree = ast.parse(CONFTEST.read_text(encoding="utf-8"), str(CONFTEST))
+    conftest = _CWD / "conftest.py"
+    tree = ast.parse(conftest.read_text(encoding="utf-8"), str(conftest))
     inline = [
         f"line {node.lineno}: {ast.unparse(node)}"
         for parent in ast.walk(tree)
@@ -66,7 +66,7 @@ def test_the_conftest_imports_at_module_scope() -> None:
         if isinstance(node, (ast.Import, ast.ImportFrom))
     ]
 
-    assert inline == [], f"{CONFTEST.name} imports inside a function: {inline}"
+    assert inline == [], f"{conftest.name} imports inside a function: {inline}"
 
 
 def test_the_package_conftest_binds_browser_teardown() -> None:
@@ -82,7 +82,7 @@ def test_the_package_conftest_binds_browser_teardown() -> None:
     ``yield`` left three substring checks passing against a fixture that reaps
     nothing.
     """
-    fixture = _fixture_def(CONFTEST, name="close_pooled_browsers")
+    fixture = _fixture_def(_CWD / "conftest.py", name="close_pooled_browsers")
 
     decorator = next(
         node
@@ -145,8 +145,8 @@ def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
     # call by name, and a substring search reports those as violations. Only a
     # real Call node is one.
     offenders = [
-        str(path.relative_to(PACKAGE_ROOT))
-        for path in sorted(PACKAGE_ROOT.rglob("*_test.py"))
+        str(path.relative_to(_CWD))
+        for path in sorted(_CWD.rglob("*_test.py"))
         if path != Path(__file__)
         and _calls(
             ast.parse(path.read_text(encoding="utf-8"), str(path)), "shutdown_browsers"
@@ -173,16 +173,17 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
     so ``loadgroup`` falls back to per-test scope there and its tests may land
     on any worker.
     """
-    if _CONFIG is None:
+    config_path = _own_repo_config()
+    if config_path is None:
         pytest.skip("no .pre-commit-config.yaml above this package")
     marked = [
         path.name
-        for path in sorted(PACKAGE_ROOT.rglob("*_test.py"))
+        for path in sorted(_CWD.rglob("*_test.py"))
         if "xdist_group" in path.read_text(encoding="utf-8") and path != Path(__file__)
     ]
     assert marked, "no test file marks an xdist group; this guard is vacuous"
 
-    config = DictCodec.coerce(yaml.safe_load(_CONFIG.read_text(encoding="utf-8")))
+    config = DictCodec.coerce(yaml.safe_load(config_path.read_text(encoding="utf-8")))
     integration = [
         hook
         for repo in ListCodec.mappings(config.get("repos", []))
