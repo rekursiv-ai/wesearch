@@ -439,7 +439,7 @@ class TestHeaderOrder:
         # Stdlib path is selected per-call via transport="stdlib", not a global.
         return
 
-    def _capture_headers(self, **fetch_kwargs: Any) -> dict[str, str]:
+    def _capture_headers(self, **fetch_kwargs: Any) -> dict[str, str]:  # noqa: ANN401 -- forwarded to an upstream Any.
         resp = Mock(spec=http.client.HTTPResponse)
         resp.status = 200
         resp.read.return_value = b"ok"

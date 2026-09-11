@@ -70,7 +70,7 @@ class StubSession:
     def __init__(self) -> None:
         self.cookies = StubCookies()
 
-    def request(self, *args: Any, **kwargs: Any) -> cc_requests.Response:
+    def request(self, *args: Any, **kwargs: Any) -> cc_requests.Response:  # noqa: ANN401 -- forwarded verbatim to curl_cffi's request.
         """Perform one request.
 
         Args:

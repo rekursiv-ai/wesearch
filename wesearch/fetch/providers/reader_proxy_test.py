@@ -53,7 +53,7 @@ class TestFetch:
         monkeypatch.delenv("JINA_AI_API_KEY", raising=False)
         seen: dict[str, Any] = {}
 
-        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:
+        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:  # noqa: ANN401 -- forwarded to an upstream Any.
             seen["url"] = url
             seen["headers"] = request.content.headers
             return b"# rendered", None
@@ -70,7 +70,7 @@ class TestFetch:
         monkeypatch.setenv("JINA_AI_API_KEY", "jina_secret")
         seen: dict[str, Any] = {}
 
-        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:
+        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:  # noqa: ANN401 -- forwarded to an upstream Any.
             del url
             seen["headers"] = request.content.headers
             return b"ok", None

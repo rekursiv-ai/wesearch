@@ -1,5 +1,5 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300, T201 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300, D205, T201 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
@@ -648,7 +648,7 @@ def _fetch_browser_candidates() -> Iterator[Path]:
     roots = (
         # Puppeteer hardcodes ~/.cache on every platform, so this one does
         # NOT follow the macOS convention that ``cache_dir()`` implements.
-        Path.home() / ".cache" / "puppeteer" / "chrome",
+        Path.home() / ".cache" / "puppeteer" / "chrome",  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-lint: ignore[xdg-literal] -- vendor CLI's fixed home path, not ours (AGENTS.md rule 3)
         cache_dir() / "ms-playwright",
     )
     for root in roots:
