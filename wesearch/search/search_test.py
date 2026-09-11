@@ -9,6 +9,7 @@ from typing import Any, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import json
+import logging
 import os
 import urllib.error
 
@@ -862,8 +863,42 @@ class TestParseDdg:
         """
         assert _duckduckgo_parse(html, 10) == []
 
+    def test_a_challenge_page_is_not_reported_as_changed_markup(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An empty parse must name which of three causes it was.
 
-class TestDuckduckgoChallengeReachesFallback:
+        One message for all three sent an investigation after a parser that was
+        working correctly: the page was a bot challenge, not changed markup.
+        """
+        html = '<html><body><form id="challenge-form"></form></body></html>'
+        with caplog.at_level(logging.WARNING):
+            assert _duckduckgo_parse(html, max_results=10) == []
+        assert "bot challenge" in caplog.text
+        assert "changed markup" not in caplog.text
+
+    def test_an_empty_result_list_is_not_reported_as_changed_markup(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A genuinely empty result page is not a parser failure either."""
+        html = '<html><body><div id="links"></div></body></html>'
+        with caplog.at_level(logging.WARNING):
+            assert _duckduckgo_parse(html, max_results=10) == []
+        assert "empty result list" in caplog.text
+        assert "changed markup" not in caplog.text
+
+    def test_unrecognised_markup_still_reports_changed_markup(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The original diagnosis survives for the case it actually fits."""
+        with caplog.at_level(logging.WARNING):
+            assert (
+                _duckduckgo_parse("<html><body>?</body></html>", max_results=10) == []
+            )
+        assert "changed markup" in caplog.text
+
+
+class TestDuckduckgoChallengeBecomesATypedError:
     def test_challenge_is_a_body_validator_not_a_post_hoc_check(self) -> None:
         """The challenge must be detected INSIDE fetch, not after it returns.
 

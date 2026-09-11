@@ -29,6 +29,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import asyncio
 import atexit
+import contextlib
 import hashlib
 import inspect
 import logging
@@ -501,9 +502,38 @@ async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> N
         async with asyncio.timeout(budget_sec):
             await browser.stop()
     except TimeoutError:
-        logger.debug("browser stop timed out; abandoning the browser")
+        logger.warning("browser stop timed out; killing the browser process")
+        _kill_browser_process(browser)
     except Exception:
-        logger.debug("browser stop failed; abandoning the browser", exc_info=True)
+        logger.warning(
+            "browser stop failed; killing the browser process", exc_info=True
+        )
+        _kill_browser_process(browser)
+
+
+def _kill_browser_process(browser: zendriver.Browser) -> None:
+    """SIGKILL a browser whose cooperative ``stop()`` did not complete.
+
+    Abandoning it instead leaks the whole Chrome tree: the process holds its
+    profile's ``SingletonLock``, so a later launch on that profile fails with
+    no usable diagnosis. Measured on a leaked tree: killing the root alone
+    took all ten of its processes with it, because Chrome's zygotes and
+    renderers die with the browser -- so signalling the root is sufficient and
+    no process-group handling is needed.
+
+    Signals through zendriver's ``Popen`` handle rather than the raw pid.
+    ``Popen.kill`` polls first and skips a process it has already reaped,
+    which is what makes this safe against the kernel recycling that pid onto
+    an unrelated process while a wedged ``stop()`` was still in flight.
+
+    Cleanup reports nothing over its caller, so every failure is swallowed:
+    this runs with the real error in flight.
+    """
+    process = getattr(browser, "_process", None)
+    if process is None:
+        return  # Never launched by us, or already cleared by a completed stop.
+    with contextlib.suppress(OSError):
+        process.kill()
 
 
 async def _launch_browser(
@@ -1301,8 +1331,16 @@ class _BrowserPool:
                 self._browsers[key] = (headless, launched)
             return launched
 
-    def shutdown(self) -> None:
-        """Close every pooled browser and stop the loop thread (idempotent)."""
+    def shutdown(self, *, budget_sec: float = 5.0) -> None:
+        """Close every pooled browser and stop the loop thread (idempotent).
+
+        Args:
+          budget_sec: TOTAL ceiling on closing every pooled browser, shared
+            across them rather than applied to each. Sized to stay well inside
+            the grace period a supervisor typically allows between SIGTERM and
+            SIGKILL, so teardown finishes rather than being cut short.
+
+        """
         if self._loop.is_closed():
             return
         with self._lock:
@@ -1310,13 +1348,23 @@ class _BrowserPool:
             controls = list(self._controls.values())
             self._browsers.clear()
             self._controls.clear()
+        # ONE deadline across every browser, not 30s each: this runs from
+        # ``atexit``, and a supervisor that follows SIGTERM with SIGKILL after
+        # a few seconds would cut a per-browser wait short and leak exactly
+        # what this loop exists to close. A browser still open when the budget
+        # is spent is killed outright -- a browser we SIGKILL on the way out is
+        # not a leak, whereas one we were still politely asking to close is.
+        deadline = time.monotonic() + budget_sec
         for browser in browsers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_browser_process(browser)
+                continue
             try:
-                # Bounded: this runs from ``atexit``, where an unreachable
-                # browser would otherwise hold the interpreter open forever.
-                self.run(browser.stop(), timeout_sec=30)
+                self.run(browser.stop(), timeout_sec=remaining)
             except Exception:
-                logger.debug("browser stop failed during shutdown", exc_info=True)
+                logger.warning("browser stop failed during shutdown", exc_info=True)
+                _kill_browser_process(browser)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
         self._loop.close()
