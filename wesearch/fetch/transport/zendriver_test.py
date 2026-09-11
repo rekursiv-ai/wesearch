@@ -818,7 +818,7 @@ def test_a_failing_tab_close_does_not_mask_the_fetch_it_cleans_up_after(
 class _SlowCancelTab(_FakeTab):
     """A tab whose close hangs, then does real work while cancelling."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
         super().__init__(**kwargs)
         self.finalized = False
 
@@ -866,7 +866,7 @@ def test_open_instance_releases_profile_then_clears_domain_cooldown(
     events: list[str] = []
 
     class FakePool:
-        def run(self, coroutine: Any) -> None:
+        def run(self, coroutine: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
             events.append("launch")
             coroutine.close()
 
@@ -1304,7 +1304,7 @@ class TestBrowserHonorsTrustPerHop:
         *,
         url: str = "https://public.example/start",
         trust: Trust = "untrusted",
-        on_redirect: Any = None,
+        on_redirect: Any = None,  # noqa: ANN401 -- forwarded to an upstream Any.
         headers: dict[str, str] | None = None,
     ) -> _FakeTab:
         """Drive one navigation and return the tab that served it."""
@@ -1869,7 +1869,7 @@ def test_navigate_uses_one_overall_timeout(
     real_wait_for = asyncio.wait_for
 
     async def record_budget(
-        awaitable: Any,
+        awaitable: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
         timeout: float | None = None,  # noqa: ASYNC109 -- mirrors asyncio.wait_for
     ) -> object:
         # A per-step timeout that RESET the budget would hand out a constant;
@@ -2201,7 +2201,7 @@ def test_settled_content_bounds_a_stalled_document_parse() -> None:
     wall = "<html><title>Just a moment...</title></html>"
 
     class _StalledParseTab:
-        def add_handler(self, event_type: Any, handler: Any) -> None:
+        def add_handler(self, event_type: Any, handler: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
             del event_type
             # Commit a navigation immediately, so the settle loop always
             # advances to the ready-state wait that has no ceiling.
@@ -2462,7 +2462,7 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
     waits: list[float] = []
 
     class _RecordingPool:
-        def run(self, coro: Any, *, timeout_sec: float = 0) -> BrowserResult:
+        def run(self, coro: Any, *, timeout_sec: float = 0) -> BrowserResult:  # noqa: ANN401 -- forwarded to an upstream Any.
             coro.close()
             waits.append(timeout_sec)
             return BrowserResult(body=b"", cookies={}, final_url="")

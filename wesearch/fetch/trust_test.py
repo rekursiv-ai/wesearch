@@ -86,7 +86,7 @@ class TestCookiesSurviveTrust:
         del profiled
         sent: dict[str, str] = {}
 
-        def spy(url: str, **kwargs: Any) -> bytes:
+        def spy(url: str, **kwargs: Any) -> bytes:  # noqa: ANN401 -- forwarded to an upstream Any.
             del url
             jar = kwargs.get("session")
             header = kwargs["headers"].get("Cookie", "")
@@ -154,7 +154,7 @@ class TestBrowserUnderUntrusted:
         del profiled
         resolved: list[str] = []
 
-        def spy(request: Any, **_kw: Any) -> bytes:
+        def spy(request: Any, **_kw: Any) -> bytes:  # noqa: ANN401 -- forwarded to an upstream Any.
             resolved.append(request.params.policy.transport)
             return b"ok"
 
@@ -173,7 +173,7 @@ class TestBrowserUnderUntrusted:
         )
         resolved: list[str] = []
 
-        def spy(request: Any, **_kw: Any) -> bytes:
+        def spy(request: Any, **_kw: Any) -> bytes:  # noqa: ANN401 -- forwarded to an upstream Any.
             resolved.append(request.params.policy.transport)
             return b"ok"
 

@@ -280,7 +280,7 @@ class TestFetchCurlBackend:
         built: list[dict[Any, Any]] = []
 
         class _Session:
-            def __init__(self, **kwargs: Any) -> None:
+            def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
                 built.append(dict(kwargs.get("curl_options") or {}))
                 self.cookies = StubCookies()
 
