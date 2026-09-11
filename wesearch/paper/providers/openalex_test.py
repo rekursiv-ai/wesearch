@@ -421,8 +421,8 @@ class TestReferences:
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert len(records) == 1  # only 1 of 2 refs resolved
-        assert not complete  # must NOT claim complete when refs went missing
+        assert len(records) == 1  # only 1 of 2 refs resolved.
+        assert not complete  # must NOT claim complete when refs went missing.
 
     def test_duplicate_ref_id_still_complete(self) -> None:
         # SPEC-A: referenced_works may repeat an id. The ``openalex:`` OR-filter
@@ -436,7 +436,7 @@ class TestReferences:
                     "referenced_works": [
                         "https://openalex.org/W10",
                         "https://openalex.org/W11",
-                        "https://openalex.org/W10",  # duplicate of the first
+                        "https://openalex.org/W10",  # duplicate of the first.
                     ],
                 }
             ]
@@ -454,7 +454,7 @@ class TestReferences:
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert complete  # all distinct refs resolved -> complete despite dup
+        assert complete  # all distinct refs resolved -> complete despite dup.
 
     def test_limit_truncates_and_marks_incomplete(self) -> None:
         resolve: MutableJSON = {
@@ -478,7 +478,7 @@ class TestReferences:
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=1)
-        assert not complete  # 3 referenced, only 1 requested
+        assert not complete  # 3 referenced, only 1 requested.
         assert (
             fetch.call_args.kwargs["request"].content.params["filter"] == "openalex:W10"
         )
@@ -516,7 +516,7 @@ class TestCitations:
             records, total, complete = openalex.citations("doi", "10.1/x", limit=1)
         assert [r.title for r in records] == ["citer"]
         assert total == 500
-        assert not complete  # 1 of 500 -> more remain
+        assert not complete  # 1 of 500 -> more remain.
         assert fetch.call_args.kwargs["request"].content.params["filter"] == "cites:W1"
 
     def test_year_from_added_to_filter(self) -> None:
@@ -607,7 +607,7 @@ class TestCitations:
             records, total, complete = openalex.citations("doi", "10.1/x", limit=None)
         assert total == 200
         assert len(records) == 200
-        assert complete  # cursor exhausted: 200 of 200 returned
+        assert complete  # cursor exhausted: 200 of 200 returned.
 
     def test_multi_page_exact_total_is_complete(self) -> None:
         # Two full 200-pages reaching count=400 exactly: walking to limit=400
@@ -632,7 +632,7 @@ class TestCitations:
             records, total, complete = openalex.citations("doi", "10.1/x", limit=400)
         assert total == 400
         assert len(records) == 400
-        assert complete  # 400 of 400 -> cursor exhausted
+        assert complete  # 400 of 400 -> cursor exhausted.
 
 
 if __name__ == "__main__":

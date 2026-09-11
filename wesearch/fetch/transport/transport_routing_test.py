@@ -1,6 +1,7 @@
 """Tests for persistent automatic web-fetch transport routing."""
 
 from pathlib import Path
+from typing import Final
 
 import errno
 
@@ -12,6 +13,9 @@ from wesearch.fetch.transport.transport_routing import (
     zendriver_domains,
 )
 from wesearch.lib.userdirs import state_dir
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_default_path_uses_per_user_state(
@@ -35,7 +39,7 @@ def test_default_remember_does_not_modify_bundled_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    bundled = Path(__file__).parent / "zendriver-domains.txt"
+    bundled = _CWD / "zendriver-domains.txt"
     # The bundled default list is optional; read defensively so this asserts
     # "the bundle is never mutated" whether it is present or absent.
     before = bundled.read_bytes() if bundled.exists() else None

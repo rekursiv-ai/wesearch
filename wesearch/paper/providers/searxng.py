@@ -97,7 +97,7 @@ def _to_record(hit: PaperResult) -> PaperRecord:
     # ``hit.tags`` (field-of-study) is dropped: PaperRecord has no tag concept
     # and the S2/OpenAlex converters drop them too, keeping records uniform.
     doi = hit.doi or None
-    if doi is not None and not looks_like_paper_id(doi):  # keep only normalizable
+    if doi is not None and not looks_like_paper_id(doi):  # keep only normalizable.
         doi = None
     return PaperRecord(
         title=hit.title,

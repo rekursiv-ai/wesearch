@@ -104,13 +104,13 @@ _needs_chrome = pytest.mark.skipif(
 
 @pytest.fixture
 def oracle() -> Iterator[EchoOracle]:
-    """A running loopback echo oracle whose CA the fetch backends trust."""
+    """Return a running loopback echo oracle whose CA the fetch backends trust."""
     # A pooled curl Session keys on eTLD+1 (``localhost``), so one cached under a
     # prior oracle's CA would be reused against this oracle's -- and fail TLS.
     # No egress key matches "", so this drops EVERY pooled session and each
     # oracle gets a fresh, correctly-trusted one.
     close_curl_sessions_except("")
-    # stdlib (ssl) honors SSL_CERT_FILE; curl_cffi (BoringSSL) honors
+    # ``stdlib`` (ssl) honors SSL_CERT_FILE; curl_cffi (BoringSSL) honors
     # CURL_CA_BUNDLE. Both must trust the oracle's self-signed CA.
     with (
         EchoOracle() as running,
@@ -292,18 +292,16 @@ def test_browser_backend_fetches_live_page(
     assert isinstance(session, FetchSession)
 
 
+# Read from the oracle, the same server-side record the fetch backends are judged by, so
+# both sides of the comparison come from one observer. Call before issuing our own
+# request: ``captured()`` returns only the most recent, and the per-test fixture
+# guarantees no earlier capture can be standing.
+#
+# A Chrome killed at the timeout AFTER navigating still leaves a complete record, so one
+# retry covers only the hang that produced nothing -- otherwise a slow CI runner fails a
+# test about header order.
 def _chrome_headers(oracle: EchoOracle) -> tuple[str, ...]:
-    """The ordered header names a real Chrome sent to the oracle.
-
-    Read from the oracle, the same server-side record the fetch backends are
-    judged by, so both sides of the comparison come from one observer. Call
-    before issuing our own request: ``captured()`` returns only the most recent,
-    and the per-test fixture guarantees no earlier capture can be standing.
-
-    A Chrome killed at the timeout AFTER navigating still leaves a complete
-    record, so one retry covers only the hang that produced nothing -- otherwise
-    a slow CI runner fails a test about header order.
-    """
+    """Return the ordered header names a real Chrome sent to the oracle."""
     if _drive(oracle) or oracle.captured():
         return oracle.captured()
     _drive(oracle)
@@ -319,13 +317,11 @@ def _drive(oracle: EchoOracle) -> bool:
     )
 
 
+# A request whose ``sec-ch-ua-platform`` says one OS while its User-Agent names another
+# is provably not a real browser, and no header ORDER check can see it -- both headers
+# are present and correctly placed.
 def _assert_identity_is_coherent(lines: tuple[str, ...], *, backend: str) -> None:
-    """Our UA, platform hint, and brand version must describe one browser.
-
-    A request whose ``sec-ch-ua-platform`` says one OS while its User-Agent
-    names another is provably not a real browser, and no header ORDER check can
-    see it -- both headers are present and correctly placed.
-    """
+    """Our UA, platform hint, and brand version must describe one browser."""
     user_agent = _value(lines, "user-agent")
     platform = _value(lines, "sec-ch-ua-platform").strip('"')
     assert platform in _UA_OS_TOKEN, f"unknown platform hint {platform!r}"
@@ -349,7 +345,7 @@ def _drop_lines(lines: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]
 
 
 def _value(lines: tuple[str, ...], name: str) -> str:
-    """The value of header ``name`` among raw lines, or ``""`` when absent."""
+    """Return the value of header ``name`` among raw lines, or ``""`` when absent."""
     prefix = f"{name}:"
     return next(
         (
@@ -361,19 +357,17 @@ def _value(lines: tuple[str, ...], name: str) -> str:
     )
 
 
+# ``host`` is HTTP/1.1's mandatory analog of the HTTP/2 ``:authority`` pseudo-header and
+# ``connection`` is an HTTP/1.1 hop-by-hop control header; neither is part of the
+# browser identity being compared.
 def _drop(names: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]:
-    """Header names minus ``host``, ``connection``, and any in ``omit``.
-
-    ``host`` is HTTP/1.1's mandatory analog of the HTTP/2 ``:authority``
-    pseudo-header and ``connection`` is an HTTP/1.1 hop-by-hop control header;
-    neither is part of the browser identity being compared.
-    """
+    """Header names minus ``host``, ``connection``, and any in ``omit``."""
     skip = {"host", "connection"} | omit
     return tuple(name for name in names if name not in skip)
 
 
 def _cookie_lines(lines: tuple[str, ...]) -> list[str]:
-    """The raw ``cookie:`` header lines from captured request lines."""
+    """Return the raw ``cookie:`` header lines from captured request lines."""
     return [line for line in lines if line.lower().startswith("cookie")]
 
 

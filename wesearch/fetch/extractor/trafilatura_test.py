@@ -16,7 +16,7 @@ from wesearch.fetch.extractor.trafilatura import extract_trafilatura
 # into git. Populate it with:
 #
 #   python -m wesearch.scripts.compare_extractors \
-#       --url https://www.merriam-webster.com/dictionary/agent
+#       --url https://www.merriam-webster.com/dictionary/agent.
 _CORPUS_CACHE = Path("/opt/scratch/caches/wesearch-extractors")
 _MW_PAGE = _CORPUS_CACHE / "www-merriam-webster-com-dictionary-agent-5db0e54b.html"
 

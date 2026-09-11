@@ -53,48 +53,6 @@ __all__ = [
 ]
 
 
-def _select(extra: str = "") -> str:
-    """Comma-joined ``select`` field list, kept small to shrink responses."""
-    # extra appends caller-specific fields (e.g. referenced_works) that a graph
-    # walk needs but the default search does not.
-    fields = (
-        "id",
-        "doi",
-        "ids",
-        "title",
-        "display_name",
-        "authorships",
-        "publication_year",
-        "primary_location",
-        "cited_by_count",
-        "referenced_works_count",
-        "abstract_inverted_index",
-        "open_access",
-    )
-    return ",".join((*fields, extra)) if extra else ",".join(fields)
-
-
-def _headers() -> dict[str, str]:
-    """UA with mailto signals the polite pool for better rate limits."""
-    email = os.environ.get("OPENALEX_EMAIL", "")
-    ua = f"loop-paper (mailto:{email})" if email else "loop-paper"
-    return {"Accept": "application/json", "User-Agent": ua}
-
-
-def _filter(
-    *, year_from: int | None, year_to: int | None, open_access_only: bool
-) -> str | None:
-    """Build an OpenAlex filter string from year bounds and OA flag."""
-    parts: list[str] = []
-    if year_from is not None:
-        parts.append(f"from_publication_date:{year_from}-01-01")
-    if year_to is not None:
-        parts.append(f"to_publication_date:{year_to}-12-31")
-    if open_access_only:
-        parts.append("open_access.is_oa:true")
-    return ",".join(parts) if parts else None
-
-
 def search(
     query: str,
     *,
@@ -144,6 +102,207 @@ def search(
     return [_work_to_record(w) for w in page.entries], total, page.complete
 
 
+# ---------------------------------------------------------------------------
+# Citation graph
+# ---------------------------------------------------------------------------
+
+
+def references(
+    kind: IdType,
+    canonical: str,
+    *,
+    limit: int | None,
+    transport: Transport = "auto",
+) -> tuple[list[PaperRecord], bool]:
+    """Fetch the works a paper cites (outgoing edges); return (records, complete).
+
+    OpenAlex inlines a work's ``referenced_works`` (a few hundred OpenAlex ids at
+    most), so this resolves the seed to its work, then batch-resolves those ids
+    to records. ``complete`` is False when ``limit`` cut the list short OR when
+    the batch resolve returned fewer records than ids requested (an id OpenAlex
+    could not resolve).
+
+    Args:
+      kind: Seed identifier type (must be ``doi``).
+      canonical: Bare seed DOI.
+      limit: Maximum reference records to return, or ``None`` for all.
+      transport: Retrieval transport forwarded to the HTTP layer.
+
+    Returns:
+      records: The seed's cited works, as resolved by OpenAlex.
+      complete: Whether every referenced work was resolved (False if
+        curtailed by limit or if OpenAlex could not resolve all ids).
+
+    Raises:
+      BackendError: For an arXiv seed id (OpenAlex keys its graph on DOIs;
+        arXiv-id resolution is unreliable -- use the S2 source for arXiv).
+      NotFoundError: When OpenAlex has no work for the seed DOI.
+      PaperError: On any HTTP failure.
+
+    """
+    work = _resolve_work(
+        kind,
+        canonical,
+        extra_select="referenced_works",
+        transport=transport,
+    )
+    ref_urls = ListCodec.coerce(work.get("referenced_works"), str)
+    ids = [_work_id_tail(u) for u in ref_urls]
+    capped = ids if limit is None else ids[:limit]
+    records = _resolve_works(capped, transport=transport)
+    # ``complete`` is evidence-derived, never intent-derived: the ``openalex:``
+    # OR-filter silently drops ids it cannot resolve, so a short result must NOT
+    # report complete even when the limit did not cut the list. Require both that
+    # the limit spared the tail AND that every DISTINCT requested id resolved
+    # (the OR-filter de-dups, so a repeated ref id resolves once -- compare
+    # against the distinct count, not the raw length, else a dup lies incomplete).
+    complete = (limit is None or len(ids) <= limit) and len(records) == len(set(capped))
+    return records, complete
+
+
+def citations(
+    kind: IdType,
+    canonical: str,
+    *,
+    limit: int | None,
+    year_from: int | None = None,
+    transport: Transport = "auto",
+) -> tuple[list[PaperRecord], int, bool]:
+    """Fetch the works that cite a paper (incoming edges); (records, total, complete).
+
+    Uses the ``cites:<work-id>`` filter (OpenAlex does not inline the citing set
+    -- it can run to tens of thousands). ``year_from`` is applied server-side.
+
+    Args:
+      kind: Seed identifier type (must be ``doi``).
+      canonical: Bare seed DOI.
+      limit: Maximum citing records to return, or ``None`` for one page.
+      year_from: Inclusive lower publication-year bound, applied server-side.
+      transport: Retrieval transport forwarded to the HTTP layer.
+
+    Returns:
+      records: Works citing the seed, in OpenAlex cursor order.
+      total: OpenAlex's reported total number of citing works.
+      complete: Whether the cursor was walked to exhaustion (False when
+        ``limit`` curtailed the walk).
+
+    Raises:
+      BackendError: For an arXiv seed id (see :func:`references`).
+      NotFoundError: When OpenAlex has no work for the seed DOI.
+      PaperError: On any HTTP failure.
+
+    """
+    work = _resolve_work(
+        kind,
+        canonical,
+        extra_select="id",
+        transport=transport,
+    )
+    work_id = _work_id_tail(str(work.get("id") or ""))
+    flt = f"cites:{work_id}"
+    if year_from is not None:
+        flt += f",from_publication_date:{year_from}-01-01"
+    page, total = _paginate_works({"filter": flt}, limit=limit, transport=transport)
+    records = [_work_to_record(w) for w in page.entries]
+    return records, total, page.complete
+
+
+def _resolve_work(
+    kind: IdType,
+    canonical: str,
+    *,
+    extra_select: str,
+    transport: Transport = "auto",
+) -> dict[str, object]:
+    """Resolve a seed DOI to its OpenAlex work (arXiv unsupported for the graph)."""
+    if kind != "doi":
+        raise BackendError(
+            "OpenAlex citation graph resolves DOIs only; arXiv-id resolution is "
+            "unreliable. Use the S2 source for an arXiv id, or supply the DOI.",
+            status=0,
+        )
+    data = _get(
+        "/works",
+        {"filter": f"doi:{canonical}", "select": f"id,{extra_select}"},
+        transport=transport,
+    )
+    results = ListCodec.mappings(data.get("results"))
+    if not results:
+        raise NotFoundError(f"OpenAlex has no work for doi:{canonical}.")
+    return results[0]
+
+
+def _resolve_works(
+    work_ids: list[str],
+    *,
+    per_page_max: int = 200,
+    transport: Transport = "auto",
+) -> list[PaperRecord]:
+    """Batch-resolve OpenAlex work ids to records (references are unranked)."""
+    records: list[PaperRecord] = []
+    for chunk in _chunked(work_ids, per_page_max):
+        page, _ = _paginate_works(
+            {"filter": f"openalex:{'|'.join(chunk)}"},
+            limit=per_page_max,
+            per_page_max=per_page_max,
+            transport=transport,
+        )
+        records.extend(_work_to_record(w) for w in page.entries)
+    return records
+
+
+def _work_id_tail(url_or_id: str) -> str:
+    """Return the bare ``W...`` id from an OpenAlex work URL or id."""
+    return url_or_id.rsplit("/", 1)[-1]
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    """Split ``items`` into consecutive chunks of at most ``size``."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _select(extra: str = "") -> str:
+    """Comma-joined ``select`` field list, kept small to shrink responses."""
+    # Extra appends caller-specific fields (e.g. referenced_works) that a graph
+    # walk needs but the default search does not.
+    fields = (
+        "id",
+        "doi",
+        "ids",
+        "title",
+        "display_name",
+        "authorships",
+        "publication_year",
+        "primary_location",
+        "cited_by_count",
+        "referenced_works_count",
+        "abstract_inverted_index",
+        "open_access",
+    )
+    return ",".join((*fields, extra)) if extra else ",".join(fields)
+
+
+def _headers() -> dict[str, str]:
+    """UA with mailto signals the polite pool for better rate limits."""
+    email = os.environ.get("OPENALEX_EMAIL", "")
+    ua = f"loop-paper (mailto:{email})" if email else "loop-paper"
+    return {"Accept": "application/json", "User-Agent": ua}
+
+
+def _filter(
+    *, year_from: int | None, year_to: int | None, open_access_only: bool
+) -> str | None:
+    """Build an OpenAlex filter string from year bounds and OA flag."""
+    parts: list[str] = []
+    if year_from is not None:
+        parts.append(f"from_publication_date:{year_from}-01-01")
+    if year_to is not None:
+        parts.append(f"to_publication_date:{year_to}-12-31")
+    if open_access_only:
+        parts.append("open_access.is_oa:true")
+    return ",".join(parts) if parts else None
+
+
 def _paginate_works(
     extra_params: dict[str, str | int],
     *,
@@ -178,10 +337,10 @@ def _paginate_works(
     return paginate(cursor, limit=limit), total
 
 
+# Stops via ``meta.count``: a count-aligned full final page would otherwise
+# continue, since ``len < size`` alone never fires for it.
 def _works_page_advance(body: MutableJSON, page_no: int, size: int) -> int | None:
-    """Next 1-based ``/works`` page; stops via ``meta.count`` so a count-aligned
-    full final page ends (``len < size`` alone would miss it).
-    """
+    """Next 1-based ``/works`` page, or None at the end."""
     rows = ListCodec.coerce(body.get("results"))
     count = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"), 0)
     seen = (page_no - 1) * size + len(rows)
@@ -234,7 +393,7 @@ def _get(
             ),
             # OpenAlex signals real not-found semantically (200 + empty results);
             # an HTTP 404 here is a bad endpoint -> BackendError, not NotFound.
-            not_found_on_404=False,
+            treat_404_as_missing=False,
         ) from e
     except (TimeoutError, OSError) as e:
         raise BackendError(
@@ -332,151 +491,3 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         open_access_pdf=(str(oa["oa_url"]) if oa.get("oa_url") else None),
         sources=("openalex",),
     )
-
-
-# ---------------------------------------------------------------------------
-# Citation graph
-# ---------------------------------------------------------------------------
-
-
-def references(
-    kind: IdType,
-    canonical: str,
-    *,
-    limit: int | None,
-    transport: Transport = "auto",
-) -> tuple[list[PaperRecord], bool]:
-    """Fetch the works a paper cites (outgoing edges); return (records, complete).
-
-    OpenAlex inlines a work's ``referenced_works`` (a few hundred OpenAlex ids at
-    most), so this resolves the seed to its work, then batch-resolves those ids
-    to records. ``complete`` is False when ``limit`` cut the list short OR when
-    the batch resolve returned fewer records than ids requested (an id OpenAlex
-    could not resolve).
-
-    Args:
-      kind: Seed identifier type (must be ``doi``).
-      canonical: Bare seed DOI.
-      limit: Maximum reference records to return, or ``None`` for all.
-      transport: Retrieval transport forwarded to the HTTP layer.
-
-    Raises:
-      BackendError: For an arXiv seed id (OpenAlex keys its graph on DOIs;
-        arXiv-id resolution is unreliable -- use the S2 source for arXiv).
-      NotFoundError: When OpenAlex has no work for the seed DOI.
-      PaperError: On any HTTP failure.
-
-    """
-    work = _resolve_work(
-        kind,
-        canonical,
-        extra_select="referenced_works",
-        transport=transport,
-    )
-    ref_urls = ListCodec.coerce(work.get("referenced_works"), str)
-    ids = [_work_id_tail(u) for u in ref_urls]
-    capped = ids if limit is None else ids[:limit]
-    records = _resolve_works(capped, transport=transport)
-    # ``complete`` is evidence-derived, never intent-derived: the ``openalex:``
-    # OR-filter silently drops ids it cannot resolve, so a short result must NOT
-    # report complete even when the limit did not cut the list. Require both that
-    # the limit spared the tail AND that every DISTINCT requested id resolved
-    # (the OR-filter de-dups, so a repeated ref id resolves once -- compare
-    # against the distinct count, not the raw length, else a dup lies incomplete).
-    complete = (limit is None or len(ids) <= limit) and len(records) == len(set(capped))
-    return records, complete
-
-
-def citations(
-    kind: IdType,
-    canonical: str,
-    *,
-    limit: int | None,
-    year_from: int | None = None,
-    transport: Transport = "auto",
-) -> tuple[list[PaperRecord], int, bool]:
-    """Fetch the works that cite a paper (incoming edges); (records, total, complete).
-
-    Uses the ``cites:<work-id>`` filter (OpenAlex does not inline the citing set
-    -- it can run to tens of thousands). ``year_from`` is applied server-side.
-
-    Args:
-      kind: Seed identifier type (must be ``doi``).
-      canonical: Bare seed DOI.
-      limit: Maximum citing records to return, or ``None`` for one page.
-      year_from: Inclusive lower publication-year bound, applied server-side.
-      transport: Retrieval transport forwarded to the HTTP layer.
-
-    Raises:
-      BackendError: For an arXiv seed id (see :func:`references`).
-      NotFoundError: When OpenAlex has no work for the seed DOI.
-      PaperError: On any HTTP failure.
-
-    """
-    work = _resolve_work(
-        kind,
-        canonical,
-        extra_select="id",
-        transport=transport,
-    )
-    work_id = _work_id_tail(str(work.get("id") or ""))
-    flt = f"cites:{work_id}"
-    if year_from is not None:
-        flt += f",from_publication_date:{year_from}-01-01"
-    page, total = _paginate_works({"filter": flt}, limit=limit, transport=transport)
-    records = [_work_to_record(w) for w in page.entries]
-    return records, total, page.complete
-
-
-def _resolve_work(
-    kind: IdType,
-    canonical: str,
-    *,
-    extra_select: str,
-    transport: Transport = "auto",
-) -> dict[str, object]:
-    """Resolve a seed DOI to its OpenAlex work (arXiv unsupported for the graph)."""
-    if kind != "doi":
-        raise BackendError(
-            "OpenAlex citation graph resolves DOIs only; arXiv-id resolution is "
-            "unreliable. Use the S2 source for an arXiv id, or supply the DOI.",
-            status=0,
-        )
-    data = _get(
-        "/works",
-        {"filter": f"doi:{canonical}", "select": f"id,{extra_select}"},
-        transport=transport,
-    )
-    results = ListCodec.mappings(data.get("results"))
-    if not results:
-        raise NotFoundError(f"OpenAlex has no work for doi:{canonical}.")
-    return results[0]
-
-
-def _resolve_works(
-    work_ids: list[str],
-    *,
-    per_page_max: int = 200,
-    transport: Transport = "auto",
-) -> list[PaperRecord]:
-    """Batch-resolve OpenAlex work ids to records (references are unranked)."""
-    records: list[PaperRecord] = []
-    for chunk in _chunked(work_ids, per_page_max):
-        page, _ = _paginate_works(
-            {"filter": f"openalex:{'|'.join(chunk)}"},
-            limit=per_page_max,
-            per_page_max=per_page_max,
-            transport=transport,
-        )
-        records.extend(_work_to_record(w) for w in page.entries)
-    return records
-
-
-def _work_id_tail(url_or_id: str) -> str:
-    """Return the bare ``W...`` id from an OpenAlex work URL or id."""
-    return url_or_id.rsplit("/", 1)[-1]
-
-
-def _chunked(items: list[str], size: int) -> list[list[str]]:
-    """Split ``items`` into consecutive chunks of at most ``size``."""
-    return [items[i : i + size] for i in range(0, len(items), size)]

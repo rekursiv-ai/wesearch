@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from functools import cache
 from pathlib import Path
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 import gzip
 import json
@@ -33,6 +33,9 @@ from wesearch.chrome.headers import (
     chrome_user_agent,
     impersonate_version_platform,
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 __all__ = [
@@ -171,7 +174,7 @@ def _download_records() -> list[object]:
                 body = response.read()
             break
         except urllib.error.HTTPError as error:
-            if error.code != 429 and not 500 <= error.code < 600:
+            if (error.code != 429 and error.code < 500) or error.code >= 600:
                 raise
             if attempt == 2:
                 raise
@@ -291,8 +294,9 @@ def _is_plain_chrome(ua: str) -> bool:
     )
 
 
+# Not mobile, not an Edge/Opera/Samsung variant.
 def _is_desktop_chrome(ua: str, device: str) -> bool:
-    """A plain desktop Chrome UA (not mobile, not an Edge/Opera/Samsung variant)."""
+    """Return a plain desktop Chrome UA."""
     return (
         device == "desktop"
         and _is_plain_chrome(ua)
@@ -302,7 +306,7 @@ def _is_desktop_chrome(ua: str, device: str) -> bool:
 
 
 def _is_android_chrome(ua: str, device: str) -> bool:
-    """A plain mobile Android Chrome UA."""
+    """Return a plain mobile Android Chrome UA."""
     return (
         device in ("mobile", "tablet")
         and "Android" in ua
@@ -313,8 +317,8 @@ def _is_android_chrome(ua: str, device: str) -> bool:
 
 
 def _pool_path(kind: UserAgentKind) -> Path:
-    """The file holding ``kind``'s pool, alongside this module."""
-    return Path(__file__).with_name(f"{kind}_useragents.txt")
+    """Return the file holding ``kind``'s pool, alongside this module."""
+    return _CWD / (f"{kind}_useragents.txt")
 
 
 def _refresh_user_agent(kind: UserAgentKind) -> str:

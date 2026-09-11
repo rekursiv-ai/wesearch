@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import Mock, patch
 
 import base64
@@ -218,7 +217,7 @@ class TestFetchStdlibPath:
                 "https://u:p@example.com:8443/x",
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
-        # userinfo stripped: the connection opens on the bare host:port, and the
+        # ``userinfo`` stripped: the connection opens on the bare host:port, and the
         # request path carries no credentials.
         assert mock_open.call_args.args[1] == "example.com"
         assert mock_open.call_args.kwargs["port"] == 8443
@@ -275,7 +274,7 @@ class TestFetchStdlibPath:
 
 class TestConnectionClosedOnError:
     @pytest.fixture(autouse=True)
-    def _force_stdlib(self) -> Any:
+    def _force_stdlib(self) -> object:
         # Stdlib path is selected per-call via transport="stdlib", not a global.
         return
 
@@ -343,7 +342,7 @@ class TestConnectionClosedOnError:
 
 class TestFetchStdlibBackend:
     @pytest.fixture(autouse=True)
-    def _force_stdlib(self) -> Any:
+    def _force_stdlib(self) -> object:
         # The stdlib backend is http.client-only; each fetch call passes
         # transport="stdlib" so these redirect/error/303/validated-host tests
         # exercise the stdlib path.
@@ -517,7 +516,7 @@ class TestFetchStdlibBackend:
             result, _ = fetch(
                 "https://example.com",
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
-            )  # default max_redirects=10
+            )  # default max_redirects=10.
         assert result == b"cap body"
 
     def test_cross_host_redirect(self) -> None:
@@ -857,7 +856,7 @@ class TestOpenConnection:
                 *,
                 port: int | None = None,
                 timeout: float,
-                context: Any = None,
+                context: object = None,
             ) -> None:
                 del port, timeout, context
                 captured.append(host)
@@ -888,3 +887,9 @@ class TestOpenConnection:
             )
         assert body == b"stdlib"
         curl_request.assert_not_called()
+
+
+if __name__ == "__main__":
+    from wesearch.lib.testing.main import test_main
+
+    test_main(__file__)

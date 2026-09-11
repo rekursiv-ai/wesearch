@@ -286,43 +286,6 @@ def searxng(
     return [parse(DictCodec.coerce(item)) for item in items[:num_results]]
 
 
-def _describe_non_json(text: str) -> str:
-    """Name what a non-JSON body actually is, for the error message.
-
-    An operator reading "not JSON" still has to go find out who answered and
-    why. The two cases that occur in practice -- a rate-limit interstitial and
-    some other HTML error page -- are distinguishable from the body, and
-    naming them turns the failure into an instruction.
-    """
-    # Whole body, not a head slice: the live 1015 response is the bare 17-byte
-    # string "error code: 1015", while the HTML variant carries the code far
-    # past any fixed prefix window. A slice classified both as generic HTML.
-    lowered = text.lower()
-    # Cloudflare's own code for "rate limited"; nothing else emits it.
-    if "error code: 1015" in lowered or "rate limited" in lowered:
-        return (
-            "a rate-limit page instead of JSON (Cloudflare error 1015). The "
-            "edge in front of the instance is throttling this egress IP -- "
-            "slow the query rate or retry later; the instance itself is "
-            "healthy and never saw the request."
-        )
-    if lowered.lstrip().startswith(("<!doctype", "<html", "<?xml")):
-        return (
-            "an HTML page instead of JSON, so an intermediary answered rather "
-            f"than SearXNG: {text.strip()[:200]!r}"
-        )
-    return f"a body that is not JSON: {text.strip()[:200]!r}"
-
-
-def _searxng_web(item: dict[str, object]) -> SearchResult:
-    """Parse a SearXNG ``default.html`` item into a :class:`SearchResult`."""
-    return SearchResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
-    )
-
-
 def _searxng_image(item: dict[str, object]) -> ImageResult:
     """Parse a SearXNG ``images.html`` item into an :class:`ImageResult`."""
     return ImageResult(
@@ -379,12 +342,6 @@ def _searxng_map(item: dict[str, object]) -> MapResult:
     )
 
 
-def _coordinate(value: object) -> float | None:
-    """Return one finite map coordinate, or None when unknown."""
-    coordinate = decode_or_none(float, value)
-    return coordinate if coordinate is not None and math.isfinite(coordinate) else None
-
-
 def _searxng_it(item: dict[str, object]) -> PackageResult | CodeResult | SearchResult:
     """Dispatch an ``it`` item by ``template`` to its package/code/web reader."""
     template = StrCodec.coerce(item.get("template"))
@@ -393,35 +350,6 @@ def _searxng_it(item: dict[str, object]) -> PackageResult | CodeResult | SearchR
     if template == "code.html":
         return _searxng_code(item)
     return _searxng_web(item)
-
-
-def _searxng_package(item: dict[str, object]) -> PackageResult:
-    """Parse a SearXNG ``packages.html`` item into a :class:`PackageResult`."""
-    return PackageResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
-        package_name=StrCodec.coerce(item.get("package_name")),
-        version=StrCodec.coerce(item.get("version")),
-        maintainer=StrCodec.coerce(item.get("maintainer")),
-        license_name=StrCodec.coerce(item.get("license_name")),
-        homepage=StrCodec.coerce(item.get("homepage")),
-        source_code_url=StrCodec.coerce(item.get("source_code_url")),
-        popularity=StrCodec.coerce(item.get("popularity")),
-        tags=tuple(ListCodec.coerce(item.get("tags"), str)),
-    )
-
-
-def _searxng_code(item: dict[str, object]) -> CodeResult:
-    """Parse a SearXNG ``code.html`` item into a :class:`CodeResult`."""
-    return CodeResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
-        repository=StrCodec.coerce(item.get("repository")),
-        filename=StrCodec.coerce(item.get("filename")),
-        code_language=StrCodec.coerce(item.get("code_language")),
-    )
 
 
 def _searxng_files(
@@ -434,36 +362,6 @@ def _searxng_files(
     if template == "file.html":
         return _searxng_file(item)
     return _searxng_web(item)
-
-
-def _searxng_file(item: dict[str, object]) -> FileResult:
-    """Parse a SearXNG ``file.html`` item into a :class:`FileResult`."""
-    return FileResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(
-            StrCodec.coerce(item.get("abstract"))
-            or StrCodec.coerce(item.get("content"))
-        ),
-        filename=StrCodec.coerce(item.get("filename")),
-        size=StrCodec.coerce(item.get("size")),
-        mimetype=StrCodec.coerce(item.get("mimetype")),
-        author=StrCodec.coerce(item.get("author")),
-    )
-
-
-def _searxng_torrent(item: dict[str, object]) -> TorrentResult:
-    """Parse a SearXNG ``torrent.html`` item into a :class:`TorrentResult`."""
-    return TorrentResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
-        magnet_url=StrCodec.coerce(item.get("magnetlink")),
-        torrent_url=StrCodec.coerce(item.get("torrentfile")),
-        seed=decode_or_none(int, item.get("seed")),
-        leech=decode_or_none(int, item.get("leech")),
-        filesize=StrCodec.coerce(item.get("filesize")),
-    )
 
 
 # Leading integer of SearXNG's humanized citation ``comments`` (e.g. "42
@@ -516,6 +414,80 @@ class CategoryInfo:
 
     gloss: str
     parser: Callable[[dict[str, object]], SearxngResult] | None = None
+
+
+def _searxng_web(item: dict[str, object]) -> SearchResult:
+    """Parse a SearXNG ``default.html`` item into a :class:`SearchResult`."""
+    return SearchResult(
+        url=StrCodec.coerce(item.get("url")),
+        title=clean_text(StrCodec.coerce(item.get("title"))),
+        snippet=clean_text(StrCodec.coerce(item.get("content"))),
+    )
+
+
+def _searxng_package(item: dict[str, object]) -> PackageResult:
+    """Parse a SearXNG ``packages.html`` item into a :class:`PackageResult`."""
+    return PackageResult(
+        url=StrCodec.coerce(item.get("url")),
+        title=clean_text(StrCodec.coerce(item.get("title"))),
+        snippet=clean_text(StrCodec.coerce(item.get("content"))),
+        package_name=StrCodec.coerce(item.get("package_name")),
+        version=StrCodec.coerce(item.get("version")),
+        maintainer=StrCodec.coerce(item.get("maintainer")),
+        license_name=StrCodec.coerce(item.get("license_name")),
+        homepage=StrCodec.coerce(item.get("homepage")),
+        source_code_url=StrCodec.coerce(item.get("source_code_url")),
+        popularity=StrCodec.coerce(item.get("popularity")),
+        tags=tuple(ListCodec.coerce(item.get("tags"), str)),
+    )
+
+
+def _searxng_torrent(item: dict[str, object]) -> TorrentResult:
+    """Parse a SearXNG ``torrent.html`` item into a :class:`TorrentResult`."""
+    return TorrentResult(
+        url=StrCodec.coerce(item.get("url")),
+        title=clean_text(StrCodec.coerce(item.get("title"))),
+        snippet=clean_text(StrCodec.coerce(item.get("content"))),
+        magnet_url=StrCodec.coerce(item.get("magnetlink")),
+        torrent_url=StrCodec.coerce(item.get("torrentfile")),
+        seed=decode_or_none(int, item.get("seed")),
+        leech=decode_or_none(int, item.get("leech")),
+        filesize=StrCodec.coerce(item.get("filesize")),
+    )
+
+
+def _searxng_file(item: dict[str, object]) -> FileResult:
+    """Parse a SearXNG ``file.html`` item into a :class:`FileResult`."""
+    return FileResult(
+        url=StrCodec.coerce(item.get("url")),
+        title=clean_text(StrCodec.coerce(item.get("title"))),
+        snippet=clean_text(
+            StrCodec.coerce(item.get("abstract"))
+            or StrCodec.coerce(item.get("content"))
+        ),
+        filename=StrCodec.coerce(item.get("filename")),
+        size=StrCodec.coerce(item.get("size")),
+        mimetype=StrCodec.coerce(item.get("mimetype")),
+        author=StrCodec.coerce(item.get("author")),
+    )
+
+
+def _searxng_code(item: dict[str, object]) -> CodeResult:
+    """Parse a SearXNG ``code.html`` item into a :class:`CodeResult`."""
+    return CodeResult(
+        url=StrCodec.coerce(item.get("url")),
+        title=clean_text(StrCodec.coerce(item.get("title"))),
+        snippet=clean_text(StrCodec.coerce(item.get("content"))),
+        repository=StrCodec.coerce(item.get("repository")),
+        filename=StrCodec.coerce(item.get("filename")),
+        code_language=StrCodec.coerce(item.get("code_language")),
+    )
+
+
+def _coordinate(value: object) -> float | None:
+    """Return one finite map coordinate, or None when unknown."""
+    coordinate = decode_or_none(float, value)
+    return coordinate if coordinate is not None and math.isfinite(coordinate) else None
 
 
 # One record per member of ``SearxngCategory``. The Literal in
@@ -580,3 +552,29 @@ def _searxng_url() -> str:
             f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
         )
     return url
+
+
+# An operator reading "not JSON" still has to go find out who answered and why. The two
+# cases that occur in practice -- a rate-limit interstitial and some other HTML error
+# page -- are distinguishable from the body, and naming them turns the failure into an
+# instruction.
+def _describe_non_json(text: str) -> str:
+    """Name what a non-JSON body actually is, for the error message."""
+    # Whole body, not a head slice: the live 1015 response is the bare 17-byte
+    # string "error code: 1015", while the HTML variant carries the code far
+    # past any fixed prefix window. A slice classified both as generic HTML.
+    lowered = text.lower()
+    # Cloudflare's own code for "rate limited"; nothing else emits it.
+    if "error code: 1015" in lowered or "rate limited" in lowered:
+        return (
+            "a rate-limit page instead of JSON (Cloudflare error 1015). The "
+            "edge in front of the instance is throttling this egress IP -- "
+            "slow the query rate or retry later; the instance itself is "
+            "healthy and never saw the request."
+        )
+    if lowered.lstrip().startswith(("<!doctype", "<html", "<?xml")):
+        return (
+            "an HTML page instead of JSON, so an intermediary answered rather "
+            f"than SearXNG: {text.strip()[:200]!r}"
+        )
+    return f"a body that is not JSON: {text.strip()[:200]!r}"

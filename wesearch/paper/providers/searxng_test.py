@@ -57,7 +57,7 @@ class TestSearch:
         assert total == 2
         assert [r.title for r in records] == ["A", "B"]
         assert records[0].arxiv_id == "1706.03762"
-        assert complete  # nothing filtered or capped away
+        assert complete  # nothing filtered or capped away.
 
     def test_default_fetch_when_limit_none(self) -> None:
         with patch(_TARGET, return_value=[]) as mock:
@@ -108,7 +108,7 @@ class TestSearch:
             )
         assert total == 1
         assert records[0].title == "open"
-        assert not complete  # the open-access filter dropped a hit
+        assert not complete  # the open-access filter dropped a hit.
 
     def test_limit_caps_post_filter(self) -> None:
         hits = [_result(title=f"h{i}") for i in range(5)]
@@ -118,7 +118,7 @@ class TestSearch:
             )
         assert total == 2
         assert [r.title for r in records] == ["h0", "h1"]
-        assert not complete  # 3 of 5 hits were trimmed
+        assert not complete  # 3 of 5 hits were trimmed.
 
     def test_search_error_raises_backend_error(self) -> None:
         with (

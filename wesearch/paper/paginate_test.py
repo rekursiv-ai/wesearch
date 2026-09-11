@@ -23,11 +23,11 @@ def _offset_cursor(
     page_size_max: int = 100,
     fetch: MagicMock | None = None,
 ) -> Cursor:
-    """A 0-based offset cursor over pre-baked ``pages`` (short page = last)."""
+    """Return a 0-based offset cursor over pre-baked ``pages`` (short page = last)."""
 
     def do_fetch(offset: int, size: int) -> MutableJSON:
         del size
-        idx = offset  # pages are indexed by page number for simplicity
+        idx = offset  # pages are indexed by page number for simplicity.
         rows = pages[idx] if idx < len(pages) else []
         body: MutableJSON = {"data": [*rows]}
         return body
@@ -50,14 +50,14 @@ class TestPaginate:
         cursor = _offset_cursor([[{"n": 1}, {"n": 2}]], page_size_max=10)
         page = paginate(cursor, limit=None)
         assert [r["n"] for r in page.entries] == [1, 2]
-        assert page.complete  # short page (2 < 10) -> exhausted
+        assert page.complete  # short page (2 < 10) -> exhausted.
 
     def test_limit_clamps_page_size_never_exceeds_max(self) -> None:
         sizes: list[int] = []
 
         def do_fetch(offset: int, size: int) -> MutableJSON:
             sizes.append(size)
-            rows: list[MutableJSONValue] = [{"n": offset}] * size  # always full
+            rows: list[MutableJSONValue] = [{"n": offset}] * size  # always full.
             body: MutableJSON = {"data": rows}
             return body
 
@@ -66,7 +66,7 @@ class TestPaginate:
         )
         paginate(cursor, limit=450)
         assert all(s <= 200 for s in sizes)
-        assert sizes[0] == 200  # limit>max -> request the ceiling
+        assert sizes[0] == 200  # limit>max -> request the ceiling.
 
     def test_walks_multiple_pages_to_limit_incomplete(self) -> None:
         # Three full 200-pages available; limit 450 spans them and stays
@@ -80,7 +80,7 @@ class TestPaginate:
         assert not page.complete
 
     def test_full_page_exactly_at_limit_is_incomplete(self) -> None:
-        # limit == a full page: enough is reached, but the cursor was not
+        # Limit == a full page: enough is reached, but the cursor was not
         # exhausted, so complete must be False (the limit-clamp bug guard).
         pages: list[list[MutableJSON]] = [[{"n": i} for i in range(200)], [{"n": 200}]]
         cursor = _offset_cursor(pages, page_size_max=200)
@@ -108,16 +108,17 @@ class TestPaginate:
         cursor = Cursor(
             fetch=MagicMock(side_effect=do_fetch),
             rows=_rows,
-            advance=lambda _b, pos, _s: pos + 1,  # always claims more
+            advance=lambda _b, pos, _s: pos + 1,  # always claims more.
             page_size_max=200,
             is_depth_ceiling=lambda e: e.status == 400,
         )
         page = paginate(cursor, limit=1000)
         assert len(page.entries) == 200
-        assert not page.complete  # ceiling hit -> more may exist
+        assert not page.complete  # ceiling hit -> more may exist.
 
     def test_depth_ceiling_without_results_reraises(self) -> None:
-        def do_fetch(_offset: int, _size: int) -> MutableJSON:
+        def do_fetch(offset: int, size: int) -> MutableJSON:
+            del offset, size
             raise BackendError("bad", status=400)
 
         cursor = Cursor(
@@ -141,11 +142,11 @@ class TestPaginate:
             paginate(cursor, limit=None)
 
     def test_non_advancing_cursor_terminates(self) -> None:
-        # advance returns a position <= current -> stop, do not loop forever.
+        # Advance returns a position <= current -> stop, do not loop forever.
         cursor = Cursor(
             fetch=MagicMock(return_value={"data": [{"n": 0}] * 200}),
             rows=_rows,
-            advance=lambda _b, _pos, _s: 0,  # never advances
+            advance=lambda _b, _pos, _s: 0,  # never advances.
             page_size_max=200,
         )
         page = paginate(cursor, limit=1000)
@@ -155,7 +156,8 @@ class TestPaginate:
     def test_start_position_respected(self) -> None:
         seen: list[int] = []
 
-        def do_fetch(position: int, _size: int) -> MutableJSON:
+        def do_fetch(position: int, size: int) -> MutableJSON:
+            del size
             seen.append(position)
             return {"data": []}
 

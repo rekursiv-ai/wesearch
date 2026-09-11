@@ -220,6 +220,13 @@ def reference_text(html: str) -> str:
     Compression above 1.0 is therefore expected and not a defect: a markdown
     converter emits link targets and table pipes that carry no words, so it can
     exceed the reference in characters while matching it in content.
+
+    Args:
+      html: Raw HTML source.
+
+    Returns:
+      text: Every visible text node; the distortion denominator.
+
     """
     return html2txt(html, clean=False) or ""
 
@@ -230,6 +237,10 @@ def converters() -> dict[str, Callable[[str], str]]:
     Names are kept short because they become paired column headers: twelve
     columns of ``trafilatura-html2txt`` render as ``tra...`` in a terminal,
     which makes the table unreadable exactly where it must be compared.
+
+    Returns:
+      extractors: Mapping from short name to HTML-to-text converter function.
+
     """
     return {
         "traf": extract_trafilatura,
@@ -293,6 +304,14 @@ def score_page(
 def cached_html(page: Page, *, cache_dir: Path, refresh: bool = False) -> str:
     """Return the page source, fetching and caching it on first use.
 
+    Args:
+      page: Page record with slug, url, and transport fields.
+      cache_dir: Directory for cache files.
+      refresh: Bypass cache and re-fetch.
+
+    Returns:
+      html: Decoded HTML source as a string.
+
     Raises:
       FetchError: When the page has no cache entry and cannot be fetched.
 
@@ -311,9 +330,11 @@ def cached_html(page: Page, *, cache_dir: Path, refresh: bool = False) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the comparison and print one table per page.
 
+    Args:
+      argv: Command-line arguments; defaults to sys.argv[1:].
+
     Returns:
-      status: Non-zero when no page could be scored, so an unreachable corpus
-        cannot read as a clean result.
+      status: 0 on success, 2 on validation error, 1 if no pages scored.
 
     """
     args = _parse_args(argv)
@@ -355,24 +376,20 @@ def _html2text(html: str) -> str:
     return converter.handle(html)
 
 
+# Uses trafilatura's vendored readability fork so the comparison needs no separate
+# install; it is the same algorithm behind Firefox Reader View.
 def _readability_markdown(html: str) -> str:
-    """Extract with readability, then convert -- the common two-step agent recipe.
-
-    Uses trafilatura's vendored readability fork so the comparison needs no
-    separate install; it is the same algorithm behind Firefox Reader View.
-    """
+    """Extract with readability, then convert -- the common two-step agent recipe."""
     article = try_readability(lxml.html.fromstring(html))
     return _html2text(lxml.html.tostring(article, encoding="unicode"))
 
 
+# Markdown link targets are stripped first. Left in, a URL's words interleave with the
+# prose and break every n-gram spanning the link, so a markdown converter that lost
+# nothing scores as if it had: markdownify measured 0.72 on arXiv while visibly
+# containing the whole page.
 def _word_grams(text: str, size: int = 5) -> frozenset[tuple[str, ...]]:
-    """Return the text's word n-grams, ignoring case, markup, and whitespace.
-
-    Markdown link targets are stripped first. Left in, a URL's words interleave
-    with the prose and break every n-gram spanning the link, so a markdown
-    converter that lost nothing scores as if it had: markdownify measured 0.72
-    on arXiv while visibly containing the whole page.
-    """
+    """Return the text's word n-grams, ignoring case, markup, and whitespace."""
     words = [
         str(v) for v in re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower())
     ]
@@ -393,16 +410,14 @@ def _gram_distortion(reference: frozenset[tuple[str, ...]], output: str) -> floa
     return 1.0 - 2 * precision * recall / (precision + recall)
 
 
+# Both metric groups span the same converters in the same order, so a page reads left-
+# to-right as "what each cost" then "what each lost". A converter is only good when its
+# column is low in BOTH halves; either half alone ranks an extractor that returned
+# nothing first.
 def _print_table(
     rows: list[tuple[Page, list[Score]]], *, names: Sequence[str], samples: Path
 ) -> None:
-    """Print one markdown table: page rows, compression then distortion columns.
-
-    Both metric groups span the same converters in the same order, so a page
-    reads left-to-right as "what each cost" then "what each lost". A converter
-    is only good when its column is low in BOTH halves; either half alone ranks
-    an extractor that returned nothing first.
-    """
+    """Print one markdown table: page rows, compression then distortion columns."""
     header = [
         "page",
         *(f"{n} c" for n in names),
@@ -460,7 +475,7 @@ def _write_samples(
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 2)[2])
     parser.add_argument(
         "--cache-dir",
         type=Path,

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import fcntl
 import logging
 import os
 
 from wesearch.lib.userdirs import state_dir
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 logger = logging.getLogger(__name__)
@@ -18,70 +22,6 @@ __all__ = [
     "remember_zendriver_domain",
     "zendriver_domains",
 ]
-
-
-def _normalize(line: str) -> str:
-    """Return the canonical (stripped, casefolded) form of one domain line."""
-    return line.strip().casefold()
-
-
-def _read_all(file_descriptor: int) -> bytes:
-    """Read one open file descriptor to EOF."""
-    chunks: list[bytes] = []
-    while chunk := os.read(file_descriptor, 1 << 20):
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _write_all(file_descriptor: int, data: bytes) -> None:
-    """Write ``data`` fully, honoring short writes."""
-    view = memoryview(data)
-    while view:
-        view = view[os.write(file_descriptor, view) :]
-
-
-def _bundled_domains_path() -> Path:
-    """Return the read-only domain defaults shipped alongside this module.
-
-    Optional: ``_read_domains`` returns an empty set when the file is absent, so
-    a checkout without it simply starts with no bundled defaults.
-    """
-    return Path(__file__).parent / "zendriver-domains.txt"
-
-
-def _read_domains(path: Path) -> frozenset[str]:
-    """Read one locked domain list, returning empty when absent or unreadable.
-
-    The list is an optional, rebuildable cache on the per-fetch hot path, so a
-    missing, permission-denied, or corrupt (non-UTF-8) file degrades to no
-    learned routing rather than aborting every automatic fetch.
-    """
-    try:
-        file_descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
-    except FileNotFoundError:
-        return frozenset[str]()
-    except OSError:
-        logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
-        return frozenset[str]()
-    try:
-        fcntl.flock(file_descriptor, fcntl.LOCK_SH)
-        raw = _read_all(file_descriptor)
-    except OSError:
-        # The docstring's promise covers the whole read, not just the open: a
-        # lock or read failure on an optional rebuildable cache must not abort
-        # every automatic fetch, and this runs on the per-fetch hot path.
-        logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
-        return frozenset[str]()
-    finally:
-        os.close(file_descriptor)
-    try:
-        text = raw.decode()
-    except UnicodeDecodeError:
-        logger.warning("Ignoring undecodable Zendriver domain list at %s.", path)
-        return frozenset[str]()
-    return frozenset(
-        normalized for line in text.splitlines() if (normalized := _normalize(line))
-    )
 
 
 def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
@@ -165,3 +105,63 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
         os.fsync(file_descriptor)
     finally:
         os.close(file_descriptor)
+
+
+def _normalize(line: str) -> str:
+    """Return the canonical (stripped, casefolded) form of one domain line."""
+    return line.strip().casefold()
+
+
+def _read_all(file_descriptor: int) -> bytes:
+    """Read one open file descriptor to EOF."""
+    chunks: list[bytes] = []
+    while chunk := os.read(file_descriptor, 1 << 20):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _write_all(file_descriptor: int, data: bytes) -> None:
+    """Write ``data`` fully, honoring short writes."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(file_descriptor, view) :]
+
+
+# Optional: ``_read_domains`` returns an empty set when the file is absent, so a
+# checkout without it simply starts with no bundled defaults.
+def _bundled_domains_path() -> Path:
+    """Return the read-only domain defaults shipped alongside this module."""
+    return _CWD / "zendriver-domains.txt"
+
+
+# The list is an optional, rebuildable cache on the per-fetch hot path, so a missing,
+# permission-denied, or corrupt (non-UTF-8) file degrades to no learned routing rather
+# than aborting every automatic fetch.
+def _read_domains(path: Path) -> frozenset[str]:
+    """Read one locked domain list, returning empty when absent or unreadable."""
+    try:
+        file_descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return frozenset[str]()
+    except OSError:
+        logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
+        return frozenset[str]()
+    try:
+        fcntl.flock(file_descriptor, fcntl.LOCK_SH)
+        raw = _read_all(file_descriptor)
+    except OSError:
+        # The docstring's promise covers the whole read, not just the open: a
+        # lock or read failure on an optional rebuildable cache must not abort
+        # every automatic fetch, and this runs on the per-fetch hot path.
+        logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
+        return frozenset[str]()
+    finally:
+        os.close(file_descriptor)
+    try:
+        text = raw.decode()
+    except UnicodeDecodeError:
+        logger.warning("Ignoring undecodable Zendriver domain list at %s.", path)
+        return frozenset[str]()
+    return frozenset(
+        normalized for line in text.splitlines() if (normalized := _normalize(line))
+    )

@@ -58,8 +58,12 @@ def metadata(kind: IdType, canonical: str) -> PaperRecord:
     """Fetch single-paper metadata from S2.
 
     Args:
-      kind: Seed identifier type.
-      canonical: Bare seed identifier.
+      kind: Identifier type (doi, arxiv, etc.).
+      canonical: Bare identifier (e.g., "10.1234/example", "2312.00000").
+
+    Returns:
+      record: PaperRecord with full metadata (title, authors, abstract,
+        publication date, citations, PDFs, etc.).
 
     """
     data = s2.get(
@@ -73,6 +77,9 @@ def metadata_batch(wire_ids: list[str]) -> list[PaperRecord | None]:
 
     Args:
       wire_ids: S2 wire-format paper ids to resolve in one batched request.
+
+    Returns:
+      result: The list[PaperRecord | None].
 
     """
     records = s2.batch(wire_ids, s2.S2_PAPER_FIELDS_STR, endpoint="paper")
@@ -170,14 +177,27 @@ def citations(
     return _edge_listing(page, inner_key="citingPaper")
 
 
-def _check_graph_source(source: GraphSource) -> None:
-    """Reject a source outside :data:`GraphSource`.
+def _edge_listing(page: Page, *, inner_key: str) -> Listing:
+    """Extract paper records from S2 citation-edge entries into a Listing."""
+    records: list[PaperRecord] = []
+    for e in page.entries:
+        inner = cast(MutableJSON, e.get(inner_key) or {})
+        if not inner:
+            continue
+        records.append(
+            s2.paper_record_from(
+                inner, is_influential=cast(bool | None, e.get("isInfluential"))
+            )
+        )
+    return Listing(records=records, complete=page.complete)
 
-    The dispatch below is a single ``if source == "openalex"``, so an unknown
-    value fell through to S2 and silently ran the wrong backend. ``GraphSource``
-    is a ``Literal``, but the MCP tools and any untyped caller are a real
-    boundary, so this is checked rather than asserted.
-    """
+
+# The dispatch below is a single ``if source == "openalex"``, so an unknown value fell
+# through to S2 and silently ran the wrong backend. ``GraphSource`` is a ``Literal``,
+# but the MCP tools and any untyped caller are a real boundary, so this is checked
+# rather than asserted.
+def _check_graph_source(source: GraphSource) -> None:
+    """Reject a source outside :data:`GraphSource`."""
     if source not in get_args(GraphSource):
         raise PaperError(f"Unknown citation-graph source: {source!r}")
 
@@ -193,18 +213,3 @@ def _citation_keep(
     inner = cast(MutableJSON, entry.get("citingPaper") or {})
     year = decode_or_none(int, inner.get("year"))
     return year is not None and year >= year_from
-
-
-def _edge_listing(page: Page, *, inner_key: str) -> Listing:
-    """Extract paper records from S2 citation-edge entries into a Listing."""
-    records: list[PaperRecord] = []
-    for e in page.entries:
-        inner = cast(MutableJSON, e.get(inner_key) or {})
-        if not inner:
-            continue
-        records.append(
-            s2.paper_record_from(
-                inner, is_influential=cast(bool | None, e.get("isInfluential"))
-            )
-        )
-    return Listing(records=records, complete=page.complete)

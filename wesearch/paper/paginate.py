@@ -31,7 +31,8 @@ __all__ = [
 ]
 
 
-def _keep_all(_entry: MutableJSON) -> bool:
+def _keep_all(entry: MutableJSON) -> bool:
+    del entry
     return True
 
 

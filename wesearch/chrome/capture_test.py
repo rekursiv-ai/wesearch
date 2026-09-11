@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 from unittest.mock import MagicMock, patch
 
 import os
@@ -22,13 +23,13 @@ from wesearch.chrome.capture import (
 )
 
 
-def _popen_mock(*, timeout: bool = False) -> MagicMock:
-    """A ``Popen`` stub whose ``communicate`` times out on the first call.
+_CWD: Final = Path(__file__).resolve().parent
 
-    The second call must succeed: the timeout path reaps after killing, and a
-    stub that raises forever would hide a missing reap behind an exception the
-    test itself supplied.
-    """
+
+# The second call must succeed: the timeout path reaps after killing, and a stub that
+# raises forever would hide a missing reap behind an exception the test itself supplied.
+def _popen_mock(*, timeout: bool = False) -> MagicMock:
+    """Return a ``Popen`` stub whose ``communicate`` times out on the first call."""
     process = MagicMock()
     process.pid = 4321
     process.communicate.side_effect = (
@@ -40,7 +41,7 @@ def _popen_mock(*, timeout: bool = False) -> MagicMock:
 
 
 def _fresh_popen_mock(*args: object, **kwargs: object) -> MagicMock:
-    """A new stub per ``Popen`` call, for tests that drive Chrome twice."""
+    """Return a new stub per ``Popen`` call, for tests that drive Chrome twice."""
     del args, kwargs
     return _popen_mock()
 
@@ -201,7 +202,7 @@ def test_a_child_dies_when_its_parent_is_sigkilled() -> None:
 def _spawn_probe(*args: str) -> subprocess.Popen[bytes]:
     """Start :mod:`orphan_probe` orphan-proofed; its stdout carries a child PID."""
     return subprocess.Popen(  # noqa: S603 -- fixed argv, interpreter from sys.
-        [sys.executable, str(Path(__file__).with_name("orphan_probe.py")), *args],
+        [sys.executable, str(_CWD / "orphan_probe.py"), *args],
         stdout=subprocess.PIPE,
         preexec_fn=die_with_parent,  # noqa: PLW1509 -- bare syscalls only; takes no lock a forked thread could hold.
     )
@@ -215,13 +216,10 @@ def _reap(process: subprocess.Popen[bytes]) -> None:
         process.stdout.close()
 
 
+# Polled: a kill is asynchronous, so reading once right after signalling reports the
+# pre-kill state and would pass an implementation that kills nothing only by luck.
 def _died_within(pid: int, *, seconds: float) -> bool:
-    """Whether ``pid`` stops being a live process within ``seconds``.
-
-    Polled: a kill is asynchronous, so reading once right after signalling
-    reports the pre-kill state and would pass an implementation that kills
-    nothing only by luck.
-    """
+    """Whether ``pid`` stops being a live process within ``seconds``."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if not _alive(pid):

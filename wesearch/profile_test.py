@@ -65,7 +65,7 @@ class TestProfileDiscard:
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_discard_absent_is_noop(self, tmp_path: Path) -> None:
-        _store(tmp_path).discard("1.2.3.4", "absent.com")  # must not raise
+        _store(tmp_path).discard("1.2.3.4", "absent.com")  # must not raise.
 
 
 class TestPathKeyCollision:
@@ -110,22 +110,24 @@ class TestCookieMerge:
 
 
 class TestCorruptFileResilience:
-    """A corrupt/partial key file must never brick the domain: reads treat it as
-    absent (self-healing on the next save), and writes are crash-atomic.
+    """A corrupt/partial key file must never brick the domain.
+
+    Reads treat it as absent (self-healing on the next save), and writes are crash-
+    atomic.
     """
 
     def test_load_truncated_json_returns_none(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b'{"ua": "x", "cook')  # crash-truncated write
+        path.write_bytes(b'{"ua": "x", "cook')  # crash-truncated write.
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_load_wrong_shape_returns_none(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"{}")  # valid JSON, missing keys
+        path.write_bytes(b"{}")  # valid JSON, missing keys.
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_corrupt_file_self_heals_on_next_save(self, tmp_path: Path) -> None:
@@ -142,8 +144,8 @@ class TestCorruptFileResilience:
         store = _store(tmp_path)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b'{"ua": "x"')  # truncated
-        store.update_cookies("1.2.3.4", "x.com", {"b": "2"})  # must not raise
+        path.write_bytes(b'{"ua": "x"')  # truncated.
+        store.update_cookies("1.2.3.4", "x.com", {"b": "2"})  # must not raise.
 
     def test_no_partial_file_left_when_write_interrupted(self, tmp_path: Path) -> None:
         # An interrupted write must never expose a partial file at the key path:
@@ -174,7 +176,7 @@ class TestTtlEviction:
         path = store._path("1.2.3.4", "x.com")
         assert path.exists()
         assert store.load("1.2.3.4", "x.com") is None
-        assert not path.exists()  # expired file is evicted, not left to accumulate
+        assert not path.exists()  # expired file is evicted, not left to accumulate.
 
 
 class TestParseSetCookie:
@@ -183,7 +185,7 @@ class TestParseSetCookie:
         assert parse_set_cookie("GSP=v; Path=/; Domain=.x.com; Secure") == {"GSP": "v"}
 
     def test_multiple_cookies_newline_joined_header(self) -> None:
-        # fetch joins duplicate Set-Cookie headers with "\n"; both must parse.
+        # Fetch joins duplicate Set-Cookie headers with "\n"; both must parse.
         got = parse_set_cookie("a=1; Path=/\nb=2; Secure")
         assert got == {"a": "1", "b": "2"}
 

@@ -88,7 +88,7 @@ class TestPublicHost:
             public_host("example.com")
 
     def test_prefers_ipv4_when_resolver_lists_ipv6_first(self) -> None:
-        # getaddrinfo often returns AAAA first, but many networks have no
+        # ``getaddrinfo`` often returns AAAA first, but many networks have no
         # working v6 route; pinning that address fails with status 0 on a page
         # that plainly serves over v4.
         with patch(
@@ -234,7 +234,7 @@ class TestApplyRedirect:
         )
         assert "Cookie" not in headers
         assert "sec-ch-ua-arch" not in headers
-        assert headers.get("Accept") == "*/*"  # non-origin-bound survives
+        assert headers.get("Accept") == "*/*"  # non-origin-bound survives.
 
     def test_same_origin_keeps_cookie_and_hints(self) -> None:
         headers, _m, _b = apply_redirect(
@@ -327,7 +327,7 @@ class TestDecompress:
         # REV2A-002: some servers emit raw DEFLATE (no zlib wrapper); a browser
         # falls back to wbits=-MAX_WBITS. We must decode it, not raise.
         data = b"hello world"
-        raw = zlib.compress(data)[2:-4]  # strip zlib header + adler checksum
+        raw = zlib.compress(data)[2:-4]  # strip zlib header + adler checksum.
         assert decompress(raw, "deflate") == data
 
     def test_chained_content_encoding(self) -> None:
@@ -349,3 +349,9 @@ class TestIPv6Bracketing:
 
     def test_hostname_unchanged(self) -> None:
         assert bracket_ipv6("example.com") == "example.com"
+
+
+if __name__ == "__main__":
+    from wesearch.lib.testing.main import test_main
+
+    test_main(__file__)

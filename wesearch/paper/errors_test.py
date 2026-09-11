@@ -31,7 +31,7 @@ class TestTranslateHttpError:
         # OpenAlex signals real not-found semantically (200 + empty results); an
         # HTTP 404 there is a bad endpoint, not a missing entity -> BackendError.
         out = translate_http_error(
-            _err(404), backend="OpenAlex", not_found_on_404=False
+            _err(404), backend="OpenAlex", treat_404_as_missing=False
         )
         assert isinstance(out, BackendError)
         assert out.status == 404

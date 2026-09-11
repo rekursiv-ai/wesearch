@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    bs4 = lazy_import("bs4")  # 140ms
+    bs4 = lazy_import("bs4")  # 140ms.
 
 
 __all__ = [
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 #   download_timeout_sec=180  -- HTTP timeout for a PDF byte download
 #   http_timeout_sec=60       -- HTTP timeout for a metadata/interstitial request
 #   download_retries=2        -- retry budget for a PDF download
-#   arxiv_pdf_base            -- arXiv direct-PDF base URL
+#   arxiv_pdf_base            -- arXiv direct-PDF base URL.
 
 
 def looks_like_pdf(
@@ -74,32 +74,6 @@ def looks_like_pdf(
 
     """
     return len(content) >= min_pdf_bytes and content[: len(pdf_magic)] == pdf_magic
-
-
-def _validate_pdf(url: str, body: bytes, *, min_pdf_bytes: int = 128) -> bytes:
-    """Return ``body`` if it looks like a PDF, else raise ``ValueError``."""
-    if not looks_like_pdf(body, min_pdf_bytes=min_pdf_bytes):
-        raise ValueError(
-            f"GET {url} → non-PDF ({len(body)} bytes, prefix={body[:16]!r})"
-        )
-    return body
-
-
-def _download_pdf(
-    url: str,
-    *,
-    retries: int = 2,
-    download_timeout_sec: float = 180.0,
-    min_pdf_bytes: int = 128,
-) -> bytes:
-    """Download a URL, validate it looks like a PDF, return bytes."""
-    body, _ = fetch(
-        url,
-        request=RequestParams(
-            retry=RetryParams(retries=retries, timeout_sec=download_timeout_sec)
-        ),
-    )
-    return _validate_pdf(url, body, min_pdf_bytes=min_pdf_bytes)
 
 
 def oa_url_of(paper: MutableJSON) -> str | None:
@@ -135,6 +109,67 @@ def batch_oa_urls(wire_ids: list[str]) -> list[str | None] | None:
     except Exception:  # noqa: BLE001 -- any backend failure -> fall back per-id
         return None
     return [oa_url_of(p) if p is not None else None for p in papers]
+
+
+def download(
+    kind: IdType,
+    canonical: str,
+    *,
+    oa_url: str | None = None,
+    oa_looked_up: bool = False,
+) -> tuple[bytes, str]:
+    """Try each enabled source; return ``(pdf_bytes, source_label)`` or raise.
+
+    Args:
+      kind: Identifier kind.
+      canonical: Canonical identifier.
+      oa_url: Pre-resolved open-access URL from a batched lookup, if any.
+      oa_looked_up: True when ``oa_url`` is the result of a completed (batched)
+        lookup, so a ``None`` means "no open-access copy" and must not trigger a
+        second per-id S2 query.
+
+    Returns:
+      pdf_bytes: The downloaded PDF content.
+      source_label: Which source served it (e.g. ``"arxiv"``, ``"open_access"``).
+
+    Raises:
+      NotFoundError: When no enabled source returned a PDF.
+
+    """
+    if kind == "arxiv":
+        body = _fetch_arxiv(canonical)
+        if body is not None:
+            return body, "arxiv"
+    body = _fetch_open_access(kind, canonical, oa_url=oa_url, looked_up=oa_looked_up)
+    if body is not None:
+        return body, "open_access"
+    raise NotFoundError(f"No source returned a PDF for {kind}:{canonical}.")
+
+
+def _validate_pdf(url: str, body: bytes, *, min_pdf_bytes: int = 128) -> bytes:
+    """Return ``body`` if it looks like a PDF, else raise ``ValueError``."""
+    if not looks_like_pdf(body, min_pdf_bytes=min_pdf_bytes):
+        raise ValueError(
+            f"GET {url} → non-PDF ({len(body)} bytes, prefix={body[:16]!r})"
+        )
+    return body
+
+
+def _download_pdf(
+    url: str,
+    *,
+    retries: int = 2,
+    download_timeout_sec: float = 180.0,
+    min_pdf_bytes: int = 128,
+) -> bytes:
+    """Download a URL, validate it looks like a PDF, return bytes."""
+    body, _ = fetch(
+        url,
+        request=RequestParams(
+            retry=RetryParams(retries=retries, timeout_sec=download_timeout_sec)
+        ),
+    )
+    return _validate_pdf(url, body, min_pdf_bytes=min_pdf_bytes)
 
 
 def _fetch_arxiv(
@@ -173,38 +208,3 @@ def _fetch_open_access(
     except (FetchError, ValueError, OSError) as e:
         logger.debug("OA download failed: %s", e)
         return None
-
-
-def download(
-    kind: IdType,
-    canonical: str,
-    *,
-    oa_url: str | None = None,
-    oa_looked_up: bool = False,
-) -> tuple[bytes, str]:
-    """Try each enabled source; return ``(pdf_bytes, source_label)`` or raise.
-
-    Args:
-      kind: Identifier kind.
-      canonical: Canonical identifier.
-      oa_url: Pre-resolved open-access URL from a batched lookup, if any.
-      oa_looked_up: True when ``oa_url`` is the result of a completed (batched)
-        lookup, so a ``None`` means "no open-access copy" and must not trigger a
-        second per-id S2 query.
-
-    Returns:
-      pdf_bytes: The downloaded PDF content.
-      source_label: Which source served it (e.g. ``"arxiv"``, ``"open_access"``).
-
-    Raises:
-      NotFoundError: When no enabled source returned a PDF.
-
-    """
-    if kind == "arxiv":
-        body = _fetch_arxiv(canonical)
-        if body is not None:
-            return body, "arxiv"
-    body = _fetch_open_access(kind, canonical, oa_url=oa_url, looked_up=oa_looked_up)
-    if body is not None:
-        return body, "open_access"
-    raise NotFoundError(f"No source returned a PDF for {kind}:{canonical}.")

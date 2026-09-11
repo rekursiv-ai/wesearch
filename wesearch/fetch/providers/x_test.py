@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -33,7 +32,7 @@ class TestFetch:
     def test_delegates_to_reader_proxy(self) -> None:
         seen: dict[str, str] = {}
 
-        def fake_proxy(url: str, *, policy: Any = None) -> bytes:
+        def fake_proxy(url: str, *, policy: object = None) -> bytes:
             del policy
             seen["url"] = url
             return b"# tweet md"

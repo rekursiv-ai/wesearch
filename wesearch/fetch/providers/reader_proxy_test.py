@@ -82,7 +82,7 @@ class TestFetch:
     def test_soft_fail_sentinel_raises(self) -> None:
         soft = b"Title\n\nWarning: Target URL returned error 404 while fetching"
 
-        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:
+        def fake_fetch(url: str, *, request: object) -> tuple[bytes, None]:
             del url, request
             return soft, None
 

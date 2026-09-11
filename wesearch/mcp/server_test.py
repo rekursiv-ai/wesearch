@@ -14,19 +14,13 @@ import pytest
 # The MCP server needs the optional [mcp] extra. Skip the whole module when it is
 # absent (e.g. a plain `uv run pytest` without --all-extras) instead of erroring
 # on collection; CI installs the extra and exercises these tests.
-pytest.importorskip("mcp.server")
+pytest.importorskip("server")
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
-from wesearch.mcp import server as mcp_server
-from wesearch.paper import (
-    authors as paper_authors_mod,
-    details as paper_details_mod,
-    fetch as paper_fetch_mod,
-    search as paper_search_mod,
-)
+from wesearch.mcp import server
+from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
-from wesearch.paper.search import SearchResult as PaperSearchResult
-from wesearch.search.custom_types import SearchResult as WebSearchResult
+from wesearch.search import custom_types
 from wesearch.search.search import SearchParamsSchema
 from wesearch.types.params import Transport
 from wesearch.types.schema import Schema, literal_values
@@ -37,13 +31,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+# A bare ``lambda *_a, **_k: value`` loses its signature to the type checker
+# (reportUnknownLambdaType). This preserves the return type so patched calls stay fully
+# typed.
 def _returns[T](value: T) -> Callable[..., T]:
-    """Return a typed stub callable for monkeypatching.
-
-    A bare ``lambda *_a, **_k: value`` loses its signature to the type checker
-    (reportUnknownLambdaType). This preserves the return type so patched calls
-    stay fully typed.
-    """
+    """Return a typed stub callable for monkeypatching."""
     return lambda *_args, **_kwargs: value
 
 
@@ -78,9 +70,9 @@ _RECORD = PaperRecord(
 
 
 def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = PaperSearchResult(records=[_RECORD], total=41, complete=False)
-    monkeypatch.setattr(paper_search_mod, "search", _returns(fake))
-    out = mcp_server.paper_search("mclmc")
+    fake = search.SearchResult(records=[_RECORD], total=41, complete=False)
+    monkeypatch.setattr(search, "search", _returns(fake))
+    out = server.paper_search("mclmc")
     assert out["total"] == 41
     assert out["complete"] is False
     records = out["records"]
@@ -96,8 +88,8 @@ def test_paper_details_normalizes_id(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["id"] = (kind, canonical)
         return _RECORD
 
-    monkeypatch.setattr(paper_details_mod, "metadata", fake_metadata)
-    out = mcp_server.paper_details("https://arxiv.org/abs/2503.01234v2")
+    monkeypatch.setattr(details, "metadata", fake_metadata)
+    out = server.paper_details("https://arxiv.org/abs/2503.01234v2")
     assert seen["id"] == ("arxiv", "2503.01234v2")
     assert out["id"] == "arxiv:2503.01234v2"
 
@@ -106,12 +98,12 @@ def test_paper_pdf_writes_cache_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
-        paper_fetch_mod,
+        fetch,
         "download",
         _returns((b"%PDF-fake", "arxiv")),
     )
-    monkeypatch.setattr(mcp_server, "cache_dir", _returns(tmp_path))
-    out = mcp_server.paper_pdf("arxiv:2503.01234")
+    monkeypatch.setattr(server, "cache_dir", _returns(tmp_path))
+    out = server.paper_pdf("arxiv:2503.01234")
     path = out["path"]
     assert isinstance(path, str)
     assert path.endswith(".pdf")
@@ -122,25 +114,23 @@ def test_paper_pdf_writes_cache_file(
 
 def test_author_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     record = AuthorRecord(author_id="123", name="Ada", h_index=40)
-    fake = paper_authors_mod.AuthorSearchResult(records=[record], total=1)
-    monkeypatch.setattr(paper_authors_mod, "search_authors", _returns(fake))
-    out = mcp_server.author_search("ada")
+    fake = authors.AuthorSearchResult(records=[record], total=1)
+    monkeypatch.setattr(authors, "search_authors", _returns(fake))
+    out = server.author_search("ada")
     assert out["records"] == [{"author_id": "123", "name": "Ada", "h_index": 40}]
 
 
 def test_web_search_returns_lean_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    rows = [WebSearchResult(url="https://e.co", title="E", snippet="s")]
-    monkeypatch.setattr(mcp_server, "web_search_fn", _returns(rows))
-    out = mcp_server.web_search("q")
+    rows = [custom_types.SearchResult(url="https://e.co", title="E", snippet="s")]
+    monkeypatch.setattr(server, "web_search_fn", _returns(rows))
+    out = server.web_search("q")
     assert out == [{"url": "https://e.co", "title": "E", "snippet": "s"}]
 
 
 def test_web_fetch_extracts_and_truncates(monkeypatch: pytest.MonkeyPatch) -> None:
     html = b"<html><body><p>Hello</p><script>no</script><p>World</p></body></html>"
-    monkeypatch.setattr(
-        mcp_server, "fetch_web", _fetch_web_returning(html, max_chars=7)
-    )
-    out = mcp_server.web_fetch("https://e.co", max_chars=7)
+    monkeypatch.setattr(server, "fetch_web", _fetch_web_returning(html, max_chars=7))
+    out = server.web_fetch("https://e.co", max_chars=7)
     assert out["truncated"] is True
     text = out["text"]
     assert isinstance(text, str)
@@ -166,8 +156,8 @@ def test_web_fetch_routes_through_the_shared_render_path(
         captured["extractor"] = getattr(policy, "extractor", None)
         return FetchResult(text="body", url=url, kind="html", truncated=False)
 
-    monkeypatch.setattr(mcp_server, "fetch_web", _fake)
-    out = mcp_server.web_fetch("https://e.co", extractor="trafilatura")
+    monkeypatch.setattr(server, "fetch_web", _fake)
+    out = server.web_fetch("https://e.co", extractor="trafilatura")
     assert out["kind"] == "html"
     assert captured["extractor"] == "trafilatura"
 
@@ -190,9 +180,9 @@ def test_web_fetch_forwards_every_transport(monkeypatch: pytest.MonkeyPatch) -> 
         captured["transport"] = getattr(policy, "transport", None)
         return FetchResult(text="body", url=url, kind="html", truncated=False)
 
-    monkeypatch.setattr(mcp_server, "fetch_web", _fake)
+    monkeypatch.setattr(server, "fetch_web", _fake)
     for transport in get_args(Transport):
-        mcp_server.web_fetch("https://e.co", transport=transport)
+        server.web_fetch("https://e.co", transport=transport)
         assert captured["transport"] == transport
 
 
@@ -206,13 +196,13 @@ def test_web_search_forwards_categories_and_transport(
     """
     captured: dict[str, object] = {}
 
-    def _fake(query: str, **kwargs: object) -> list[WebSearchResult]:
+    def _fake(query: str, **kwargs: object) -> list[custom_types.SearchResult]:
         del query
         captured.update(kwargs)
-        return [WebSearchResult(url="https://e.co", title="E", snippet="s")]
+        return [custom_types.SearchResult(url="https://e.co", title="E", snippet="s")]
 
-    monkeypatch.setattr(mcp_server, "web_search_fn", _fake)
-    mcp_server.web_search("q", categories="science", transport="curl")
+    monkeypatch.setattr(server, "web_search_fn", _fake)
+    server.web_search("q", categories="science", transport="curl")
     assert captured["categories"] == "science"
     assert captured["transport"] == "curl"
 
@@ -241,7 +231,7 @@ def test_mcp_renders_every_declared_param(
     examined, and a param added to the spec would have gone unnoticed exactly
     as the MCP ``browser`` bool did. ``web_search`` had no check at all.
     """
-    fn = getattr(mcp_server, tool)
+    fn = getattr(server, tool)
     declared = set(spec.fields())
     hints = get_type_hints(fn)
     assert declared - set(hints) == omitted
@@ -258,7 +248,7 @@ def test_mcp_renders_every_declared_param(
 
 
 def _signature_default(fn: Callable[..., object], name: str) -> object:
-    """The default value ``fn``'s signature gives ``name``."""
+    """Return the default value ``fn``'s signature gives ``name``."""
     return inspect.signature(fn).parameters[name].default
 
 
@@ -277,8 +267,8 @@ def test_web_fetch_treats_the_model_url_as_untrusted(
         captured["trust"] = getattr(policy, "trust", None)
         return FetchResult(text="ok", url=url, kind="html", truncated=False)
 
-    monkeypatch.setattr(mcp_server, "fetch_web", _fake_fetch)
-    mcp_server.web_fetch("https://e.co")
+    monkeypatch.setattr(server, "fetch_web", _fake_fetch)
+    server.web_fetch("https://e.co")
     # The validation itself is pinned in fetch/common_test.py; what this server
     # owes is leaving the safe default alone.
     assert captured["trust"] == "untrusted"
@@ -288,14 +278,14 @@ def test_web_fetch_rejects_a_nonpositive_max_chars() -> None:
     # A negative bound slices from the END, returning nearly the whole page
     # while still reporting truncated=True.
     with pytest.raises(ValueError, match="max_chars"):
-        mcp_server.web_fetch("https://e.co", max_chars=-1)
+        server.web_fetch("https://e.co", max_chars=-1)
 
 
 def test_paper_search_rejects_a_nonpositive_limit() -> None:
     # Unbounded, this reaches paginate's own ValueError, which escapes the
     # PaperError contract every caller catches.
     with pytest.raises(ValueError, match="limit"):
-        mcp_server.paper_search("q", limit=0)
+        server.paper_search("q", limit=0)
 
 
 def test_paper_pdf_gives_colliding_slugs_distinct_paths(
@@ -303,11 +293,11 @@ def test_paper_pdf_gives_colliding_slugs_distinct_paths(
 ) -> None:
     # ``id_slug`` maps every unsafe character to ``_``, so these two valid DOIs
     # slug identically and one paper's bytes overwrote the other's.
-    monkeypatch.setattr(mcp_server, "cache_dir", _returns(tmp_path))
-    monkeypatch.setattr(paper_fetch_mod, "download", _returns((b"%PDF-a", "oa")))
-    first = mcp_server.paper_pdf("10.1234/a_b")["path"]
-    monkeypatch.setattr(paper_fetch_mod, "download", _returns((b"%PDF-b", "oa")))
-    second = mcp_server.paper_pdf("10.1234/a/b")["path"]
+    monkeypatch.setattr(server, "cache_dir", _returns(tmp_path))
+    monkeypatch.setattr(fetch, "download", _returns((b"%PDF-a", "oa")))
+    first = server.paper_pdf("10.1234/a_b")["path"]
+    monkeypatch.setattr(fetch, "download", _returns((b"%PDF-b", "oa")))
+    second = server.paper_pdf("10.1234/a/b")["path"]
     assert first != second
     assert isinstance(first, str)
     assert Path(first).read_bytes() == b"%PDF-a"
@@ -317,9 +307,9 @@ def test_paper_pdf_survives_a_long_doi_suffix(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # An unbounded slug exceeds the 255-byte filename limit and raises OSError.
-    monkeypatch.setattr(mcp_server, "cache_dir", _returns(tmp_path))
-    monkeypatch.setattr(paper_fetch_mod, "download", _returns((b"%PDF-x", "oa")))
-    path = mcp_server.paper_pdf("10.1234/" + "a" * 300)["path"]
+    monkeypatch.setattr(server, "cache_dir", _returns(tmp_path))
+    monkeypatch.setattr(fetch, "download", _returns((b"%PDF-x", "oa")))
+    path = server.paper_pdf("10.1234/" + "a" * 300)["path"]
     assert isinstance(path, str)
     assert Path(path).read_bytes() == b"%PDF-x"
 
@@ -334,16 +324,16 @@ def test_paper_search_emits_library_records_verbatim(
     # "Editorial introduction"). Emit exactly what the library returned.
     distinct = PaperRecord(title="Discussion", doi="10.1/a", year=1998)
     namesake = PaperRecord(title="Discussion", doi="10.1/b", year=1997)
-    fake = PaperSearchResult(records=[distinct, namesake], total=2, complete=True)
-    monkeypatch.setattr(paper_search_mod, "search", _returns(fake))
-    out = mcp_server.paper_search("discussion")
+    fake = search.SearchResult(records=[distinct, namesake], total=2, complete=True)
+    monkeypatch.setattr(search, "search", _returns(fake))
+    out = server.paper_search("discussion")
     records = out["records"]
     assert isinstance(records, list)
     assert len(cast(list[object], records)) == 2
 
 
 def test_all_tools_registered() -> None:
-    tools = asyncio.run(mcp_server.mcp.list_tools())
+    tools = asyncio.run(server.mcp.list_tools())
     names = {tool.name for tool in tools}
     assert names == {
         "paper_search",
@@ -356,3 +346,9 @@ def test_all_tools_registered() -> None:
         "web_search",
         "web_fetch",
     }
+
+
+if __name__ == "__main__":
+    from wesearch.lib.testing.main import test_main
+
+    test_main(__file__)

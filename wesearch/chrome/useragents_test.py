@@ -27,9 +27,11 @@ from wesearch.chrome.useragents import (
 
 @pytest.fixture(autouse=True)
 def clear_pool_cache() -> Iterator[None]:
-    """Isolate the module-global ``@cache``: a ``refresh`` test clears it and a
-    ``_pool_path`` patch can seed tmp content, so reset it around every test to
-    keep that state from leaking into other modules under xdist.
+    """Isolate the module-global ``@cache``.
+
+    A ``refresh`` test clears it and a ``_pool_path`` patch can seed tmp content, so
+    reset it around every test to keep that state from leaking into other modules under
+    xdist.
     """
     user_agent_pool.cache_clear()
     yield
@@ -42,7 +44,7 @@ class TestPools:
         assert pool
         ua = pool[0]
         assert "Chrome" in ua
-        assert "Mobile" not in ua  # desktop
+        assert "Mobile" not in ua  # desktop.
 
     def test_android_pool_is_nonempty_mobile_chrome(self) -> None:
         pool = user_agent_pool("chrome_android")
@@ -93,23 +95,23 @@ class TestRefresh:
     """Refresh pool files from one validated intoli dataset snapshot."""
 
     _DATASET: ClassVar[list[dict[str, str]]] = [
-        {  # desktop Chrome -- kept by desktop, dropped by android
+        {  # desktop Chrome -- kept by desktop, dropped by android.
             "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
             "deviceCategory": "desktop",
         },
-        {  # android Chrome -- kept by android, dropped by desktop
+        {  # android Chrome -- kept by android, dropped by desktop.
             "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 "
             "Mobile Safari/537.36",
             "deviceCategory": "mobile",
         },
-        {  # second desktop identity -- pools must support random selection
+        {  # second desktop identity -- pools must support random selection.
             "userAgent": "Mozilla/5.0 (X11; Linux x86_64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
             "deviceCategory": "desktop",
         },
-        {  # second Android identity -- pools must support random selection
+        {  # second Android identity -- pools must support random selection.
             "userAgent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 "
             "Mobile Safari/537.36",
@@ -121,20 +123,20 @@ class TestRefresh:
             "Safari/537.36 Edg/149.0.0.0",
             "deviceCategory": "desktop",
         },
-        {  # vendor-wrapped Android Chrome -- dropped by both
+        {  # vendor-wrapped Android Chrome -- dropped by both.
             "userAgent": "Mozilla/5.0 (Linux; Android 14; NOH-NX9) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 "
             "Mobile Safari/537.36 HuaweiBrowser/15.0.0.0",
             "deviceCategory": "mobile",
         },
-        {  # Facebook in-app browser -- dropped by both
+        {  # Facebook in-app browser -- dropped by both.
             "userAgent": "Mozilla/5.0 (Linux; Android 16; motorola razr plus 2025 "
             "Build/W1UXS36H.72-45-10-8-7) AppleWebKit/537.36 (KHTML, like Gecko) "
             "Version/4.0 Chrome/151.0.7922.102 Mobile Safari/537.36 "
             "[FB_IAB/FB4A;FBAV/573.0.0.37.74;IABMV/1;]",
             "deviceCategory": "mobile",
         },
-        {  # embedded newline -- unsafe to serialize as one UA per line
+        {  # embedded newline -- unsafe to serialize as one UA per line.
             "userAgent": "Mozilla/5.0 (Linux; Android 14) Chrome/149.0.0.0\n"
             "Injected/1.0 Mobile Safari/537.36",
             "deviceCategory": "mobile",

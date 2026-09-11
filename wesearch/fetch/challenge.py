@@ -158,7 +158,7 @@ def _tags(
         r"(<(script|style)\b[^>]*>).*?(</\2>)", re.DOTALL | re.IGNORECASE
     ),
 ) -> list[str]:
-    """The rendered tags of ``text``, with script/style bodies removed."""
+    """Return the rendered tags of ``text``, with script/style bodies removed."""
     # ``finditer`` + ``group(0)``, not ``findall``: typeshed types the latter's
     # result as ``list[Any]``, which erases the element type downstream.
     return [match.group(0) for match in tag.finditer(script_body.sub(r"\1\3", text))]
@@ -168,17 +168,15 @@ def _has_markup_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in tag for tag in _tags(text) for marker in markers)
 
 
+# Restricts each marker to a class/id attribute value or a bare attribute name (``data-
+# sitekey``) inside an HTML tag, excluding URLs and JSON strings that merely name a
+# captcha provider.
+#
+# EVERY occurrence in a tag is examined, not the first: an earlier mention in an
+# unrelated attribute (``data-provider="hcaptcha" class="hcaptcha"``) is not the widget,
+# and stopping there masked the real class beside it.
 def _has_widget_marker(text: str, markers: tuple[str, ...]) -> bool:
-    """Whether a puzzle-widget marker appears as an element class/id/attribute.
-
-    Restricts each marker to a class/id attribute value or a bare attribute name
-    (``data-sitekey``) inside an HTML tag, excluding URLs and JSON strings that
-    merely name a captcha provider.
-
-    EVERY occurrence in a tag is examined, not the first: an earlier mention in
-    an unrelated attribute (``data-provider="hcaptcha" class="hcaptcha"``) is
-    not the widget, and stopping there masked the real class beside it.
-    """
+    """Whether a puzzle-widget marker appears as an element class/id/attribute."""
     return any(
         _is_widget_occurrence(tag, marker, index)
         for tag in _tags(text)
@@ -197,6 +195,10 @@ def _occurrences(tag: str, marker: str) -> list[int]:
     return found
 
 
+# Two positions count. A marker inside a class/id attribute VALUE identifies the
+# element. A ``data-`` marker additionally counts as an attribute NAME -- but only in
+# that position: accepted anywhere in the tag, a link to ``/docs/data-sitekey`` read as
+# a served widget.
 def _is_widget_occurrence(
     tag: str,
     marker: str,
@@ -210,13 +212,7 @@ def _is_widget_occurrence(
     # raised a false PuzzleChallengeError on ordinary pages.
     attr_context: re.Pattern[str] = re.compile(r'(?:class|id)\s*=\s*["\'][^"\']*$'),
 ) -> bool:
-    """Whether ``marker`` at ``index`` names this tag's element, not its text.
-
-    Two positions count. A marker inside a class/id attribute VALUE identifies
-    the element. A ``data-`` marker additionally counts as an attribute NAME --
-    but only in that position: accepted anywhere in the tag, a link to
-    ``/docs/data-sitekey`` read as a served widget.
-    """
+    """Whether ``marker`` at ``index`` names this tag's element, not its text."""
     if attr_context.search(tag[:index]) is not None:
         return True
     if not marker.startswith("data-"):

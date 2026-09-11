@@ -17,11 +17,15 @@ class MarkedItem(Protocol):
     caller holding anything marker-shaped satisfies it.
     """
 
-    def iter_markers(self, name: str | None = ...) -> Iterator[pytest.Mark]: ...
+    def iter_markers(self, name: str | None = ...) -> Iterator[pytest.Mark]:
+        """Iterate over markers, optionally filtered by name."""
+        ...
 
     def add_marker(
         self, marker: str | pytest.MarkDecorator, *, append: bool = ...
-    ) -> None: ...
+    ) -> None:
+        """Add marker."""
+        ...
 
 
 def resource_marker_family(
@@ -69,7 +73,16 @@ def registered_resource_markers(
         "network",
     ),
 ) -> tuple[str, ...]:
-    """Return registered concrete resource markers from pytest config."""
+    """Return registered concrete resource markers from pytest config.
+
+    Args:
+      config: Pytest config with marker registry.
+      resource_families: Marker family names to filter by.
+
+    Returns:
+      result: Concrete marker names (e.g., "bench_throughput", "gpu_cuda").
+
+    """
     configured = cast(list[str], config.getini("markers"))
     marker_names = tuple(marker.partition(":")[0] for marker in configured)
     return tuple(
@@ -135,7 +148,19 @@ def resource_marker_aliases(
         ("network_wandb", ("integration",)),
     ),
 ) -> tuple[str, ...]:
-    """Return legacy selector marks for a concrete resource marker."""
+    """Return legacy selector marks for a concrete resource marker.
+
+    Args:
+      marker: Concrete resource marker name (e.g., "bench_throughput").
+      aliases: Mapping from markers to legacy skip/group names.
+
+    Returns:
+      candidate_aliases: Legacy marker names that should be added to the test.
+
+    Raises:
+      pytest.UsageError: marker is not in the aliases table.
+
+    """
     for candidate, candidate_aliases in aliases:
         if marker == candidate:
             return candidate_aliases
@@ -211,7 +236,16 @@ def apply_resource_markers(
     live_llm_marks: tuple[str, ...] = ("cli_claude", "cli_codex", "real_llm"),
     live_llm_env_var: str = "RUN_REAL_LLM",
 ) -> None:
-    """Apply virtual family markers, timeout budgets, and skip policy."""
+    """Apply virtual family markers, timeout budgets, and skip policy.
+
+    Args:
+      items: Test items to mark up.
+      resource_markers: Registered concrete resource marker names.
+      ci_skipped_marks: Markers that skip in CI (not RUN_INTEGRATION=1).
+      live_llm_marks: Markers that skip unless RUN_REAL_LLM=1.
+      live_llm_env_var: Environment variable enabling live LLM tests.
+
+    """
     known_resources = set(resource_markers)
     for item in items:
         # One marker walk per item: ``get_closest_marker`` re-walks the whole

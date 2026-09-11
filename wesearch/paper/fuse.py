@@ -95,19 +95,16 @@ def normalize_title(title: str) -> str:
     return _WS_RE.sub(" ", _WORD_PUNCT_RE.sub(" ", title.lower())).strip()
 
 
+# A DOI and an arXiv id are separate namespaces for the SAME paper, so both are emitted:
+# a record carrying only the publisher DOI and one carrying only arXiv's DataCite DOI
+# join through whichever key they share. Title is a last resort -- two distinct papers
+# can share one (``Discussion``, ``Editorial introduction``), so it is used only when no
+# identifier exists at all.
+#
+# A record with no identifier AND no title gets NO key: it names nothing the fusion can
+# recognize, so it merges with nothing rather than with every other nameless record.
 def _identity_keys(rec: PaperRecord) -> list[str]:
-    """Every identifier naming this paper, or its title when it has none.
-
-    A DOI and an arXiv id are separate namespaces for the SAME paper, so both
-    are emitted: a record carrying only the publisher DOI and one carrying only
-    arXiv's DataCite DOI join through whichever key they share. Title is a last
-    resort -- two distinct papers can share one (``Discussion``, ``Editorial
-    introduction``), so it is used only when no identifier exists at all.
-
-    A record with no identifier AND no title gets NO key: it names nothing the
-    fusion can recognize, so it merges with nothing rather than with every
-    other nameless record.
-    """
+    """Every identifier naming this paper, or its title when it has none."""
     keys: list[str] = []
     if rec.doi:
         keys.append(f"doi:{rec.doi.lower()}")
@@ -120,15 +117,7 @@ def _identity_keys(rec: PaperRecord) -> list[str]:
 
 
 def _group_by_identity(records: list[PaperRecord]) -> list[int]:
-    """Return each record's component root under union-find over its keys.
-
-    Args:
-      records: Records to group, in the order their ranks will be scored.
-
-    Returns:
-      roots: One component root per input record, positionally aligned.
-
-    """
+    """Return each record's component root under union-find over its keys."""
     parent: dict[int, int] = {}
     owner: dict[str, int] = {}
     for index, rec in enumerate(records):

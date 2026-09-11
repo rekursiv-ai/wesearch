@@ -84,7 +84,7 @@ def public_host(hostname: str) -> ValidatedHost:
     except (socket.gaierror, UnicodeError) as e:
         raise ValueError(f"DNS resolution failed for {host!r}: {e}") from e
     for candidate in ips:
-        # ipaddress handles the IPv4-mapped IPv6 form (``::ffff:127.0.0.1``)
+        # ``ipaddress`` handles the IPv4-mapped IPv6 form (``::ffff:127.0.0.1``)
         # on every flag below, so no separate unwrapping is needed.
         address = ipaddress.ip_address(candidate)
         if (
@@ -183,37 +183,18 @@ def decompress(body: bytes, encoding: str) -> bytes:
     ``Content-Encoding`` may chain several codings (RFC 9110 SS 8.4.1, e.g.
     ``gzip, br``); they are applied left-to-right on encode, so decode
     right-to-left. Each token is one coding.
+
+    Args:
+      body: Compressed response body bytes.
+      encoding: Content-Encoding header value (comma-separated codings).
+
+    Returns:
+      body: Decompressed bytes.
+
     """
     for enc in reversed([tok.strip().lower() for tok in encoding.split(",")]):
         body = _decompress_one(body, enc)
     return body
-
-
-def _decompress_one(body: bytes, enc: str) -> bytes:
-    """Decompress ``body`` under a SINGLE Content-Encoding token."""
-    if enc in ("", "identity"):
-        return body
-    try:
-        if enc == "gzip":
-            return gzip.decompress(body)
-        if enc == "deflate":
-            # RFC 7230 says zlib-wrapped, but some servers emit RAW DEFLATE (no
-            # header); browsers retry with a negative window. Try zlib first,
-            # fall back to raw so a header-less stream still decodes.
-            try:
-                return zlib.decompress(body)
-            except zlib.error:
-                return zlib.decompress(body, -zlib.MAX_WBITS)
-        if enc == "br":
-            return brotli.decompress(body)
-        if enc == "zstd":
-            # stream_reader handles frames without an embedded size,
-            # which `.decompress()` rejects. Servers (e.g. Cloudflare)
-            # commonly emit such frames.
-            return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
-    except (OSError, zlib.error, brotli.error, zstandard.ZstdError) as e:
-        raise ValueError(f"Decompression failed ({enc}): {e}") from None
-    raise ValueError(f"Unknown Content-Encoding: {enc!r}")
 
 
 def decompress_error_body(body: bytes, headers: dict[str, str]) -> bytes:
@@ -238,6 +219,13 @@ def join_headers(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
     so folding then re-splitting mis-parses it). Multiple ``set-cookie`` headers
     join with a newline instead -- a byte that never appears in a header value --
     so :func:`wesearch.profile.parse_set_cookie` can split them back exactly.
+
+    Args:
+      pairs: (header_name, header_value) tuples.
+
+    Returns:
+      out: Lowercased header dictionary with merged duplicate keys.
+
     """
     out: dict[str, str] = {}
     for k, v in pairs:
@@ -252,7 +240,17 @@ def join_headers(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
 
 
 def redirect_target(current_url: str, status: int, headers: dict[str, str]) -> str:
-    """Resolve a redirect ``Location`` against *current_url*; raise if absent."""
+    """Resolve a redirect ``Location`` against *current_url*; raise if absent.
+
+    Args:
+      current_url: The request URL before the redirect.
+      status: HTTP redirect status code (3xx).
+      headers: Response headers including Location.
+
+    Returns:
+      result: Absolute URL after resolving Location relative to current_url.
+
+    """
     location = headers.get("location")
     if not location:
         raise FetchError(
@@ -268,13 +266,8 @@ def default_port(scheme: str) -> int:
     return 443 if scheme == "https" else 80
 
 
-def _netloc(hostname: str, port: int | None) -> str:
-    """Recombine a hostname and optional port into a netloc."""
-    return f"{hostname}:{port}" if port is not None else hostname
-
-
 def host_header(host: str, port: int | None, scheme: str) -> str:
-    """The ``Host`` header value: bare host, plus a non-default port."""
+    """Return the ``Host`` header value: bare host, plus a non-default port."""
     # RFC 9110 requires the port in Host only when it is not the scheme default;
     # a real browser omits :443/:80. The ONE place this rule lives, so the
     # initial hop and the cross-host-redirect rebuild cannot disagree.
@@ -293,7 +286,16 @@ def bracket_ipv6(host: str) -> str:
 
 
 def rewrite_origin(headers: dict[str, str], target_url: str) -> dict[str, str]:
-    """Return ``headers`` with ``Origin`` reset to ``target_url``'s origin."""
+    """Return ``headers`` with ``Origin`` reset to ``target_url``'s origin.
+
+    Args:
+      headers: Response headers to rewrite.
+      target_url: New URL after redirect.
+
+    Returns:
+      headers: Modified headers dict with Origin header updated.
+
+    """
     # A cross-origin redirect must NOT leak the source Origin to the new host (a
     # real browser sets it to the new origin, never the old). A GET carries no
     # Origin and passes through. Field names are case-insensitive, so a
@@ -364,3 +366,40 @@ def apply_redirect(
     if origin(current_url) != origin(redirect_url):
         headers = {k: v for k, v in headers.items() if k.lower() not in origin_bound}
     return headers, method, body
+
+
+# RFC 7230 says zlib-wrapped, but some servers emit RAW DEFLATE (no header);
+# browsers retry with a negative window. Try zlib first, fall back to raw so a
+# header-less stream still decodes.
+def _inflate(body: bytes) -> bytes:
+    """Decompress a ``deflate`` body, wrapped or raw."""
+    try:
+        return zlib.decompress(body)
+    except zlib.error:
+        return zlib.decompress(body, -zlib.MAX_WBITS)
+
+
+def _decompress_one(body: bytes, enc: str) -> bytes:
+    """Decompress ``body`` under a SINGLE Content-Encoding token."""
+    if enc in ("", "identity"):
+        return body
+    try:
+        if enc == "gzip":
+            return gzip.decompress(body)
+        if enc == "deflate":
+            return _inflate(body)
+        if enc == "br":
+            return brotli.decompress(body)
+        if enc == "zstd":
+            # stream_reader handles frames without an embedded size,
+            # which `.decompress()` rejects. Servers (e.g. Cloudflare)
+            # commonly emit such frames.
+            return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
+    except (OSError, zlib.error, brotli.error, zstandard.ZstdError) as e:
+        raise ValueError(f"Decompression failed ({enc}): {e}") from None
+    raise ValueError(f"Unknown Content-Encoding: {enc!r}")
+
+
+def _netloc(hostname: str, port: int | None) -> str:
+    """Recombine a hostname and optional port into a netloc."""
+    return f"{hostname}:{port}" if port is not None else hostname

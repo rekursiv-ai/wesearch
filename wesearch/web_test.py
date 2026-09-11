@@ -23,13 +23,13 @@ from wesearch.web import (
 
 
 def _extract_nothing(html: str, *, url: str = "") -> str:
-    """An extractor that finds no text, to exercise the raw-content fallback."""
+    """Return an extractor that finds no text, to exercise the raw-content fallback."""
     del html, url
     return ""
 
 
 def _extract_wrong(html: str, *, url: str = "") -> str:
-    """An extractor whose output must never appear, to prove it was not run."""
+    """Return an extractor whose output must never appear, to prove it was not run."""
     del html, url
     return "WRONG"
 

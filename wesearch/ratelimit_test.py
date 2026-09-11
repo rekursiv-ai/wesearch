@@ -123,9 +123,9 @@ def test_pacer_second_acquire_sleeps_remaining_interval() -> None:
     clock = FakeClock()
     rng = _FixedRng(7.5)
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng))
-    pacer.acquire()  # first: free
-    clock.now += 2.0  # 2s of work (an HTTP round-trip) elapses between calls
-    pacer.acquire()  # second: sleep 7.5 - 2.0 = 5.5
+    pacer.acquire()  # first: free.
+    clock.now += 2.0  # 2s of work (an HTTP round-trip) elapses between calls.
+    pacer.acquire()  # second: sleep 7.5 - 2.0 = 5.5.
     assert clock.sleeps == [5.5]
 
 
@@ -135,7 +135,7 @@ def test_pacer_second_acquire_no_sleep_when_interval_already_elapsed() -> None:
     rng = _FixedRng(7.5)
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng))
     pacer.acquire()
-    clock.now += 20.0  # far more than 7.5 elapsed
+    clock.now += 20.0  # far more than 7.5 elapsed.
     pacer.acquire()
     assert clock.sleeps == []
 
@@ -144,7 +144,7 @@ def test_pacer_async_first_free_then_paces() -> None:
     clock = FakeClock()
     rng = _FixedRng(9.0)
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast(random.Random, rng))
-    asyncio.run(pacer.acquire_async())  # first: free
+    asyncio.run(pacer.acquire_async())  # first: free.
     asyncio.run(pacer.acquire_async())  # second: sleep full 9.0 (no time elapsed)
     assert clock.sleeps == [9.0]
 
@@ -156,7 +156,7 @@ def test_pacer_draws_stay_within_bounds_across_many_acquires() -> None:
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock)
     for _ in range(500):
         pacer.acquire()
-    assert len(clock.sleeps) == 499  # first call free, 499 paced
+    assert len(clock.sleeps) == 499  # first call free, 499 paced.
     assert all(6.0 <= s <= 12.0 for s in clock.sleeps)
     # And it is not a constant -- variance is the whole point.
     assert len(set(clock.sleeps)) > 1
@@ -170,15 +170,15 @@ def test_sliding_allows_burst_up_to_max_without_sleeping() -> None:
     limiter = SlidingWindowRateLimiter(max_calls=3, per_seconds=1.0, clock=clock)
     for _ in range(3):
         limiter.acquire()
-    assert clock.sleeps == []  # first max_calls are free
+    assert clock.sleeps == []  # first max_calls are free.
 
 
 def test_sliding_blocks_the_call_that_exceeds_the_window() -> None:
     clock = FakeClock()
     limiter = SlidingWindowRateLimiter(max_calls=2, per_seconds=1.0, clock=clock)
-    limiter.acquire()  # t=0
-    limiter.acquire()  # t=0
-    limiter.acquire()  # 3rd in a 2-call window: must wait for oldest to age out
+    limiter.acquire()  # t=0.
+    limiter.acquire()  # t=0.
+    limiter.acquire()  # 3rd in a 2-call window: must wait for oldest to age out.
     assert clock.sleeps == [1.0]
     assert clock.now == 1.0
 
@@ -209,7 +209,7 @@ def test_sliding_queues_beyond_one_future_window() -> None:
     limiter = SlidingWindowRateLimiter(max_calls=2, per_seconds=1.0, clock=clock)
     for _ in range(5):
         limiter.acquire()
-    assert clock.sleeps == [1.0, 1.0, 2.0]  # 3rd&4th wait 1 window, 5th waits 2
+    assert clock.sleeps == [1.0, 1.0, 2.0]  # 3rd&4th wait 1 window, 5th waits 2.
 
 
 def test_sliding_no_double_rate_across_window_boundary() -> None:
@@ -229,9 +229,9 @@ def test_sliding_no_double_rate_across_window_boundary() -> None:
 def test_sliding_aged_out_calls_are_evicted() -> None:
     clock = FakeClock()
     limiter = SlidingWindowRateLimiter(max_calls=1, per_seconds=1.0, clock=clock)
-    limiter.acquire()  # t=0
-    clock.now = 5.0  # long gap; prior call is far outside the window
-    limiter.acquire()  # should be free, not throttled
+    limiter.acquire()  # t=0.
+    clock.now = 5.0  # long gap; prior call is far outside the window.
+    limiter.acquire()  # should be free, not throttled.
     assert clock.sleeps == []
 
 
@@ -260,20 +260,20 @@ def test_bucket_refills_proportionally_over_time() -> None:
     clock = FakeClock()
     limiter = TokenBucketRateLimiter(max_calls=4, per_seconds=2.0, clock=clock)
     for _ in range(4):
-        limiter.acquire()  # drain
-    clock.now = 1.0  # 1s at 2 tokens/sec => 2 tokens refilled
+        limiter.acquire()  # drain.
+    clock.now = 1.0  # 1s at 2 tokens/sec => 2 tokens refilled.
     limiter.acquire()
     limiter.acquire()
-    assert clock.sleeps == []  # two refilled tokens cover these
+    assert clock.sleeps == []  # two refilled tokens cover these.
 
 
 def test_bucket_never_exceeds_capacity_on_long_idle() -> None:
     clock = FakeClock()
     limiter = TokenBucketRateLimiter(max_calls=2, per_seconds=1.0, clock=clock)
-    clock.now = 100.0  # idle forever; tokens must cap at capacity, not 100
+    clock.now = 100.0  # idle forever; tokens must cap at capacity, not 100.
     limiter.acquire()
     limiter.acquire()
-    limiter.acquire()  # 3rd must pace; capacity was 2, not 100
+    limiter.acquire()  # 3rd must pace; capacity was 2, not 100.
     assert clock.sleeps == [0.5]
 
 
@@ -290,7 +290,7 @@ def test_async_sliding_paces_like_sync() -> None:
     async def go() -> None:
         await limiter.acquire_async()
         await limiter.acquire_async()
-        await limiter.acquire_async()  # 3rd waits for oldest to age out
+        await limiter.acquire_async()  # 3rd waits for oldest to age out.
 
     asyncio.run(go())
     assert clock.sleeps == [1.0]
@@ -304,7 +304,7 @@ def test_async_bucket_paces_like_sync() -> None:
     async def go() -> None:
         await limiter.acquire_async()
         await limiter.acquire_async()
-        await limiter.acquire_async()  # bucket empty: 0.5s per token
+        await limiter.acquire_async()  # bucket empty: 0.5s per token.
 
     asyncio.run(go())
     assert clock.sleeps == [0.5]
@@ -342,8 +342,8 @@ def test_file_store_shares_budget_across_limiter_instances(tmp_path: Path) -> No
     b = TokenBucketRateLimiter(
         max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
     )
-    a.acquire()  # spends the one shared token at t=0
-    b.acquire()  # must wait ~1s for the *shared* bucket to refill
+    a.acquire()  # spends the one shared token at t=0.
+    b.acquire()  # must wait ~1s for the *shared* bucket to refill.
     assert clock.sleeps == [1.0]
 
 
@@ -354,11 +354,11 @@ def test_file_store_persists_across_new_limiter(tmp_path: Path) -> None:
     first = TokenBucketRateLimiter(
         max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
     )
-    first.acquire()  # drains the token, persists empty bucket
+    first.acquire()  # drains the token, persists empty bucket.
     second = TokenBucketRateLimiter(
         max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
     )
-    second.acquire()  # sees the drained bucket on disk, paces
+    second.acquire()  # sees the drained bucket on disk, paces.
     assert clock.sleeps == [1.0]
 
 
@@ -385,7 +385,7 @@ def test_file_store_serializes_concurrent_threads(tmp_path: Path) -> None:
     for t in threads:
         t.join()
     tokens, _ = struct.unpack("<dd", (tmp_path / "rl.bin").read_bytes())
-    assert tokens == 800.0  # no lost updates
+    assert tokens == 800.0  # no lost updates.
 
 
 def test_file_store_holds_no_descriptor_between_transactions(tmp_path: Path) -> None:
@@ -413,19 +413,20 @@ def test_file_store_excludes_a_forked_child(tmp_path: Path) -> None:
     ``LOCK_EX`` calls succeed -- silently voiding cross-process exclusion.
     """
     store = FileStore(tmp_path / "rl.bin")
-    store.transact(lambda _state: (1.0, 2.0))  # open before forking
+    store.transact(lambda _state: (1.0, 2.0))  # open before forking.
     read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid == 0:  # pragma: no cover -- child process
 
-        def hold(_state: tuple[float, float] | None) -> tuple[float, float]:
+        def hold(state: tuple[float, float] | None) -> tuple[float, float]:
+            del state
             _ = os.write(write_fd, b"x")
             time.sleep(0.3)
             return (9.0, 9.0)
 
         store.transact(hold)
         os._exit(0)
-    _ = os.read(read_fd, 1)  # child is inside its transaction
+    _ = os.read(read_fd, 1)  # child is inside its transaction.
     start = time.monotonic()
     store.transact(lambda _state: (5.0, 5.0))
     waited = time.monotonic() - start
@@ -464,7 +465,7 @@ def test_pacer_reserves_its_slot_before_sleeping() -> None:
     contender.start()
     owner.join()
     contender.join()
-    assert clock.sleeps == [10.0]  # exactly one free grant, one paced
+    assert clock.sleeps == [10.0]  # exactly one free grant, one paced.
 
 
 def test_sliding_is_thread_safe_under_contention() -> None:
@@ -512,7 +513,7 @@ def test_cooldown_elapses_as_clock_advances() -> None:
     clock = FakeClock()
     gate = CooldownGate(clock=clock)
     gate.trigger(5.0)
-    gate.wait()  # sleeps 5s, advancing the fake clock
+    gate.wait()  # sleeps 5s, advancing the fake clock.
     assert gate.remaining() == 0.0
 
 
@@ -564,7 +565,7 @@ def test_cooldown_rate_limiter_spends_one_token_per_acquire() -> None:
         cooldown=CooldownGate(clock=clock),
     )
     limiter.acquire()  # first token is free (bucket starts full)
-    limiter.acquire()  # drained -> waits for one refill
+    limiter.acquire()  # drained -> waits for one refill.
     assert clock.sleeps == [1.0]
 
 
@@ -576,7 +577,7 @@ def test_cooldown_rate_limiter_honors_cooldown_before_granting() -> None:
         cooldown_sec=5.0,
     )
     limiter.trigger_cooldown()
-    limiter.acquire()  # bucket has tokens, but the cooldown must be waited out first
+    limiter.acquire()  # bucket has tokens, but the cooldown must be waited out first.
     assert clock.sleeps == [5.0]
 
 
@@ -602,7 +603,7 @@ def test_cooldown_short_is_slept_when_under_max_wait() -> None:
         cooldown=CooldownGate(clock=clock),
         max_cooldown_wait_sec=60.0,
     )
-    limiter.trigger_cooldown(5.0)  # under the 60s tolerance -> still sleeps
+    limiter.trigger_cooldown(5.0)  # under the 60s tolerance -> still sleeps.
     limiter.acquire()
     assert clock.sleeps == [5.0]
 
@@ -614,10 +615,10 @@ def test_cooldown_over_max_wait_raises_without_sleeping() -> None:
         cooldown=CooldownGate(clock=clock),
         max_cooldown_wait_sec=60.0,
     )
-    limiter.trigger_cooldown(3600.0)  # a 1h ban -> must NOT be slept through
+    limiter.trigger_cooldown(3600.0)  # a 1h ban -> must NOT be slept through.
     with pytest.raises(CooldownActiveError) as excinfo:
         limiter.acquire()
-    assert clock.sleeps == []  # never slept
+    assert clock.sleeps == []  # never slept.
     assert excinfo.value.remaining_sec == 3600.0
 
 
@@ -626,7 +627,7 @@ def test_cooldown_no_max_wait_sleeps_any_length() -> None:
     limiter = CooldownRateLimiter(
         limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
         cooldown=CooldownGate(clock=clock),
-    )  # max_cooldown_wait_sec=None -> legacy sleep-always
+    )  # max_cooldown_wait_sec=None -> legacy sleep-always.
     limiter.trigger_cooldown(3600.0)
     limiter.acquire()
     assert clock.sleeps == [3600.0]
@@ -648,7 +649,7 @@ def test_cooldown_window_growing_between_check_and_wait_never_sleeps_long() -> N
     # a 1h ban. A single-read design uses only the first value.
     with patch.object(gate, "remaining", side_effect=[10.0, 3600.0]):
         limiter.acquire()
-    assert clock.sleeps == [10.0]  # slept the CHECKED value, never 3600
+    assert clock.sleeps == [10.0]  # slept the CHECKED value, never 3600.
 
 
 # -- cross_process_limiter ---------------------------------------------------

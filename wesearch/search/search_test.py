@@ -51,11 +51,11 @@ from wesearch.types.errors import (
 
 def _patch_fetch(
     return_value: bytes = b"{}",
-    side_effect: Any = None,
+    side_effect: object = None,
     *,
     module: str = "search",
 ) -> AbstractContextManager[MagicMock | AsyncMock]:
-    # fetch returns (body, session); wrap the byte-valued test inputs so the
+    # Fetch returns (body, session); wrap the byte-valued test inputs so the
     # mock matches that shape (an exception side_effect still raises).
     # Two direct calls rather than one `**kwargs` splat: the branches set
     # mutually exclusive keys, and splatting a `dict[str, Any]` into `patch`'s
@@ -66,7 +66,7 @@ def _patch_fetch(
     return patch(target, return_value=(return_value, FetchSession()))
 
 
-def _tuple_side_effect(side_effect: Any) -> Any:
+def _tuple_side_effect(side_effect: object) -> object:
     """Wrap a byte-valued side_effect so each byte result becomes (bytes, session)."""
     if isinstance(side_effect, list):
         items = cast(list[object], side_effect)
@@ -526,7 +526,7 @@ class TestSearchSearxngStructuredCategories:
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("clip", categories="videos")
-        assert isinstance(r, MediaResult)  # VideoResult is-a MediaResult
+        assert isinstance(r, MediaResult)  # VideoResult is-a MediaResult.
         assert r.length == "3:21"
         assert r.views == "1.2M"
         assert r.author == "Channel"

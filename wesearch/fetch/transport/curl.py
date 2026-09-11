@@ -140,6 +140,12 @@ def seed_session_jar(
     so a fresh process seeds the jar from disk. Only names absent from the jar
     are added, so a live rotating cookie (curl tracking Scholar's NID/GSP) is
     never clobbered by a stale stored copy.
+
+    Args:
+      session: In-memory curl session.
+      domain: Domain for which to seed cookies.
+      cookies: Stored name=value pairs not yet in the jar.
+
     """
     if not cookies:
         return
@@ -148,7 +154,7 @@ def seed_session_jar(
     # export ships the bare iteration.
     present = {c.name for c in session.cookies.jar}
     for name, value in cookies.items():
-        if name not in present:  # never clobber a live jar cookie with a stale copy
+        if name not in present:  # never clobber a live jar cookie with a stale copy.
             _jar_set(session, domain, name, value)
 
 
@@ -162,44 +168,15 @@ def set_session_cookies(
     same-named jar entry. This keeps the jar the single cookie source on the curl
     path: sending the cookie via a header too would duplicate a name the jar
     already holds.
+
+    Args:
+      session: In-memory curl session.
+      domain: Domain for which to set cookies.
+      cookies: Per-call override name=value pairs.
+
     """
     for name, value in cookies.items():
         _jar_set(session, domain, name, value)
-
-
-def _jar_set(
-    session: cc_requests.Session[Response], domain: str, name: str, value: str
-) -> None:
-    """Set one cookie in a curl jar, honoring RFC 6265bis name-prefix rules."""
-    # RFC 6265bis 4.1.3 cookie-name prefixes, which curl_cffi enforces (and warns
-    # + coerces when violated): a __Secure- cookie must be Secure; a __Host-
-    # cookie must additionally be host-only (no Domain) with Path=/. Chrome only
-    # ever sends these over https, so set them to match.
-    if name.startswith("__Host-"):
-        session.cookies.set(name, value, path="/", secure=True)
-    elif name.startswith("__Secure-"):
-        session.cookies.set(name, value, domain=domain, secure=True)
-    else:
-        session.cookies.set(name, value, domain=domain)
-
-
-def _registrable_domain(host: str) -> str:
-    """Return the eTLD+1 of a host (``a.b.example.co.uk`` -> ``example.co.uk``).
-
-    A coarse public-suffix approximation: a two-label tail is the registrable
-    domain, unless the last label is a 2-letter ccTLD and the second-to-last is
-    a short (<=3-char) second-level label (``co.uk``, ``com.au``), in which case
-    the tail is three labels. Sufficient for connection coalescing -- an
-    over-broad grouping only shares a connection, never crosses a real origin
-    boundary for cookies (those stay domain-scoped by the jar).
-    """
-    labels = host.split(".")
-    if len(labels) <= 2:
-        return host
-    tail = labels[-2:]
-    if len(labels[-1]) == 2 and len(labels[-2]) <= 3:
-        return ".".join(labels[-3:])
-    return ".".join(tail)
 
 
 def close_curl_session(egress: str, domain: str, impersonate: str) -> None:
@@ -209,6 +186,12 @@ def close_curl_session(egress: str, domain: str, impersonate: str) -> None:
     participates in the pool key, so matching on a single tuple would leave the
     burned identity's other pinned sessions alive and the caller would keep
     presenting the cookies that just got it blocked.
+
+    Args:
+      egress: IP address identity.
+      domain: Registrable domain.
+      impersonate: User-Agent string.
+
     """
     prefix = (egress, _registrable_domain(domain), impersonate)
     with _curl_lock:
@@ -220,71 +203,18 @@ def close_curl_session(egress: str, domain: str, impersonate: str) -> None:
 
 
 def close_curl_sessions_except(egress: str | None) -> None:
-    """Close pooled sessions that belong to a different egress."""
+    """Close pooled sessions that belong to a different egress.
+
+    Args:
+      egress: IP address identity to retain (others closed).
+
+    """
     with _curl_lock:
         sessions = [
             _curl_sessions.pop(key) for key in list(_curl_sessions) if key[0] != egress
         ]
     for session in sessions:
         session.close()
-
-
-def _curl_set_cookies(resp: Response) -> list[str]:
-    """Return the individual ``Set-Cookie`` headers of a curl response."""
-    get_list = getattr(resp.headers, "get_list", None)
-    if get_list is None:
-        value = resp.headers.get("set-cookie")
-        return [value] if value else []
-    return list(cast(list[str], get_list("set-cookie")))
-
-
-@dataclass(slots=True, kw_only=True)
-class _CurlLoop:
-    """Mutable per-hop state shared by both curl backends' redirect loops.
-
-    Holds the current URL, method, headers, body, and remaining redirect budget.
-    :meth:`follow` runs the identical post-response decision both backends make:
-    fire ``on_response``, and if the status is a followable redirect within
-    budget, advance the state to the next hop (via :func:`apply_redirect`) and
-    report ``True``. A ``False`` return means the response is terminal, leaving
-    each backend to classify/return its (differently decompressed) body.
-    """
-
-    url: str
-    method: str
-    headers: dict[str, str]
-    body: bytes | None
-    remaining: int
-
-    def follow(
-        self,
-        status: int,
-        resp_headers: dict[str, str],
-        *,
-        on_response: Observer | None,
-        on_redirect: Callable[[str], None] | None,
-    ) -> bool:
-        """Fire ``on_response``; advance to the next hop on a redirect within budget."""
-        if on_response is not None:
-            on_response(status, resp_headers, self.url)
-        # A redirect is followed only while the budget allows; at 0 the contract
-        # is "do not follow, return the 3xx body" (matching the stdlib path).
-        if status not in _REDIRECT_STATUSES or self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        redirect_url = redirect_target(self.url, status, resp_headers)
-        if on_redirect is not None:
-            on_redirect(redirect_url)
-        self.headers, self.method, self.body = apply_redirect(
-            self.url,
-            self.headers,
-            self.method,
-            body=self.body,
-            status=status,
-            redirect_url=redirect_url,
-        )
-        self.url = redirect_url
-        return True
 
 
 def fetch_curl(
@@ -340,7 +270,7 @@ def fetch_curl(
       FetchError: On a non-success status, or a transport failure (status 0).
 
     """
-    # requests auto-decompresses .content, so no decompress call is needed.
+    # ``requests`` auto-decompresses .content, so no decompress call is needed.
     # Cookies are already in headers["Cookie"], so NO cookies= kwarg is passed
     # (curl would emit a second Cookie source -- verified both are sent).
     loop = _CurlLoop(
@@ -427,3 +357,105 @@ def fetch_curl(
         if status >= 400:
             raise classify_http_error(current_url, status, resp_headers, content)
         return content
+
+
+def _jar_set(
+    session: cc_requests.Session[Response], domain: str, name: str, value: str
+) -> None:
+    """Set one cookie in a curl jar, honoring RFC 6265bis name-prefix rules."""
+    # RFC 6265bis 4.1.3 cookie-name prefixes, which curl_cffi enforces (and warns
+    # + coerces when violated): a __Secure- cookie must be Secure; a __Host-
+    # cookie must additionally be host-only (no Domain) with Path=/. Chrome only
+    # ever sends these over https, so set them to match.
+    if name.startswith("__Host-"):
+        session.cookies.set(name, value, path="/", secure=True)
+    elif name.startswith("__Secure-"):
+        session.cookies.set(name, value, domain=domain, secure=True)
+    else:
+        session.cookies.set(name, value, domain=domain)
+
+
+# A coarse public-suffix approximation: a two-label tail is the registrable domain,
+# unless the last label is a 2-letter ccTLD and the second-to-last is a short (<=3-char)
+# second-level label (``co.uk``, ``com.au``), in which case the tail is three labels.
+# Sufficient for connection coalescing -- an over-broad grouping only shares a
+# connection, never crosses a real origin boundary for cookies (those stay domain-scoped
+# by the jar).
+def _registrable_domain(host: str) -> str:
+    """Return the eTLD+1 of a host (``a.b.example.co.uk`` -> ``example.co.uk``)."""
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return host
+    tail = labels[-2:]
+    if len(labels[-1]) == 2 and len(labels[-2]) <= 3:
+        return ".".join(labels[-3:])
+    return ".".join(tail)
+
+
+def _curl_set_cookies(resp: Response) -> list[str]:
+    """Return the individual ``Set-Cookie`` headers of a curl response."""
+    get_list = getattr(resp.headers, "get_list", None)
+    if get_list is None:
+        value = resp.headers.get("set-cookie")
+        return [value] if value else []
+    return list(cast(list[str], get_list("set-cookie")))
+
+
+@dataclass(slots=True, kw_only=True)
+class _CurlLoop:
+    """Mutable per-hop state shared by both curl backends' redirect loops.
+
+    Holds the current URL, method, headers, body, and remaining redirect budget.
+    :meth:`follow` runs the identical post-response decision both backends make:
+    fire ``on_response``, and if the status is a followable redirect within
+    budget, advance the state to the next hop (via :func:`apply_redirect`) and
+    report ``True``. A ``False`` return means the response is terminal, leaving
+    each backend to classify/return its (differently decompressed) body.
+    """
+
+    url: str
+    method: str
+    headers: dict[str, str]
+    body: bytes | None
+    remaining: int
+
+    def follow(
+        self,
+        status: int,
+        resp_headers: dict[str, str],
+        *,
+        on_response: Observer | None,
+        on_redirect: Callable[[str], None] | None,
+    ) -> bool:
+        """Fire ``on_response``; advance to the next hop on a redirect within budget.
+
+        Args:
+          status: HTTP status code.
+          resp_headers: Response headers (destination for redirect).
+          on_response: Callback to fire before redirect check.
+          on_redirect: Callback to fire on redirect (new URL).
+
+        Returns:
+          result: True if redirect was followed, False if not.
+
+        """
+        if on_response is not None:
+            on_response(status, resp_headers, self.url)
+        # A redirect is followed only while the budget allows; at 0 the contract
+        # is "do not follow, return the 3xx body" (matching the stdlib path).
+        if status not in _REDIRECT_STATUSES or self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        redirect_url = redirect_target(self.url, status, resp_headers)
+        if on_redirect is not None:
+            on_redirect(redirect_url)
+        self.headers, self.method, self.body = apply_redirect(
+            self.url,
+            self.headers,
+            self.method,
+            body=self.body,
+            status=status,
+            redirect_url=redirect_url,
+        )
+        self.url = redirect_url
+        return True

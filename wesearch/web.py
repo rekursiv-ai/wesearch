@@ -66,9 +66,9 @@ _EXTRACTORS: Final[dict[Extractor, Extract]] = {
 }
 
 # Response kinds classified by the fetch path; select the extraction branch.
-_KIND_HTML: Final = "html"  # raw HTML, needs an extractor
+_KIND_HTML: Final = "html"  # raw HTML, needs an extractor.
 _KIND_MARKDOWN: Final = "markdown"  # already-extracted markdown (reader proxy)
-_KIND_RSS: Final = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter
+_KIND_RSS: Final = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter.
 # Maps a reddit.RedditPayload to its extraction kind. The public export serves
 # only the RSS path; the JSON payloads ride the fenced OAuth path.
 _REDDIT_PAYLOAD_KINDS: Final[dict[str, str]] = {
@@ -171,21 +171,7 @@ def _fetch_body(
     form_body: dict[str, str] | None,
     policy: PolicyParams | None = None,
 ) -> tuple[bytes, str]:
-    """Fetch a URL and classify the response for downstream extraction.
-
-    Args:
-      url: Target URL to fetch.
-      method: HTTP method (``GET`` or ``POST``).
-      json_body: JSON-serializable body for POST requests.
-      form_body: Form-encoded body for POST requests.
-      policy: Transport and trust forwarded into every fetch.
-
-    Returns:
-      body: Raw response bytes.
-      kind: One of the ``_KIND_*`` constants; selects the post-processing branch
-        in :func:`_extract_text`.
-
-    """
+    """Fetch a URL and classify the response for downstream extraction."""
     policy = PolicyParams() if policy is None else policy
     if method == "GET":
         if reddit.matches(url):
@@ -219,6 +205,12 @@ def _fetch_body(
     return body, _KIND_HTML
 
 
+# ``kind`` selects the post-processing path: - ``_KIND_RSS``: parse as RSS 2.0 / Atom
+# XML and format as markdown. - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung
+# already rendered to markdown; re-extracting it would strip structure). -
+# ``_KIND_HTML``: the ``extractor`` named by the policy. Its output is returned even
+# when empty: ``Extract`` permits that, and substituting the raw markup would hand a
+# model a page of HTML in place of the text it asked for.
 def _extract_text(
     body: bytes,
     *,
@@ -226,17 +218,7 @@ def _extract_text(
     url: str = "",
     extractor: Extractor = "html2text",
 ) -> str:
-    """Extract result text from a response body (unbounded; caller caps).
-
-    ``kind`` selects the post-processing path:
-      - ``_KIND_RSS``: parse as RSS 2.0 / Atom XML and format as markdown.
-      - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already rendered
-        to markdown; re-extracting it would strip structure).
-      - ``_KIND_HTML``: the ``extractor`` named by the policy. Its output is
-        returned even when empty: ``Extract`` permits that, and substituting the
-        raw markup would hand a model a page of HTML in place of the text it
-        asked for.
-    """
+    """Extract result text from a response body (unbounded; caller caps)."""
     content = body.decode("utf-8", errors="replace")
     if kind == _KIND_RSS:
         return _format_rss(body)
@@ -276,15 +258,7 @@ _RSS_CLUSTER_LINK_RE = re.compile(
 
 
 def _format_rss(body: bytes) -> str:
-    """Format an RSS or Atom feed as readable markdown.
-
-    Args:
-      body: Raw feed XML.
-
-    Returns:
-      formatted: Markdown text suitable for direct output.
-
-    """
+    """Format an RSS or Atom feed as readable markdown."""
     try:
         root = _defused_etree.fromstring(body)
     except (ParseError, _defused_common.DefusedXmlException):
@@ -352,14 +326,11 @@ def _atom_link(entry: Element[str]) -> str:
     return ""
 
 
+# Reads the element's whole subtree, not just its direct ``.text``: Atom's
+# ``type="xhtml"`` form nests the body in a ``<div>``, so the entry has NO direct text
+# and a ``.text``-only read returned an empty body for a perfectly ordinary feed.
 def _atom_content(entry: Element[str]) -> str:
-    """Return cleaned Atom content or summary text.
-
-    Reads the element's whole subtree, not just its direct ``.text``: Atom's
-    ``type="xhtml"`` form nests the body in a ``<div>``, so the entry has NO
-    direct text and a ``.text``-only read returned an empty body for a
-    perfectly ordinary feed.
-    """
+    """Return cleaned Atom content or summary text."""
     raw = _element_text(entry, "content") or _element_text(entry, "summary") or ""
     return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(raw)).split())
 
@@ -417,16 +388,7 @@ def _child_text(parent: Element[str], name: str) -> str | None:
 
 
 def _parse_rss_cluster(description_html: str) -> list[tuple[str, str, str]]:
-    """Parse the ``<ol>`` of sibling stories embedded in a feed item description.
-
-    Args:
-      description_html: HTML fragment from an ``<item><description>``.
-
-    Returns:
-      entries: ``(title, link, source)`` tuples, in document order. Empty list
-        when the fragment lacks Google-News-style cluster markup.
-
-    """
+    """Parse the ``<ol>`` of sibling stories embedded in a feed item description."""
     return [
         (
             html.unescape(match.group(2)).strip(),

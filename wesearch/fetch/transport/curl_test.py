@@ -30,11 +30,12 @@ from wesearch.fetch import (
     ValidatedHost,
     fetch,
 )
-from wesearch.fetch.test_helpers import (
+from wesearch.fetch.testing import (
     StubCookies,
     StubSession,
     const_curl_session,
 )
+from wesearch.fetch.transport import curl
 from wesearch.fetch.transport.curl import (
     _registrable_domain,
     _SessionKey,
@@ -44,20 +45,19 @@ from wesearch.types.errors import (
     FetchError,
 )
 
-import wesearch.fetch.transport.curl as curl_mod
-
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
 
 
 # Captured before any fixture stubs it, so the pool-locking tests can invoke the
 # real curl_session.
-_REAL_CURL_SESSION = curl_mod.curl_session
+_REAL_CURL_SESSION = curl.curl_session
 
 
 class TestRegistrableDomain:
-    """The session pool keys on eTLD+1 so sibling subdomains coalesce onto one
-    connection (a browser's HTTP/2 coalescing); ``www.google.com`` and
+    """The session pool keys on eTLD+1 so sibling subdomains coalesce onto one.
+
+    Connection (a browser's HTTP/2 coalescing); ``www.google.com`` and
     ``scholar.google.com`` must map to the same key.
     """
 
@@ -105,16 +105,14 @@ class TestFetchCurlBackend:
         resp.url = url
         return resp
 
+    # Each hop is a Mock carrying ``.status`` (int), ``.body`` (bytes), and
+    # ``.raw_headers`` (bytes: the CRLF header block). ``perform`` advances through hops
+    # in order, writing into the WRITEDATA / HEADERDATA buffers. The returned list
+    # captures every ``(option, value)`` passed to setopt.
     def _fake_curl_class(
         self, hops: list[Mock]
     ) -> tuple[type, list[tuple[int, object]]]:
-        """Build a fake ``Curl`` class replaying *hops* and recording setopts.
-
-        Each hop is a Mock carrying ``.status`` (int), ``.body`` (bytes), and
-        ``.raw_headers`` (bytes: the CRLF header block). ``perform`` advances
-        through hops in order, writing into the WRITEDATA / HEADERDATA buffers.
-        The returned list captures every ``(option, value)`` passed to setopt.
-        """
+        """Build a fake ``Curl`` class replaying *hops* and recording setopts."""
         setopts: list[tuple[int, object]] = []
         state = {"i": 0}
 
@@ -232,7 +230,7 @@ class TestFetchCurlBackend:
         resp = self._mock_response(content=b"hello")
         with (
             patch.object(
-                curl_mod,
+                curl,
                 "pinned_host",
                 return_value=ValidatedHost(host="example.com", ip="93.184.216.34"),
             ),
@@ -259,7 +257,7 @@ class TestFetchCurlBackend:
         resp = self._mock_response(content=b"hello")
         with (
             patch.object(
-                curl_mod,
+                curl,
                 "pinned_host",
                 return_value=ValidatedHost(host="example.com", ip="93.184.216.34"),
             ),
@@ -291,10 +289,10 @@ class TestFetchCurlBackend:
 
         pool: dict[_SessionKey, cc_requests.Session[Response]] = {}
         with (
-            patch.object(curl_mod, "_curl_sessions", pool),
+            patch.object(curl, "_curl_sessions", pool),
             patch("curl_cffi.requests.Session", _Session),
         ):
-            curl_mod.curl_session(
+            curl.curl_session(
                 "203.0.113.1",
                 "v6.example",
                 "chrome",
@@ -466,7 +464,7 @@ class TestFetchCurlBackend:
         resp_ok = self._mock_response(content=b"got it")
         calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-        def _record(*args: Any, **kwargs: Any) -> Mock:
+        def _record(*args: object, **kwargs: object) -> Mock:
             calls.append((args, kwargs))
             return resp_303 if len(calls) == 1 else resp_ok
 
@@ -481,7 +479,7 @@ class TestFetchCurlBackend:
                 ),
             )
         assert body == b"got it"
-        # method is the first positional arg to cc_requests.request.
+        # Method is the first positional arg to cc_requests.request.
         assert calls[1][0][0] == "GET"
         assert calls[1][1]["data"] is None
 
@@ -494,7 +492,7 @@ class TestFetchCurlBackend:
         resp_ok = self._mock_response(content=b"ok")
         calls: list[dict[str, Any]] = []
 
-        def _record(*_a: Any, **kw: Any) -> Mock:
+        def _record(*_a: object, **kw: object) -> Mock:
             calls.append(kw)
             return resp_303 if len(calls) == 1 else resp_ok
 
@@ -526,7 +524,7 @@ class TestFetchCurlBackend:
                 request=RequestParams(retry=RetryParams(max_redirects=0)),
             )
         assert body == b"redirect body"
-        assert mock_req.call_count == 1  # never followed
+        assert mock_req.call_count == 1  # never followed.
 
     def test_curl_connection_error_is_retried(self) -> None:
         # A1: a curl transport error (connection refused/timeout) becomes
@@ -597,21 +595,23 @@ class TestFetchCurlBackend:
                 ),
             )
         assert body == b"ok"
-        assert seats == ["example.com"]  # seated once, reused on the same-origin hop
+        assert seats == ["example.com"]  # seated once, reused on the same-origin hop.
 
 
 class TestCurlSessionPoolLocking:
     """Every mutation of the curl session pool holds its pool lock."""
 
     @pytest.fixture(autouse=True)
-    def _real_curl_session(self, monkeypatch: Any) -> None:
+    def _real_curl_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The module isolate_profiles fixture stubs curl_session; restore the
         # real function so these tests exercise its actual locking.
         monkeypatch.setattr(fetch_mod, "curl_session", _REAL_CURL_SESSION)
 
-    def test_curl_session_holds_pool_lock(self, monkeypatch: Any) -> None:
+    def test_curl_session_holds_pool_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         acquired: list[str] = []
-        real_lock = curl_mod._curl_lock
+        real_lock = curl._curl_lock
 
         class _Instrumented:
             def __enter__(self) -> None:
@@ -621,15 +621,17 @@ class TestCurlSessionPoolLocking:
             def __exit__(self, *_a: object) -> None:
                 real_lock.release()
 
-        monkeypatch.setattr(curl_mod, "_curl_lock", _Instrumented())
-        monkeypatch.setattr(curl_mod, "_curl_sessions", {})
+        monkeypatch.setattr(curl, "_curl_lock", _Instrumented())
+        monkeypatch.setattr(curl, "_curl_sessions", {})
         with patch("curl_cffi.requests.Session", return_value=Mock()):
-            curl_mod.curl_session("1.2.3.4", "x.com", "chrome")
+            curl.curl_session("1.2.3.4", "x.com", "chrome")
         assert acquired, "curl_session mutated the pool without _curl_lock"
 
-    def test_close_curl_session_holds_pool_lock(self, monkeypatch: Any) -> None:
+    def test_close_curl_session_holds_pool_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         acquired: list[str] = []
-        real_lock = curl_mod._curl_lock
+        real_lock = curl._curl_lock
 
         class _Instrumented:
             def __enter__(self) -> None:
@@ -639,18 +641,18 @@ class TestCurlSessionPoolLocking:
             def __exit__(self, *_a: object) -> None:
                 real_lock.release()
 
-        monkeypatch.setattr(curl_mod, "_curl_lock", _Instrumented())
-        monkeypatch.setattr(curl_mod, "_curl_sessions", {})
-        curl_mod.close_curl_session("1.2.3.4", "x.com", "chrome")  # absent: no-op
+        monkeypatch.setattr(curl, "_curl_lock", _Instrumented())
+        monkeypatch.setattr(curl, "_curl_sessions", {})
+        curl.close_curl_session("1.2.3.4", "x.com", "chrome")  # absent: no-op.
         assert acquired, "close_curl_session mutated the pool without _curl_lock"
 
     def test_close_sessions_except_preserves_current_egress(
-        self, monkeypatch: Any
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         current = Mock()
         stale = Mock()
         monkeypatch.setattr(
-            curl_mod,
+            curl,
             "_curl_sessions",
             {
                 ("1.2.3.4", "x.com", "chrome"): current,
@@ -658,9 +660,9 @@ class TestCurlSessionPoolLocking:
             },
         )
 
-        curl_mod.close_curl_sessions_except("1.2.3.4")
+        curl.close_curl_sessions_except("1.2.3.4")
 
-        assert list(curl_mod._curl_sessions) == [("1.2.3.4", "x.com", "chrome")]
+        assert list(curl._curl_sessions) == [("1.2.3.4", "x.com", "chrome")]
         current.close.assert_not_called()
         stale.close.assert_called_once_with()
 
@@ -749,3 +751,9 @@ class TestSeedSessionJar:
         assert jar["__Host-GSP"].path == "/"
         # A plain cookie is seeded non-Secure (Chrome sends it over either).
         assert jar["NID"].secure is False
+
+
+if __name__ == "__main__":
+    from wesearch.lib.testing.main import test_main
+
+    test_main(__file__)
