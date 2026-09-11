@@ -274,7 +274,7 @@ class _FakeBrowser:
         self.cookies = _FakeCookieJar(cookies or [])
         self.stopped = False
         self.gets: list[str] = []
-        self.stop_calls = 0
+        self.stop_calls: int = 0
         self.last_tab: _FakeTab | None = None
         # Mirrors zendriver's ``Popen`` handle on a launched browser; ``None``
         # until a test supplies one, as it is on a browser we never launched.
@@ -2464,11 +2464,15 @@ def test_pool_shutdown_bounds_teardown_across_all_browsers() -> None:
             cast(zendriver.Browser, browser),
         )
 
-    started = time.monotonic()
-    pool.shutdown(budget_sec=0.05)
-    elapsed = time.monotonic() - started
+    pool.shutdown(budget_sec=0.01)
 
-    assert elapsed < 1.0, "teardown scaled with browser count instead of being bounded"
+    # Attempts, not elapsed time: three browsers on a per-browser budget also
+    # finish promptly, so a timing bound passes on the bug this pins. The
+    # first browser is skipped because whether its ``stop()`` starts before
+    # the budget expires is a scheduling race; the rest can never be asked.
+    assert [browser.stop_calls for browser in wedged[1:]] == [0, 0], (
+        "the budget was spent per browser rather than across all of them"
+    )
     assert [process.kills for process in processes] == [1, 1, 1], (
         "a browser left open when the budget expired was not killed"
     )
