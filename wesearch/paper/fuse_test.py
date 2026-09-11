@@ -28,7 +28,7 @@ class TestMergeCompleteness:
         (merged,) = fuse([first], [second])
         for f in fields(PaperRecord):
             if f.name == "sources":
-                continue  # sources are unioned, asserted elsewhere
+                continue  # sources are unioned, asserted elsewhere.
             assert getattr(merged, f.name) == getattr(first, f.name), (
                 f"_merge dropped field {f.name!r}"
             )

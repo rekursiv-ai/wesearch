@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -12,16 +11,16 @@ from wesearch.fetch.providers import fallback
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 
 
-def _fetch_raising(status: int) -> Any:
-    def _fake(url: str, *, request: Any) -> tuple[bytes, None]:
+def _fetch_raising(status: int) -> object:
+    def _fake(url: str, *, request: object) -> tuple[bytes, None]:
         del url, request
         raise FetchError("https://s.example/", status, {}, b"blocked")
 
     return _fake
 
 
-def _fetch_raising_challenge() -> Any:
-    def _fake(url: str, *, request: Any) -> tuple[bytes, None]:
+def _fetch_raising_challenge() -> object:
+    def _fake(url: str, *, request: object) -> tuple[bytes, None]:
         del url, request
         raise CloudflareChallengeError(
             url="https://s.example/", status=403, headers={}, body=b"blocked"
@@ -32,7 +31,7 @@ def _fetch_raising_challenge() -> Any:
 
 class TestFallback:
     def test_primary_success_skips_proxy(self) -> None:
-        def ok(url: str, *, request: Any) -> tuple[bytes, None]:
+        def ok(url: str, *, request: object) -> tuple[bytes, None]:
             del url, request
             return b"<html>ok</html>", None
 
@@ -44,7 +43,7 @@ class TestFallback:
         assert via is False
 
     def test_bot_wall_falls_through_to_proxy(self) -> None:
-        def proxy_ok(url: str, *, policy: Any = None) -> bytes:
+        def proxy_ok(url: str, *, policy: object = None) -> bytes:
             del url, policy
             return b"# md"
 
@@ -61,7 +60,7 @@ class TestFallback:
     def test_a_rate_limit_falls_through_to_proxy(self) -> None:
         # A 429 is keyed to the EGRESS, and the proxy fetches from its own, so
         # this rung genuinely can clear it even though it is not a challenge.
-        def proxy_ok(url: str, *, policy: Any = None) -> bytes:
+        def proxy_ok(url: str, *, policy: object = None) -> bytes:
             del url, policy
             return b"# md"
 
@@ -86,7 +85,7 @@ class TestFallback:
         """
         called: list[str] = []
 
-        def proxy(url: str, *, policy: Any = None) -> bytes:
+        def proxy(url: str, *, policy: object = None) -> bytes:
             del policy
             called.append(url)
             return b"# md"
@@ -114,7 +113,7 @@ class TestFallback:
         assert exc.value.status == status
 
     def test_proxy_failure_reraises_primary(self) -> None:
-        def proxy_fail(url: str, *, policy: Any = None) -> bytes:
+        def proxy_fail(url: str, *, policy: object = None) -> bytes:
             del url, policy
             raise FetchError("https://r.jina.ai/", 401, {}, b"auth")
 

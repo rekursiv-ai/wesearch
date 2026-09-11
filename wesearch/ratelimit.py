@@ -202,7 +202,13 @@ class FileStore:
     def transact(
         self, update: Callable[[tuple[float, float] | None], tuple[float, float]]
     ) -> None:
-        """Run ``update`` on the on-disk state under an exclusive ``flock``."""
+        """Run ``update`` on the on-disk state under an exclusive ``flock``.
+
+        Args:
+          update: Function taking current state (or None if file is empty) and
+            returning (tokens, updated_timestamp) to persist atomically.
+
+        """
         # The descriptor lives only inside this call. ``flock`` is per-open-file-
         # DESCRIPTION, so a cached fd would exclude neither threads sharing it nor
         # a forked child inheriting it; one open per transaction gives every
@@ -268,12 +274,7 @@ class SlidingWindowRateLimiter:
             await self._clock.sleep_async(wait)
 
     def _reserve(self) -> float:
-        """Reserve the next call slot; return seconds to wait for it.
-
-        Returns:
-          wait: Seconds the caller must sleep before its reserved slot.
-
-        """
+        """Reserve the next call slot; return seconds to wait for it."""
         with self._lock:
             now = self._clock.time()
             # Evict by the same expiry expression used for the reserved
@@ -351,15 +352,13 @@ class RandomUniformPacer:
         self._last_grant: float | None = None  # None until the first grant.
         self._lock = threading.Lock()
 
+    # The slot is claimed under the lock and the sleep happens outside it (the module's
+    # one reserve-then-wait rule): concurrent callers each take a DISTINCT slot instead
+    # of all reading the same ``_last_grant`` and firing together. The reservation is
+    # the grant time this caller is sleeping TOWARD, so it is correct before the sleep
+    # has elapsed.
     def _reserve(self) -> float:
-        """Claim this caller's slot and return the seconds to sleep for it.
-
-        The slot is claimed under the lock and the sleep happens outside it (the
-        module's one reserve-then-wait rule): concurrent callers each take a
-        DISTINCT slot instead of all reading the same ``_last_grant`` and firing
-        together. The reservation is the grant time this caller is sleeping
-        TOWARD, so it is correct before the sleep has elapsed.
-        """
+        """Claim this caller's slot and return the seconds to sleep for it."""
         with self._lock:
             now = self._clock.time()
             if self._last_grant is None:
@@ -435,38 +434,29 @@ class TokenBucketRateLimiter:
         if wait > 0:
             await self._clock.sleep_async(wait)
 
+    # Commits the spend immediately (advancing ``updated`` past the returned wait)
+    # inside the store's locked transaction, so sync and async callers need only sleep
+    # the returned duration -- no re-check loop -- and concurrent callers (threads or
+    # processes) serialize on the store's lock.
+    #
+    # Note on reading ``now`` before the lock (a recurring review question): capturing
+    # ``now`` outside ``transact`` looks racy -- two callers can read near-identical
+    # ``now`` values, then commit in lock-serialized order. It is nonetheless correct,
+    # because ``updated`` is set to ``now + wait`` and ``wait`` absorbs any staleness:
+    #
+    # - If caller A's ``now`` is *earlier* than the ``updated`` already on disk (because
+    # B committed a future reservation first), then ``now - updated`` is negative, so
+    # A's ``tokens`` only shrink, A's ``wait`` only grows, and A commits ``updated = now
+    # + wait`` which is >= the value it read. ``updated`` never moves backward; the
+    # bucket is never over-credited. - Reading ``now`` *inside* the lock would tighten
+    # spacing by at most the lock-hold time (microseconds here), not fix a correctness
+    # bug.
+    #
+    # So the only way to over-grant is a wall clock that steps backward (e.g. NTP),
+    # which is out of scope -- ``FileStore`` already requires a well-behaved wall clock
+    # to compare timestamps across processes.
     def _reserve(self) -> float:
-        """Spend one token; return seconds to wait for it to be earned.
-
-        Commits the spend immediately (advancing ``updated`` past the
-        returned wait) inside the store's locked transaction, so sync and
-        async callers need only sleep the returned duration -- no re-check
-        loop -- and concurrent callers (threads or processes) serialize on
-        the store's lock.
-
-        Returns:
-          wait: Seconds the caller must sleep before its token is earned.
-
-        Note on reading ``now`` before the lock (a recurring review question):
-        capturing ``now`` outside ``transact`` looks racy -- two callers can
-        read near-identical ``now`` values, then commit in lock-serialized
-        order. It is nonetheless correct, because ``updated`` is set to
-        ``now + wait`` and ``wait`` absorbs any staleness:
-
-        - If caller A's ``now`` is *earlier* than the ``updated`` already on
-          disk (because B committed a future reservation first), then
-          ``now - updated`` is negative, so A's ``tokens`` only shrink, A's
-          ``wait`` only grows, and A commits ``updated = now + wait`` which is
-          >= the value it read. ``updated`` never moves backward; the bucket
-          is never over-credited.
-        - Reading ``now`` *inside* the lock would tighten spacing by at most
-          the lock-hold time (microseconds here), not fix a correctness bug.
-
-        So the only way to over-grant is a wall clock that steps backward
-        (e.g. NTP), which is out of scope -- ``FileStore`` already requires a
-        well-behaved wall clock to compare timestamps across processes.
-
-        """
+        """Spend one token; return seconds to wait for it to be earned."""
         now = self._clock.time()
         wait = 0.0
 
@@ -519,7 +509,12 @@ class CooldownGate:
         self._clock: Clock = clock if clock is not None else SystemClock()
 
     def remaining(self) -> float:
-        """Seconds left in the active cooldown window, or ``0.0`` if none."""
+        """Seconds left in the active cooldown window, or ``0.0`` if none.
+
+        Returns:
+          wait: Seconds until the shared deadline expires (>=0).
+
+        """
         until = 0.0
 
         def read(state: tuple[float, float] | None) -> tuple[float, float]:
@@ -535,6 +530,11 @@ class CooldownGate:
 
         Uses ``max`` against the stored deadline so a shorter back-off can
         never shrink a longer one already in flight; the window only grows.
+
+        Args:
+          backoff_sec: Seconds to back off from now (shared deadline becomes
+            max(current, now + backoff_sec)).
+
         """
         target = self._clock.time() + backoff_sec
 

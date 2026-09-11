@@ -79,11 +79,11 @@ if TYPE_CHECKING:
     from curl_cffi.requests import Response
     from curl_cffi.requests.session import HttpMethod
 
-    import wesearch.fetch.transport.zendriver as zendriver_backend
+    from wesearch.fetch.transport import zendriver
 else:
     from wrapt import lazy_import
 
-    zendriver_backend = lazy_import("wesearch.fetch.transport.zendriver")
+    zendriver = lazy_import("wesearch.fetch.transport.zendriver")
 
 
 __all__ = [
@@ -241,52 +241,6 @@ def fetch(
     ).fetch()
 
 
-class _ResponseLearner:
-    """Accumulates what responses teach a session, then folds it in.
-
-    Its :meth:`observe` is the ``on_response`` sink for a :func:`fetch`
-    call: it records ``Set-Cookie`` and ``Accept-CH`` from every response (each
-    redirect hop and the final one), passing the status/headers through to the
-    caller's own callback. :meth:`merge_into` returns the session updated with
-    everything observed.
-    """
-
-    def __init__(self, *, caller: Callable[[int, dict[str, str]], None] | None) -> None:
-        self._caller = caller
-        self._cookies: dict[str, dict[str, str]] = {}
-        self._accept_ch: dict[str, frozenset[str]] = {}
-
-    def observe(self, status: int, resp_headers: dict[str, str], url: str) -> None:
-        """Record cookies + Accept-CH from a hop; forward to the caller.
-
-        Cookies are filed under the RESPONDING origin, so a redirect target's
-        ``Set-Cookie`` warms that origin's jar rather than this request's -- a
-        browser following ``a -> b`` learns b's cookies, and the per-origin jar
-        can now express that. They were discarded outright while the jar was
-        flat, because the only alternative then was mis-attributing them to the
-        requesting origin. Accept-CH opt-ins are keyed the same way.
-        """
-        set_cookie = resp_headers.get("set-cookie")
-        if set_cookie:
-            self._cookies.setdefault(origin(url), {}).update(
-                parse_set_cookie(set_cookie)
-            )
-        hints = _accept_ch_hints(resp_headers)
-        if hints:
-            self._accept_ch[origin(url)] = hints
-        if self._caller is not None:
-            self._caller(status, resp_headers)
-
-    def merge_into(self, session: FetchSession) -> FetchSession:
-        """Return ``session`` updated with the observed cookies + opt-ins."""
-        updated = session
-        for org, jar in self._cookies.items():
-            updated = updated.with_cookies(org, jar)
-        for org, hints in self._accept_ch.items():
-            updated = updated.with_accept_ch(org, hints)
-        return updated
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Request:
     """One :func:`fetch` invocation: its URL, session, and per-call params.
@@ -315,6 +269,11 @@ class _Request:
         learned-domain routing below AND made every browser transport an error,
         so the one caller that asked for safety lost the browser entirely. Trust
         is now honored at connect time by whichever transport runs.
+
+        Returns:
+          body: Response body as raw bytes.
+          session: Updated session with any new cookies/state.
+
         """
         p = self.params
         resolved = resolve_transport(
@@ -373,7 +332,20 @@ class _Request:
         curl: cc_requests.Session[Response] | None = None,
         reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
     ) -> bytes:
-        """Perform the request once (with retries) via the raw transport."""
+        """Perform the request once (with retries) via the raw transport.
+
+        Args:
+          headers: Custom headers, or None to use content.headers.
+          cookies: Request cookies, or None to use session defaults.
+          raw_headers: Bypass validation and send headers verbatim.
+          on_response: Optional observer for the response; None uses self.observer.
+          curl: Existing session; None creates one.
+          reseat: Callback to acquire a new session when connection rolls.
+
+        Returns:
+          body: Response body as raw bytes.
+
+        """
         return _fetch_once(
             self.url,
             self.params,
@@ -388,11 +360,467 @@ class _Request:
         )
 
 
-def _validated_body(request: _Request, body: bytes) -> bytes:
-    """Validate and return ``body`` using the caller's provider-specific rule."""
-    if request.params.observe.body_validator is not None:
-        request.params.observe.body_validator(body)
-    return body
+_egress_lock = threading.Lock()  # guards egress state, not a tunable.
+
+# Memoized from the most recent successful probe by any :func:`egress_ip` call,
+# so the whole process shares one observed egress. ``None`` until the first
+# successful probe; a failed probe leaves the prior value intact. A deliberate
+# module global: shared *observed* state (a last-seen cache), not a tunable.
+_last_egress_ip: str | None = None
+
+
+def last_known_egress_ip() -> str | None:
+    """Return the last-known egress IP without any network, or ``None`` if unseen.
+
+    Returns:
+      _last_egress_ip: The str | None.
+
+    """
+    with _egress_lock:
+        return _last_egress_ip
+
+
+# Callbacks fired when the egress rolls, so any transport that pools live,
+# egress-keyed resources (open connections, running browsers) can invalidate
+# them WITHOUT fetch.py naming that transport. fetch.py tears down its OWN curl
+# pool inline; other backends (e.g. the zendriver browser pool) register here.
+# An observer registry, not a tunable.
+# The zendriver browser pool is egress-keyed live state (running Chromes), so a
+# roll invalidates it exactly like the curl pool. shutdown_browsers is a no-op
+# when no pool exists, so this subscription is free until a browser fetch runs.
+# Seeded here rather than registered at import so module scope stays declarative.
+_on_egress_rotation: list[Callable[[str | None], None]] = [
+    lambda _ip: zendriver.shutdown_browsers()
+]
+
+
+def on_egress_rotation(callback: Callable[[str | None], None]) -> None:
+    """Register ``callback`` to run when the egress IP rolls (a VPN change).
+
+    Called with the new IP whenever :func:`set_last_egress_ip` observes a change.
+    A backend that pools egress-keyed live resources registers its teardown here,
+    so this module never has to know that backend exists to invalidate it.
+
+    Args:
+      callback: Function called with new egress IP when it changes.
+
+    """
+    _on_egress_rotation.append(callback)
+
+
+def set_last_egress_ip(ip: str | None) -> None:
+    """Set the process-wide last-known egress IP (e.g. after a known VPN roll).
+
+    A changed IP means the exit rolled, so every pooled Session for a DIFFERENT
+    egress is now dead (its connection went out the old exit) -- close and drop
+    them, leaving only the new egress's sessions. Registered rotation callbacks
+    (:func:`on_egress_rotation`) then fire so other backends invalidate their own
+    egress-keyed pools.
+
+    Args:
+      ip: The observed egress IP, or None if unknown.
+
+    """
+    global _last_egress_ip  # noqa: PLW0603 -- memoize shared observed state.
+    with _egress_lock:
+        rolled = ip != _last_egress_ip
+        _last_egress_ip = ip
+    if rolled:
+        close_curl_sessions_except(ip)
+        for callback in _on_egress_rotation:
+            callback(ip)
+
+
+def egress_ip(
+    *,
+    cache: bool = True,
+    ipv6: bool = False,
+    v4_echoes: Sequence[str] = (
+        "https://ipv4.icanhazip.com",
+        "https://api.ipify.org",
+    ),
+    v6_echoes: Sequence[str] = (
+        "https://ipv6.icanhazip.com",
+        "https://api64.ipify.org",
+    ),
+    timeout_sec: float = 5.0,
+) -> str | None:
+    """Return this host's public egress IP, or ``None`` if none resolves.
+
+    Args:
+      cache: When true (default), return the last-known value if set, probing
+        only to fill it. False always probes live. Ignored when ``ipv6`` is set:
+        the cache holds the v4 egress that keys the identity layer's profiles.
+      ipv6: Resolve the IPv6 egress instead of IPv4. Always probes.
+      v4_echoes: v4-only echo hosts tried in order.
+      v6_echoes: v6-only echo hosts tried in order.
+      timeout_sec: Per-request HTTP timeout.
+
+    Returns:
+      ip: The public address of the requested family, or ``None`` when none
+        resolves (offline, or no egress of that family).
+
+    """
+    # The cache holds ONE address, and the identity layer keys profiles by it,
+    # so it is the v4 egress. A v6 lookup must not read it -- returning a cached
+    # v4 for ipv6=True answered a different question than the caller asked.
+    if cache and not ipv6 and (cached := last_known_egress_ip()) is not None:
+        return cached
+    echoes = v6_echoes if ipv6 else v4_echoes
+    for url in echoes:
+        try:
+            # raw_headers bypasses the identity layer: the profile is keyed by
+            # egress IP and resolving it is THIS call, so a profiled echo would
+            # recurse. A bare GET is all an echo service needs.
+            body, _ = fetch(
+                url,
+                request=RequestParams(
+                    content=ContentParams(headers={}, raw_headers=True),
+                    retry=RetryParams(timeout_sec=timeout_sec),
+                ),
+            )
+            ip = body.decode().strip()
+        except (FetchError, OSError, ValueError):
+            continue
+        if _is_valid_ip_address(ip, ipv6=ipv6):
+            set_last_egress_ip(ip)
+            return ip
+    return None
+
+
+def _is_valid_ip_address(text: str, *, ipv6: bool) -> bool:
+    """Whether *text* is a valid IP address of the requested family."""
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return addr.version == (6 if ipv6 else 4)
+
+
+# Split rather than concatenated: a fragment ends the URL, so appending to the raw
+# string put the query AFTER it (``https://e/p#section?q=x``). Fragments are never sent
+# to a server, so those parameters silently vanished from the wire.
+def _url_with_params(
+    url: str,
+    params: Mapping[str, str | int] | None,
+) -> str:
+    """Return ``url`` with encoded query parameters merged into its query."""
+    if not params:
+        return url
+    parts = urlsplit(url)
+    query = f"{parts.query}&{urlencode(params)}" if parts.query else urlencode(params)
+    return urlunsplit(parts._replace(query=query))
+
+
+def _split_userinfo(url: str) -> tuple[str, str | None]:
+    """Strip ``user:pass@`` from a URL; return the URL and Basic auth."""
+    parsed = urlparse(url)
+    if not (parsed.username or parsed.password):
+        return url, None
+    user = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    credentials = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
+    return parsed._replace(netloc=netloc).geturl(), f"Basic {credentials}"
+
+
+# The raw transport core: encodes query/body/headers and dispatches to the curl or
+# stdlib path with the shared retry loop. The profile-aware :func:`fetch` wraps this;
+# ``raw_headers`` callers reach it directly (no cookie jar). ``params`` supplies the
+# validated per-call policy; ``headers`` / ``cookies`` / ``impersonate`` are resolved by
+# the identity layer above; ``accept_ch`` is the session's per-origin extended-hint opt-
+# ins; ``on_response`` may wrap ``params.on_response`` to capture cookies; and
+# ``session`` is a pooled curl_cffi Session to reuse (the identity's persistent
+# connection), or ``None`` to open a throwaway one.
+def _fetch_once(
+    url: str,
+    params: RequestParams,
+    *,
+    headers: dict[str, str] | None,
+    cookies: dict[str, str] | None,
+    raw_headers: bool,
+    impersonate: str,
+    accept_ch: Mapping[str, frozenset[str]],
+    on_response: Observer | None,
+    session: cc_requests.Session[Response] | None,
+    reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
+) -> bytes:
+    """Build and send one request (with retries), no profile layer."""
+    url, basic_auth = _split_userinfo(url)
+    url = _url_with_params(url, params.content.params)
+    body_bytes: bytes | None = None
+    body_content_type: str | None = None
+    if params.content.data is not None:
+        body_bytes = urlencode(params.content.data).encode()
+        body_content_type = "application/x-www-form-urlencoded"
+    elif params.content.json is not NO_BODY:
+        body_bytes = json.dumps(params.content.json).encode()
+        body_content_type = "application/json"
+    merged = _build_headers(
+        method=params.content.method,
+        url=url,
+        content_type=body_content_type,
+        extra=headers,
+        raw_headers=raw_headers,
+        impersonate=impersonate,
+        use_curl=params.policy.transport == "curl",
+        accept_ch=accept_ch,
+    )
+    if basic_auth is not None:
+        merged.setdefault("Authorization", basic_auth)
+    # HTTP header names are case-insensitive: collapse any caller-supplied
+    # case-variant "cookie" header and the cookies= param into ONE Cookie key.
+    # Two dict keys ("cookie" + "Cookie") would emit two Cookie lines on the wire
+    # -- a bot tell. The param values follow the caller's header pairs.
+    cookie_parts = [
+        merged.pop(key) for key in [k for k in merged if k.lower() == "cookie"]
+    ]
+    if cookies:
+        cookie_parts.append("; ".join(f"{k}={v}" for k, v in cookies.items()))
+    if cookie_parts:
+        merged["Cookie"] = "; ".join(cookie_parts)
+    method = params.content.method
+    backend = fetch_curl if params.policy.transport == "curl" else fetch_stdlib
+    for attempt in range(1 + params.retry.retries):
+        try:
+            return backend(
+                url,
+                method=method,
+                headers=merged,
+                body=body_bytes,
+                timeout_sec=params.retry.timeout_sec,
+                connect_timeout_sec=params.retry.connect_timeout_sec,
+                max_redirects=params.retry.max_redirects,
+                impersonate=impersonate,
+                on_redirect=params.observe.on_redirect,
+                on_response=on_response,
+                trust=params.policy.trust,
+                session=session,
+                reseat=reseat,
+            )
+        except FetchError as e:
+            # Status 0 is the transport-failure sentinel (a curl CurlError, or a
+            # connection/TLS failure wrapped by a transport) -- retryable like the
+            # OSError below, which the stdlib path raises for the same class of
+            # failure. Without this the two transports disagree on `retries=`.
+            retryable = e.status in _RETRYABLE_STATUSES or e.status == 0
+            if not retryable or attempt == params.retry.retries:
+                raise
+            delay_sec = params.retry.backoff_delay(attempt, e.headers)
+            logger.debug(
+                "fetch %s → %d, retry in %.1fs",
+                url,
+                e.status,
+                delay_sec,
+            )
+            time.sleep(delay_sec)
+        except (OSError, TimeoutError) as e:
+            if attempt == params.retry.retries:
+                raise
+            delay_sec = params.retry.backoff_delay(attempt, {})
+            logger.debug(
+                "fetch %s failed: %s, retry in %.1fs",
+                url,
+                e,
+                delay_sec,
+            )
+            time.sleep(delay_sec)
+    # The loop returns on success and re-raises on the final attempt, so this
+    # is unreachable; it exists only to satisfy the type checker.
+    raise AssertionError("retry loop exited without returning or raising")
+
+
+# On the high-level curl transport, curl_cffi's ``impersonate`` supplies the coherent
+# Chrome fingerprint (User-Agent, ``sec-ch-ua`` hints, Accept, Sec-Fetch-*, Priority)
+# matching its TLS/HTTP-2 profile exactly. Overriding those with hand-built values makes
+# the identities disagree -- a bot tell -- so that path emits ONLY the structural
+# headers curl does not set (Origin/Content-Type on a POST), the extended client hints
+# an origin opted into via ``Accept-CH``, and caller extras.
+def _build_headers(
+    *,
+    method: str,
+    url: str,
+    content_type: str | None,
+    extra: Mapping[str, str] | None,
+    raw_headers: bool,
+    impersonate: str,
+    use_curl: bool,
+    accept_ch: Mapping[str, frozenset[str]],
+) -> dict[str, str]:
+    """Build canonical-order Chrome request headers."""
+    # Host and Content-Length are omitted: http.client auto-adds both first on
+    # the wire (the connection path overrides Host when validated_hosts splits
+    # SNI/IP); curl adds them itself.
+    if raw_headers:
+        return dict(extra) if extra else {}
+    if use_curl:
+        return _curl_structural_headers(
+            method=method,
+            url=url,
+            content_type=content_type,
+            extra=extra,
+            impersonate=impersonate,
+            accept_ch=accept_ch,
+        )
+    # The stdlib path gets no impersonation-injected request headers, so it
+    # reproduces the full Chrome header set by hand -- from the SAME source
+    # (chrome_navigation_headers, matched to the impersonate target) the
+    # high-level curl path's fingerprint uses, so every transport presents one
+    # coherent identity, not drifting ones.
+    parsed = urlparse(url)
+    major, platform = impersonate_version_platform(impersonate)
+    h = chrome_navigation_headers(
+        major=major,
+        platform=platform,
+        method=method,
+        content_type=content_type or "",
+        origin=f"{parsed.scheme}://{parsed.netloc}",
+        # This branch is reached only by the stdlib path, which is HTTP/1.1; a
+        # real Chrome omits the HTTP/2-only Priority header there.
+        http2=False,
+    )
+    h.update(_google_headers(url, impersonate))
+    if extra:
+        # Caller wins; dict.update preserves slot for existing keys and
+        # appends new ones at the end.
+        h.update(extra)
+    return h
+
+
+# A real Chrome sends ``x-browser-*`` / ``x-client-data`` only to Google properties, so
+# :func:`fetch` adds them by host -- every transport, no caller wiring -- and nothing to
+# any other origin.
+def _google_headers(url: str, impersonate: str) -> dict[str, str]:
+    """Return the Google-only integrity headers for ``url``, empty off a Google host."""
+    if not is_google_property(urlparse(url).hostname or ""):
+        return {}
+    major, platform = impersonate_version_platform(impersonate)
+    return chrome_headers_for_google(major=major, platform=platform)
+
+
+def _accept_ch_hints(resp_headers: dict[str, str]) -> frozenset[str]:
+    """Return the extended client-hint names an ``Accept-CH`` response requested."""
+    accept_ch = resp_headers.get("accept-ch")
+    if accept_ch is None:
+        return frozenset[str]()
+    wanted = {tok.strip().lower() for tok in accept_ch.split(",") if tok.strip()}
+    return frozenset(name for name in chrome_client_hints(major=1) if name in wanted)
+
+
+# Verified on Linux against real Chrome (146, the impersonate target): the FIRST request
+# to an origin sends only the core set curl_cffi's impersonate reproduces (UA, the three
+# basic ``sec-ch-ua`` hints, Accept, Sec-Fetch-*, Priority, Accept-Encoding/Language).
+# It adds the EXTENDED client hints (``sec-ch-ua-arch`` etc.) only AFTER the server opts
+# in via ``Accept-CH``, on subsequent same-origin requests. We mirror that exactly: a
+# cold origin gets nothing extra (adding hints an unrequesting site never asked for is
+# itself a tell), and an origin that has sent Accept-CH gets precisely the hints it
+# requested, version-matched to the impersonate target. Only a POST's Origin/Content-
+# Type and caller extras follow (Cookie is merged by caller).
+def _curl_structural_headers(
+    *,
+    method: str,
+    url: str,
+    content_type: str | None,
+    extra: Mapping[str, str] | None,
+    impersonate: str,
+    accept_ch: Mapping[str, frozenset[str]],
+) -> dict[str, str]:
+    """Headers for the curl path: what impersonate omits + Accept-CH opt-ins."""
+    h: dict[str, str] = {}
+    wanted = accept_ch.get(origin(url))
+    if wanted:
+        major, platform = impersonate_version_platform(impersonate)
+        hints = chrome_client_hints(major=major, platform=platform)
+        h.update({name: value for name, value in hints.items() if name in wanted})
+    if method not in ("GET", "HEAD"):
+        if content_type:
+            h["Content-Type"] = content_type
+        parsed = urlparse(url)
+        h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+    h.update(_google_headers(url, impersonate))
+    if extra:
+        h.update(extra)
+    return h
+
+
+class _ResponseLearner:
+    """Accumulates what responses teach a session, then folds it in.
+
+    Its :meth:`observe` is the ``on_response`` sink for a :func:`fetch`
+    call: it records ``Set-Cookie`` and ``Accept-CH`` from every response (each
+    redirect hop and the final one), passing the status/headers through to the
+    caller's own callback. :meth:`merge_into` returns the session updated with
+    everything observed.
+    """
+
+    def __init__(self, *, caller: Callable[[int, dict[str, str]], None] | None) -> None:
+        self._caller = caller
+        self._cookies: dict[str, dict[str, str]] = {}
+        self._accept_ch: dict[str, frozenset[str]] = {}
+
+    def observe(self, status: int, resp_headers: dict[str, str], url: str) -> None:
+        """Record cookies + Accept-CH from a hop; forward to the caller.
+
+        Cookies are filed under the RESPONDING origin, so a redirect target's
+        ``Set-Cookie`` warms that origin's jar rather than this request's -- a
+        browser following ``a -> b`` learns b's cookies, and the per-origin jar
+        can now express that. They were discarded outright while the jar was
+        flat, because the only alternative then was mis-attributing them to the
+        requesting origin. Accept-CH opt-ins are keyed the same way.
+
+        Args:
+          status: HTTP response status.
+          resp_headers: Response headers as lowercase keys.
+          url: URL of the responding origin (for cookie attribution).
+
+        """
+        set_cookie = resp_headers.get("set-cookie")
+        if set_cookie:
+            self._cookies.setdefault(origin(url), {}).update(
+                parse_set_cookie(set_cookie)
+            )
+        hints = _accept_ch_hints(resp_headers)
+        if hints:
+            self._accept_ch[origin(url)] = hints
+        if self._caller is not None:
+            self._caller(status, resp_headers)
+
+    def merge_into(self, session: FetchSession) -> FetchSession:
+        """Return ``session`` updated with the observed cookies + opt-ins.
+
+        Args:
+          session: Base session to augment.
+
+        Returns:
+          updated: Session with learned cookies and Accept-CH hints.
+
+        """
+        updated = session
+        for org, jar in self._cookies.items():
+            updated = updated.with_cookies(org, jar)
+        for org, hints in self._accept_ch.items():
+            updated = updated.with_accept_ch(org, hints)
+        return updated
+
+
+# A pin is fixed when its Session is built, so following a redirect onto a new host on
+# the old host's Session would connect through the wrong pin. The new host is validated
+# here, exactly as the initial hop was -- a redirect target is attacker-controlled and
+# skipping its check is the classic SSRF bypass.
+def _reseat(
+    request: _Request, egress: str | None, impersonate: str, url: str
+) -> cc_requests.Session[Response] | None:
+    """Return the pooled Session for a cross-host redirect target."""
+    if egress is None:
+        return None
+    parsed = urlparse(url)
+    return curl_session(
+        egress,
+        parsed.hostname or "",
+        impersonate,
+        pin=pinned_host(url, request.params.policy.trust),
+        port=parsed.port or default_port(parsed.scheme),
+    )
 
 
 def _fetch_with_identity(
@@ -475,6 +903,13 @@ def _fetch_with_identity(
                 request, None, egress_ip(cache=False), caller_headers, caller_cookies
             ),
         )
+
+
+def _validated_body(request: _Request, body: bytes) -> bytes:
+    """Validate and return ``body`` using the caller's provider-specific rule."""
+    if request.params.observe.body_validator is not None:
+        request.params.observe.body_validator(body)
+    return body
 
 
 def _send_as(
@@ -562,35 +997,32 @@ def _send_as(
     return body
 
 
+# Reuses the identity layer's egress resolution and ProfileStore so a browser fetch and
+# a curl fetch on the same ``(egress, domain)`` share cookies. The cookies the browser
+# acquired are folded back through the per-hop observer, so the :class:`FetchSession`
+# the caller receives is warm and a following curl fetch reuses them.
+#
+# Under ``"untrusted"`` the host is validated but NOT pinned: Chrome resolves its own
+# DNS and cannot be handed an IP without a proxy in front of it. That leaves a narrow
+# window between validation and Chrome's own resolution -- accepted deliberately,
+# because the alternative (a per-request proxy) costs one Chrome process per pin and the
+# measured 32x warm-browser reuse with it.
+#
+# That accepted window covers ONE hop's DNS. ``trust`` is therefore passed down rather
+# than consumed here: Chrome follows redirects itself, so only the transport can re-
+# validate the hops it chooses, and checking solely the URL below let a public page
+# redirect Chrome to a private address.
 def _send_via_zendriver(
     request: _Request,
     *,
     headers: dict[str, str] | None,
     cookies: dict[str, str] | None,
 ) -> bytes:
-    """Fetch ``request`` through the headless-Chrome backend, warming the session.
-
-    Reuses the identity layer's egress resolution and ProfileStore so a browser
-    fetch and a curl fetch on the same ``(egress, domain)`` share cookies. The
-    cookies the browser acquired are folded back through the per-hop observer, so
-    the :class:`FetchSession` the caller receives is warm and a following curl
-    fetch reuses them.
-
-    Under ``"untrusted"`` the host is validated but NOT pinned: Chrome resolves
-    its own DNS and cannot be handed an IP without a proxy in front of it. That
-    leaves a narrow window between validation and Chrome's own resolution --
-    accepted deliberately, because the alternative (a per-request proxy) costs
-    one Chrome process per pin and the measured 32x warm-browser reuse with it.
-
-    That accepted window covers ONE hop's DNS. ``trust`` is therefore passed
-    down rather than consumed here: Chrome follows redirects itself, so only the
-    transport can re-validate the hops it chooses, and checking solely the URL
-    below let a public page redirect Chrome to a private address.
-    """
+    """Fetch ``request`` through the headless-Chrome backend, warming the session."""
     pinned_host(request.url, request.params.policy.trust)
     egress = egress_ip(cache=True) or egress_ip(cache=False)
     browser_url = _url_with_params(request.url, request.params.content.params)
-    result = zendriver_backend.fetch_zendriver(
+    result = zendriver.fetch_zendriver(
         browser_url,
         profile_dir=data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
         egress=egress or "",
@@ -642,412 +1074,3 @@ def _send_via_zendriver(
         else:
             store.update_cookies(egress, landed_domain, result.cookies)
     return result.body
-
-
-def _reseat(
-    request: _Request, egress: str | None, impersonate: str, url: str
-) -> cc_requests.Session[Response] | None:
-    """Return the pooled Session for a cross-host redirect target.
-
-    A pin is fixed when its Session is built, so following a redirect onto a new
-    host on the old host's Session would connect through the wrong pin. The new
-    host is validated here, exactly as the initial hop was -- a redirect target
-    is attacker-controlled and skipping its check is the classic SSRF bypass.
-    """
-    if egress is None:
-        return None
-    parsed = urlparse(url)
-    return curl_session(
-        egress,
-        parsed.hostname or "",
-        impersonate,
-        pin=pinned_host(url, request.params.policy.trust),
-        port=parsed.port or default_port(parsed.scheme),
-    )
-
-
-_egress_lock = threading.Lock()  # guards egress state, not a tunable
-
-# Memoized from the most recent successful probe by any :func:`egress_ip` call,
-# so the whole process shares one observed egress. ``None`` until the first
-# successful probe; a failed probe leaves the prior value intact. A deliberate
-# module global: shared *observed* state (a last-seen cache), not a tunable.
-_last_egress_ip: str | None = None
-
-
-def last_known_egress_ip() -> str | None:
-    """Return the last-known egress IP without any network, or ``None`` if unseen."""
-    with _egress_lock:
-        return _last_egress_ip
-
-
-# Callbacks fired when the egress rolls, so any transport that pools live,
-# egress-keyed resources (open connections, running browsers) can invalidate
-# them WITHOUT fetch.py naming that transport. fetch.py tears down its OWN curl
-# pool inline; other backends (e.g. the zendriver browser pool) register here.
-# An observer registry, not a tunable.
-_on_egress_rotation: list[Callable[[str | None], None]] = []
-
-
-def on_egress_rotation(callback: Callable[[str | None], None]) -> None:
-    """Register ``callback`` to run when the egress IP rolls (a VPN change).
-
-    Called with the new IP whenever :func:`set_last_egress_ip` observes a change.
-    A backend that pools egress-keyed live resources registers its teardown here,
-    so this module never has to know that backend exists to invalidate it.
-    """
-    _on_egress_rotation.append(callback)
-
-
-def set_last_egress_ip(ip: str | None) -> None:
-    """Set the process-wide last-known egress IP (e.g. after a known VPN roll).
-
-    A changed IP means the exit rolled, so every pooled Session for a DIFFERENT
-    egress is now dead (its connection went out the old exit) -- close and drop
-    them, leaving only the new egress's sessions. Registered rotation callbacks
-    (:func:`on_egress_rotation`) then fire so other backends invalidate their own
-    egress-keyed pools.
-    """
-    global _last_egress_ip  # noqa: PLW0603 -- memoize shared observed state.
-    with _egress_lock:
-        rolled = ip != _last_egress_ip
-        _last_egress_ip = ip
-    if rolled:
-        close_curl_sessions_except(ip)
-        for callback in _on_egress_rotation:
-            callback(ip)
-
-
-# The zendriver browser pool is egress-keyed live state (running Chromes), so a
-# roll invalidates it exactly like the curl pool. shutdown_browsers is a no-op
-# when no pool exists, so this subscription is free until a browser fetch runs.
-# Registered via the rotation hook so the teardown mechanism is uniform, not a
-# special case wired into set_last_egress_ip.
-on_egress_rotation(lambda _ip: zendriver_backend.shutdown_browsers())
-
-
-def egress_ip(
-    *,
-    cache: bool = True,
-    ipv6: bool = False,
-    v4_echoes: Sequence[str] = (
-        "https://ipv4.icanhazip.com",
-        "https://api.ipify.org",
-    ),
-    v6_echoes: Sequence[str] = (
-        "https://ipv6.icanhazip.com",
-        "https://api64.ipify.org",
-    ),
-    timeout_sec: float = 5.0,
-) -> str | None:
-    """Return this host's public egress IP, or ``None`` if none resolves.
-
-    Args:
-      cache: When true (default), return the last-known value if set, probing
-        only to fill it. False always probes live. Ignored when ``ipv6`` is set:
-        the cache holds the v4 egress that keys the identity layer's profiles.
-      ipv6: Resolve the IPv6 egress instead of IPv4. Always probes.
-      v4_echoes: v4-only echo hosts tried in order.
-      v6_echoes: v6-only echo hosts tried in order.
-      timeout_sec: Per-request HTTP timeout.
-
-    Returns:
-      ip: The public address of the requested family, or ``None`` when none
-        resolves (offline, or no egress of that family).
-
-    """
-    # The cache holds ONE address, and the identity layer keys profiles by it,
-    # so it is the v4 egress. A v6 lookup must not read it -- returning a cached
-    # v4 for ipv6=True answered a different question than the caller asked.
-    if cache and not ipv6 and (cached := last_known_egress_ip()) is not None:
-        return cached
-    echoes = v6_echoes if ipv6 else v4_echoes
-    for url in echoes:
-        try:
-            # raw_headers bypasses the identity layer: the profile is keyed by
-            # egress IP and resolving it is THIS call, so a profiled echo would
-            # recurse. A bare GET is all an echo service needs.
-            body, _ = fetch(
-                url,
-                request=RequestParams(
-                    content=ContentParams(headers={}, raw_headers=True),
-                    retry=RetryParams(timeout_sec=timeout_sec),
-                ),
-            )
-            ip = body.decode().strip()
-        except (FetchError, OSError, ValueError):
-            continue
-        if _is_valid_ip_address(ip, ipv6=ipv6):
-            set_last_egress_ip(ip)
-            return ip
-    return None
-
-
-def _is_valid_ip_address(text: str, *, ipv6: bool) -> bool:
-    """Whether *text* is a valid IP address of the requested family."""
-    try:
-        addr = ipaddress.ip_address(text)
-    except ValueError:
-        return False
-    return addr.version == (6 if ipv6 else 4)
-
-
-def _url_with_params(
-    url: str,
-    params: Mapping[str, str | int] | None,
-) -> str:
-    """Return ``url`` with encoded query parameters merged into its query.
-
-    Split rather than concatenated: a fragment ends the URL, so appending to the
-    raw string put the query AFTER it (``https://e/p#section?q=x``). Fragments
-    are never sent to a server, so those parameters silently vanished from the
-    wire.
-    """
-    if not params:
-        return url
-    parts = urlsplit(url)
-    query = f"{parts.query}&{urlencode(params)}" if parts.query else urlencode(params)
-    return urlunsplit(parts._replace(query=query))
-
-
-def _split_userinfo(url: str) -> tuple[str, str | None]:
-    """Strip ``user:pass@`` from a URL; return the URL and Basic auth."""
-    parsed = urlparse(url)
-    if not (parsed.username or parsed.password):
-        return url, None
-    user = unquote(parsed.username or "")
-    password = unquote(parsed.password or "")
-    credentials = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
-    netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
-    return parsed._replace(netloc=netloc).geturl(), f"Basic {credentials}"
-
-
-def _fetch_once(
-    url: str,
-    params: RequestParams,
-    *,
-    headers: dict[str, str] | None,
-    cookies: dict[str, str] | None,
-    raw_headers: bool,
-    impersonate: str,
-    accept_ch: Mapping[str, frozenset[str]],
-    on_response: Observer | None,
-    session: cc_requests.Session[Response] | None,
-    reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
-) -> bytes:
-    """Build and send one request (with retries), no profile layer.
-
-    The raw transport core: encodes query/body/headers and dispatches to the
-    curl or stdlib path with the shared retry loop. The profile-aware
-    :func:`fetch` wraps this; ``raw_headers`` callers reach it directly (no
-    cookie jar). ``params`` supplies the validated per-call policy; ``headers`` /
-    ``cookies`` / ``impersonate`` are resolved by the identity layer above;
-    ``accept_ch`` is the session's per-origin extended-hint opt-ins;
-    ``on_response`` may wrap ``params.on_response`` to capture cookies; and
-    ``session`` is a pooled curl_cffi Session to reuse (the identity's persistent
-    connection), or ``None`` to open a throwaway one.
-    """
-    url, basic_auth = _split_userinfo(url)
-    url = _url_with_params(url, params.content.params)
-    body_bytes: bytes | None = None
-    body_content_type: str | None = None
-    if params.content.data is not None:
-        body_bytes = urlencode(params.content.data).encode()
-        body_content_type = "application/x-www-form-urlencoded"
-    elif params.content.json is not NO_BODY:
-        body_bytes = json.dumps(params.content.json).encode()
-        body_content_type = "application/json"
-    merged = _build_headers(
-        method=params.content.method,
-        url=url,
-        content_type=body_content_type,
-        extra=headers,
-        raw_headers=raw_headers,
-        impersonate=impersonate,
-        use_curl=params.policy.transport == "curl",
-        accept_ch=accept_ch,
-    )
-    if basic_auth is not None:
-        merged.setdefault("Authorization", basic_auth)
-    # HTTP header names are case-insensitive: collapse any caller-supplied
-    # case-variant "cookie" header and the cookies= param into ONE Cookie key.
-    # Two dict keys ("cookie" + "Cookie") would emit two Cookie lines on the wire
-    # -- a bot tell. The param values follow the caller's header pairs.
-    cookie_parts = [
-        merged.pop(key) for key in [k for k in merged if k.lower() == "cookie"]
-    ]
-    if cookies:
-        cookie_parts.append("; ".join(f"{k}={v}" for k, v in cookies.items()))
-    if cookie_parts:
-        merged["Cookie"] = "; ".join(cookie_parts)
-    method = params.content.method
-    backend = fetch_curl if params.policy.transport == "curl" else fetch_stdlib
-    for attempt in range(1 + params.retry.retries):
-        try:
-            return backend(
-                url,
-                method=method,
-                headers=merged,
-                body=body_bytes,
-                timeout_sec=params.retry.timeout_sec,
-                connect_timeout_sec=params.retry.connect_timeout_sec,
-                max_redirects=params.retry.max_redirects,
-                impersonate=impersonate,
-                on_redirect=params.observe.on_redirect,
-                on_response=on_response,
-                trust=params.policy.trust,
-                session=session,
-                reseat=reseat,
-            )
-        except FetchError as e:
-            # status 0 is the transport-failure sentinel (a curl CurlError, or a
-            # connection/TLS failure wrapped by a transport) -- retryable like the
-            # OSError below, which the stdlib path raises for the same class of
-            # failure. Without this the two transports disagree on `retries=`.
-            retryable = e.status in _RETRYABLE_STATUSES or e.status == 0
-            if not retryable or attempt == params.retry.retries:
-                raise
-            delay_sec = params.retry.backoff_delay(attempt, e.headers)
-            logger.debug(
-                "fetch %s → %d, retry in %.1fs",
-                url,
-                e.status,
-                delay_sec,
-            )
-            time.sleep(delay_sec)
-        except (OSError, TimeoutError) as e:
-            if attempt == params.retry.retries:
-                raise
-            delay_sec = params.retry.backoff_delay(attempt, {})
-            logger.debug(
-                "fetch %s failed: %s, retry in %.1fs",
-                url,
-                e,
-                delay_sec,
-            )
-            time.sleep(delay_sec)
-    # The loop returns on success and re-raises on the final attempt, so this
-    # is unreachable; it exists only to satisfy the type checker.
-    raise AssertionError("retry loop exited without returning or raising")
-
-
-def _build_headers(
-    *,
-    method: str,
-    url: str,
-    content_type: str | None,
-    extra: Mapping[str, str] | None,
-    raw_headers: bool,
-    impersonate: str,
-    use_curl: bool,
-    accept_ch: Mapping[str, frozenset[str]],
-) -> dict[str, str]:
-    """Build canonical-order Chrome request headers.
-
-    On the high-level curl transport, curl_cffi's ``impersonate`` supplies the
-    coherent Chrome fingerprint (User-Agent, ``sec-ch-ua`` hints, Accept,
-    Sec-Fetch-*, Priority) matching its TLS/HTTP-2 profile exactly. Overriding
-    those with hand-built values makes the identities disagree -- a bot tell --
-    so that path emits ONLY the structural headers curl does not set
-    (Origin/Content-Type on a POST), the extended client hints an origin opted
-    into via ``Accept-CH``, and caller extras.
-    """
-    # Host and Content-Length are omitted: http.client auto-adds both first on
-    # the wire (the connection path overrides Host when validated_hosts splits
-    # SNI/IP); curl adds them itself.
-    if raw_headers:
-        return dict(extra) if extra else {}
-    if use_curl:
-        return _curl_structural_headers(
-            method=method,
-            url=url,
-            content_type=content_type,
-            extra=extra,
-            impersonate=impersonate,
-            accept_ch=accept_ch,
-        )
-    # The stdlib path gets no impersonation-injected request headers, so it
-    # reproduces the full Chrome header set by hand -- from the SAME source
-    # (chrome_navigation_headers, matched to the impersonate target) the
-    # high-level curl path's fingerprint uses, so every transport presents one
-    # coherent identity, not drifting ones.
-    parsed = urlparse(url)
-    major, platform = impersonate_version_platform(impersonate)
-    h = chrome_navigation_headers(
-        major=major,
-        platform=platform,
-        method=method,
-        content_type=content_type or "",
-        origin=f"{parsed.scheme}://{parsed.netloc}",
-        # This branch is reached only by the stdlib path, which is HTTP/1.1; a
-        # real Chrome omits the HTTP/2-only Priority header there.
-        http2=False,
-    )
-    h.update(_google_headers(url, impersonate))
-    if extra:
-        # Caller wins; dict.update preserves slot for existing keys and
-        # appends new ones at the end.
-        h.update(extra)
-    return h
-
-
-def _google_headers(url: str, impersonate: str) -> dict[str, str]:
-    """The Google-only integrity headers for ``url``, empty off a Google host.
-
-    A real Chrome sends ``x-browser-*`` / ``x-client-data`` only to Google
-    properties, so :func:`fetch` adds them by host -- every transport, no caller
-    wiring -- and nothing to any other origin.
-    """
-    if not is_google_property(urlparse(url).hostname or ""):
-        return {}
-    major, platform = impersonate_version_platform(impersonate)
-    return chrome_headers_for_google(major=major, platform=platform)
-
-
-def _accept_ch_hints(resp_headers: dict[str, str]) -> frozenset[str]:
-    """The extended client-hint names an ``Accept-CH`` response requested."""
-    accept_ch = resp_headers.get("accept-ch")
-    if accept_ch is None:
-        return frozenset[str]()
-    wanted = {tok.strip().lower() for tok in accept_ch.split(",") if tok.strip()}
-    return frozenset(name for name in chrome_client_hints(major=1) if name in wanted)
-
-
-def _curl_structural_headers(
-    *,
-    method: str,
-    url: str,
-    content_type: str | None,
-    extra: Mapping[str, str] | None,
-    impersonate: str,
-    accept_ch: Mapping[str, frozenset[str]],
-) -> dict[str, str]:
-    """Headers for the curl path: what impersonate omits + Accept-CH opt-ins.
-
-    Verified on Linux against real Chrome (146, the impersonate target): the
-    FIRST request to an
-    origin sends only the core set curl_cffi's impersonate reproduces (UA, the
-    three basic ``sec-ch-ua`` hints, Accept, Sec-Fetch-*, Priority,
-    Accept-Encoding/Language). It adds the EXTENDED client hints
-    (``sec-ch-ua-arch`` etc.) only AFTER the server opts in via ``Accept-CH``,
-    on subsequent same-origin requests. We mirror that exactly: a cold origin
-    gets nothing extra (adding hints an unrequesting site never asked for is
-    itself a tell), and an origin that has sent Accept-CH gets precisely the
-    hints it requested, version-matched to the impersonate target. Only a POST's
-    Origin/Content-Type and caller extras follow (Cookie is merged by caller).
-    """
-    h: dict[str, str] = {}
-    wanted = accept_ch.get(origin(url))
-    if wanted:
-        major, platform = impersonate_version_platform(impersonate)
-        hints = chrome_client_hints(major=major, platform=platform)
-        h.update({name: value for name, value in hints.items() if name in wanted})
-    if method not in ("GET", "HEAD"):
-        if content_type:
-            h["Content-Type"] = content_type
-        parsed = urlparse(url)
-        h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
-    h.update(_google_headers(url, impersonate))
-    if extra:
-        h.update(extra)
-    return h

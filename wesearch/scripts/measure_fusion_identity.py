@@ -32,59 +32,6 @@ from wesearch.paper.search import search
 _ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+?)(?:v\d+)?$", re.IGNORECASE)
 
 
-def _doi_keys(rec: PaperRecord) -> list[str]:
-    """Today's identity: DOI only (fuse falls back to title when absent)."""
-    return [f"doi:{rec.doi.lower()}"] if rec.doi else []
-
-
-def _arxiv_keys(rec: PaperRecord) -> list[str]:
-    """DOI plus arXiv id, including one recovered from a 10.48550 DOI."""
-    keys = _doi_keys(rec)
-    arxiv = rec.arxiv_id
-    if arxiv is None:
-        match = _ARXIV_DOI_RE.match(rec.doi or "")
-        arxiv = match.group(1) if match else None
-    if arxiv:
-        keys.append(f"arxiv:{arxiv.lower()}")
-    return keys
-
-
-def _raw_records(
-    query: str, *, attempts: int = 4
-) -> tuple[list[PaperRecord], list[PaperRecord]]:
-    """Fetch one page from each backend, retrying S2's shared-gate throttle.
-
-    Raises:
-      PaperError: When S2 stays throttled. A backend that never answered is an
-        unavailable sample, not zero joins -- reporting it as data would
-        publish a measurement nobody took.
-
-    """
-    for _attempt in range(attempts):
-        try:
-            s2_hits = search(query, source="s2", limit=40).records
-            break
-        except PaperError:
-            time.sleep(6.0)
-    else:
-        raise PaperError(f"Semantic Scholar unavailable for {query!r}")
-    oa_hits, _oa_total, _oa_complete = openalex.search(
-        query, limit=40, year_from=None, year_to=None, open_access_only=False
-    )
-    return s2_hits, oa_hits
-
-
-def _cross_backend_joins(
-    s2_hits: list[PaperRecord],
-    oa_hits: list[PaperRecord],
-    key_fn: Callable[[PaperRecord], list[str]],
-) -> set[str]:
-    """Keys present on BOTH backends -- the pairs this namespace would merge."""
-    left = {key for rec in s2_hits for key in key_fn(rec)}
-    right = {key for rec in oa_hits for key in key_fn(rec)}
-    return left & right
-
-
 def main(
     queries: tuple[str, ...] = (
         "attention",
@@ -161,13 +108,7 @@ def _identity_of(doi: str) -> set[str]:
 
 
 def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
-    """MAG id -> DOI (``""`` when absent) from a raw S2 search page.
-
-    Raises:
-      PaperError: When S2 stays throttled, for the reason in
-        :func:`_raw_records`.
-
-    """
+    """MAG id -> DOI (``""`` when absent) from a raw S2 search page."""
     for _attempt in range(attempts):
         try:
             body = s2.get(
@@ -207,6 +148,52 @@ def _raw_mag_openalex(query: str) -> dict[str, str]:
             doi = StrCodec.coerce(work_obj.get("doi"))
             out[mag.rsplit("/", 1)[-1]] = doi.rsplit("doi.org/", 1)[-1]
     return out
+
+
+def _doi_keys(rec: PaperRecord) -> list[str]:
+    """Today's identity: DOI only (fuse falls back to title when absent)."""
+    return [f"doi:{rec.doi.lower()}"] if rec.doi else []
+
+
+def _arxiv_keys(rec: PaperRecord) -> list[str]:
+    """DOI plus arXiv id, including one recovered from a 10.48550 DOI."""
+    keys = _doi_keys(rec)
+    arxiv = rec.arxiv_id
+    if arxiv is None:
+        match = _ARXIV_DOI_RE.match(rec.doi or "")
+        arxiv = match.group(1) if match else None
+    if arxiv:
+        keys.append(f"arxiv:{arxiv.lower()}")
+    return keys
+
+
+def _raw_records(
+    query: str, *, attempts: int = 4
+) -> tuple[list[PaperRecord], list[PaperRecord]]:
+    """Fetch one page from each backend, retrying S2's shared-gate throttle."""
+    for _attempt in range(attempts):
+        try:
+            s2_hits = search(query, source="s2", limit=40).records
+            break
+        except PaperError:
+            time.sleep(6.0)
+    else:
+        raise PaperError(f"Semantic Scholar unavailable for {query!r}")
+    oa_hits, _oa_total, _oa_complete = openalex.search(
+        query, limit=40, year_from=None, year_to=None, open_access_only=False
+    )
+    return s2_hits, oa_hits
+
+
+def _cross_backend_joins(
+    s2_hits: list[PaperRecord],
+    oa_hits: list[PaperRecord],
+    key_fn: Callable[[PaperRecord], list[str]],
+) -> set[str]:
+    """Keys present on BOTH backends -- the pairs this namespace would merge."""
+    left = {key for rec in s2_hits for key in key_fn(rec)}
+    right = {key for rec in oa_hits for key in key_fn(rec)}
+    return left & right
 
 
 if __name__ == "__main__":

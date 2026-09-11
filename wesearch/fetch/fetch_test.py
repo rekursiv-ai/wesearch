@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
@@ -28,11 +29,11 @@ from wesearch.fetch import (
 from wesearch.fetch.fetch import (
     _send_as,
     _split_userinfo,
-    egress_ip as _real_egress_ip,
-    last_known_egress_ip as _last_known_egress_ip,
-    set_last_egress_ip as _set_last_egress_ip,
+    egress_ip,
+    last_known_egress_ip,
+    set_last_egress_ip,
 )
-from wesearch.fetch.test_helpers import (
+from wesearch.fetch.testing import (
     StubSession,
     const_curl_session,
     lower_headers,
@@ -47,16 +48,16 @@ from wesearch.types.errors import (
     PuzzleChallengeError,
 )
 
-import wesearch.fetch as fetch_package
+import wesearch.fetch
 
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
 
 
 def test_fetch_uses_transport_package_layout() -> None:
-    assert fetch_package.__file__ is not None
-    assert fetch_package.__file__.endswith("/fetch/__init__.py")
-    assert callable(fetch_package.fetch)
+    assert wesearch.fetch.__file__ is not None
+    assert wesearch.fetch.__file__.endswith("/fetch/__init__.py")
+    assert callable(wesearch.fetch.fetch)
     for module in ("common", "fetch"):
         importlib.import_module(f"wesearch.fetch.{module}")
     for module in ("curl", "stdlib", "zendriver", "transport_routing"):
@@ -86,7 +87,7 @@ class TestBackoffDelay:
         assert d0 < d2
 
     def test_capped_at_30(self) -> None:
-        assert RetryParams().backoff_delay(100, {}) <= 45  # 30 + 0.5*30
+        assert RetryParams().backoff_delay(100, {}) <= 45  # 30 + 0.5*30.
 
     def test_retry_after_header(self) -> None:
         assert RetryParams().backoff_delay(0, {"retry-after": "5"}) == 5.0
@@ -100,7 +101,7 @@ class TestBackoffDelay:
         # through to exponential backoff.
         future = datetime.now(tz=UTC) + timedelta(seconds=10)
         delay = RetryParams().backoff_delay(0, {"retry-after": format_datetime(future)})
-        assert 5 <= delay <= 30  # ~10s, capped at 30; not the ~1s exp backoff
+        assert 5 <= delay <= 30  # ~10s, capped at 30; not the ~1s exp backoff.
 
     def test_retry_after_past_date_is_zero(self) -> None:
         # A past HTTP-date means "retry now": non-negative, small.
@@ -173,8 +174,9 @@ class TestFetchError:
 
 
 class TestFetchInputValidation:
-    """Invalid numeric args are rejected at the boundary with a ValueError, not
-    leaked as an internal AssertionError or silent transport-specific behavior.
+    """Invalid numeric args are rejected at the boundary with a ValueError.
+
+    Leaked as an internal AssertionError or silent transport-specific behavior.
     """
 
     def test_negative_retries_rejected(self) -> None:
@@ -206,13 +208,14 @@ class TestFetchInputValidation:
 
 
 class TestFetchClassifiesBlockAtBoundary:
-    """``fetch()`` classifies a 4xx/5xx block ONCE at the boundary and raises the
-    SPECIFIC :class:`BotDetectionError` subclass, so every ``except FetchError``
-    consumer gets ``.guidance`` for free instead of re-deriving the kind (some
-    paths forgot to, yielding a generic "HTTP 403").
+    """``fetch()`` classifies a 4xx/5xx block ONCE at the boundary and raises the.
 
-    Mocks at the curl high-level boundary (``curl_cffi.requests.request``), the
-    same seam the rest of ``TestFetchCurlBackend`` uses.
+    SPECIFIC :class:`BotDetectionError` subclass, so every ``except FetchError``
+    consumer gets ``.guidance`` for free instead of re-deriving the kind (some paths
+    forgot to, yielding a generic "HTTP 403").
+
+        Mocks at the curl high-level boundary (``curl_cffi.requests.request``), the
+        same seam the rest of ``TestFetchCurlBackend`` uses.
     """
 
     def _mock_403(self, body: bytes, headers: dict[str, str]) -> Mock:
@@ -306,7 +309,7 @@ class TestFetchClassifiesBlockAtBoundary:
 
 class TestFetchRetry:
     @pytest.fixture(autouse=True)
-    def _force_stdlib(self) -> Any:
+    def _force_stdlib(self) -> object:
         # Stdlib path is selected per-call via transport="stdlib", not a global.
         return
 
@@ -432,7 +435,7 @@ class TestHeaderOrder:
     """
 
     @pytest.fixture(autouse=True)
-    def _force_stdlib(self) -> Any:
+    def _force_stdlib(self) -> object:
         # Stdlib path is selected per-call via transport="stdlib", not a global.
         return
 
@@ -579,9 +582,10 @@ class TestHeaderOrder:
 
 
 class TestOnResponse:
-    """``on_response(status, headers)`` fires once per received response -- on
-    success, on an HTTP error before it raises, and on every redirect hop -- for
-    both transports. It is the seam a cookie jar uses to observe Set-Cookie.
+    """``on_response(status, headers)`` fires once per received response.
+
+    On success, on an HTTP error before it raises, and on every redirect hop -- for both
+    transports. It is the seam a cookie jar uses to observe Set-Cookie.
     """
 
     def _stdlib_resp(
@@ -684,11 +688,12 @@ class TestOnResponse:
 
 
 class TestTransportConsistency:
-    """The curl and stdlib transports must behave IDENTICALLY on the redirect
-    contract (cap -> return 3xx body; cross-origin -> Origin rewritten). These
-    tests run the SAME scenario through both and assert equality, so the two
-    remaining redirect loops cannot silently drift (the class of bug that
-    recurred across several review rounds).
+    """The curl and stdlib transports must behave IDENTICALLY on the redirect.
+
+    Contract (cap -> return 3xx body; cross-origin -> Origin rewritten). These tests run
+    the SAME scenario through both and assert equality, so the two remaining redirect
+    loops cannot silently drift (the class of bug that recurred across several review
+    rounds).
     """
 
     def _stdlib_result(
@@ -763,10 +768,11 @@ class TestTransportConsistency:
 
 
 class TestFetchSession:
-    """``FetchSession`` is a frozen browsing identity a caller threads across
-    requests: ``fetch`` returns the session updated with what each
-    response taught it (cookies set, ``Accept-CH`` opt-ins), so the next request
-    is more browser-like -- the value-typed, functional API for reuse.
+    """``FetchSession`` is a frozen browsing identity a caller threads across.
+
+    Requests: ``fetch`` returns the session updated with what each response taught it
+    (cookies set, ``Accept-CH`` opt-ins), so the next request is more browser-like --
+    the value-typed, functional API for reuse.
     """
 
     def _curl_response(
@@ -791,7 +797,7 @@ class TestFetchSession:
         base = FetchSession(cookies={"https://x.com": {"a": "1"}})
         updated = base.with_cookies("https://x.com/p", {"b": "2"})
         assert updated.cookies_for("https://x.com/q") == {"a": "1", "b": "2"}
-        assert base.cookies_for("https://x.com/q") == {"a": "1"}  # original unchanged
+        assert base.cookies_for("https://x.com/q") == {"a": "1"}  # original unchanged.
 
     def test_cookies_are_scoped_to_the_setting_origin(self) -> None:
         # A flat name->value jar sent a cookie one host set to the NEXT host
@@ -856,7 +862,7 @@ class TestFetchSession:
         sent = req.call_args.kwargs["headers"]
         assert "sec-ch-ua-arch" in sent
         assert "sec-ch-ua-bitness" in sent
-        assert "sec-ch-ua-model" not in sent  # never opted in
+        assert "sec-ch-ua-model" not in sent  # never opted in.
 
     def test_cold_origin_sends_no_extended_hints(self) -> None:
         # A fresh session (no Accept-CH opt-in) sends none of the extended hints,
@@ -912,15 +918,17 @@ class TestRedirectIdentityScoping:
     two-hop redirect and assert each of those rules on the second hop.
     """
 
+    # 200.
     def _two_hop(
         self,
         *,
         first_status: int,
         target_set_cookie: str | None = None,
     ) -> Callable[..., Mock]:
-        """A curl ``request`` mock: a.com/start -> (status) -> b.com/next -> 200."""
+        """Return a curl ``request`` mock: a.com/start -> (status) -> b.com/next ->."""
 
-        def fake_request(_verb: str, url: str, **_kw: Any) -> Mock:
+        def fake_request(verb: str, url: str, **_kw: object) -> Mock:
+            del verb
             resp = Mock()
             if url == "https://a.com/start":
                 resp.status_code = first_status
@@ -942,7 +950,7 @@ class TestRedirectIdentityScoping:
         # behavior; only 307/308 preserve the method). Currently only 303 does.
         calls: list[tuple[str, str, object]] = []
 
-        def fake_request(verb: str, url: str, **kw: Any) -> Mock:
+        def fake_request(verb: str, url: str, **kw: object) -> Mock:
             calls.append((verb, url, kw.get("data")))
             resp = Mock()
             if url == "https://a.com/start":
@@ -976,7 +984,8 @@ class TestRedirectIdentityScoping:
         # redirect (a real browser scopes cookies to their origin).
         sent: list[tuple[str, dict[str, str]]] = []
 
-        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+        def fake_request(verb: str, url: str, **kw: object) -> Mock:
+            del verb
             sent.append((url, lower_headers(kw)))
             resp = Mock()
             if url == "https://a.com/start":
@@ -1006,7 +1015,8 @@ class TestRedirectIdentityScoping:
         # drops on origin change).
         sent: list[tuple[str, dict[str, str]]] = []
 
-        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+        def fake_request(verb: str, url: str, **kw: object) -> Mock:
+            del verb
             sent.append((url, lower_headers(kw)))
             resp = Mock()
             if url == "https://a.com/start":
@@ -1039,7 +1049,8 @@ class TestRedirectIdentityScoping:
         per-origin jar can express the browser behaviour, so it should.
         """
 
-        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+        def fake_request(verb: str, url: str, **kw: object) -> Mock:
+            del verb
             del kw
             resp = Mock()
             if url == "https://a.com/start":
@@ -1068,7 +1079,8 @@ class TestRedirectIdentityScoping:
         # a.com's opted-in extended client hints must NOT leak to b.com.
         sent: list[tuple[str, dict[str, str]]] = []
 
-        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+        def fake_request(verb: str, url: str, **kw: object) -> Mock:
+            del verb
             sent.append((url, lower_headers(kw)))
             resp = Mock()
             if url == "https://a.com/start":
@@ -1094,18 +1106,18 @@ class TestRedirectIdentityScoping:
         assert "sec-ch-ua-arch" not in b_headers
 
     def test_cross_origin_target_cookie_not_persisted_to_source_profile(
-        self, tmp_path: Any, monkeypatch: Any
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # b.com's Set-Cookie must NOT be stored in a.com's (egress,domain) profile.
         store = ProfileStore(base_dir=tmp_path)
 
-        def _fixed_egress(**_kw: Any) -> str:
+        def _fixed_egress(**_kw: object) -> str:
             return "9.9.9.9"
 
-        def _no_pool(*_a: Any, **_kw: Any) -> None:
+        def _no_pool(*_a: object, **_kw: object) -> None:
             return None
 
-        monkeypatch.setattr(ProfileStore, "shared", classmethod(lambda _cls: store))
+        monkeypatch.setattr(ProfileStore, "shared", classmethod(_shared(store)))
         monkeypatch.setattr(fetch_mod, "egress_ip", _fixed_egress)
         monkeypatch.setattr(fetch_mod, "curl_session", _no_pool)
         with patch(
@@ -1137,7 +1149,7 @@ class TestRedirectIdentityScoping:
         assert "FOREIGN" not in session.cookies
 
     def test_browser_target_cookie_is_not_attributed_to_the_source(
-        self, tmp_path: Any, monkeypatch: Any
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The browser leg must scope a redirect target's cookies like curl does.
 
@@ -1149,21 +1161,19 @@ class TestRedirectIdentityScoping:
         """
         store = ProfileStore(base_dir=tmp_path)
 
-        def fixed_egress(**_kw: Any) -> str:
+        def fixed_egress(**_kw: object) -> str:
             return "9.9.9.9"
 
-        def landed_elsewhere(*_a: Any, **_kw: Any) -> BrowserResult:
+        def landed_elsewhere(*_a: object, **_kw: object) -> BrowserResult:
             return BrowserResult(
                 body=b"<html>ok</html>",
                 cookies={"B_SESSION": "secret"},
                 final_url="https://b.example/landing",
             )
 
-        monkeypatch.setattr(ProfileStore, "shared", classmethod(lambda _cls: store))
+        monkeypatch.setattr(ProfileStore, "shared", classmethod(_shared(store)))
         monkeypatch.setattr(fetch_mod, "egress_ip", fixed_egress)
-        monkeypatch.setattr(
-            fetch_mod.zendriver_backend, "fetch_zendriver", landed_elsewhere
-        )
+        monkeypatch.setattr(fetch_mod.zendriver, "fetch_zendriver", landed_elsewhere)
         _body, session = fetch(
             "https://a.example/start",
             request=RequestParams(policy=PolicyParams(transport="zendriver")),
@@ -1176,11 +1186,12 @@ class TestRedirectIdentityScoping:
 
 
 class TestIdentityLayer:
-    """``fetch`` transparently backs each call with a persistent per-(egress,
-    domain) identity: it seeds the stored UA + cookies (caller values win),
-    saves ``Set-Cookie`` back, and on a bot-block of a KNOWN identity discards it
-    and retries once fresh. The ``isolate_profiles`` fixture pins egress to
-    ``203.0.113.1`` and points the store at a tmp dir.
+    """``fetch`` transparently backs each call with a persistent per-(egress.
+
+    Domain) identity: it seeds the stored UA + cookies (caller values win), saves ``Set-
+    Cookie`` back, and on a bot-block of a KNOWN identity discards it and retries once
+    fresh. The ``isolate_profiles`` fixture pins egress to ``203.0.113.1`` and points
+    the store at a tmp dir.
     """
 
     _EGRESS = "203.0.113.1"
@@ -1217,7 +1228,7 @@ class TestIdentityLayer:
             )
         sent = req.call_args.kwargs["headers"]
         assert "User-Agent" not in sent
-        assert "Cookie" not in sent  # jar carries the stored cookie, not the header
+        assert "Cookie" not in sent  # jar carries the stored cookie, not the header.
 
     def test_caller_ua_and_cookie_override_profile(self) -> None:
         self._store().save(
@@ -1340,7 +1351,7 @@ class TestIdentityLayer:
                 "https://x.com/p",
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
-        assert req.call_count == 1  # no retry with no known identity
+        assert req.call_count == 1  # no retry with no known identity.
 
     def test_raw_headers_bypasses_identity(self) -> None:
         self._store().save(
@@ -1359,9 +1370,9 @@ class TestIdentityLayer:
                 ),
             )
         sent = req.call_args.kwargs["headers"]
-        assert sent == {"User-Agent": "raw"}  # no profile UA, no stored cookie
+        assert sent == {"User-Agent": "raw"}  # no profile UA, no stored cookie.
 
-    def test_send_as_keyless_when_egress_none(self, tmp_path: Any) -> None:
+    def test_send_as_keyless_when_egress_none(self, tmp_path: Path) -> None:
         # _send_as with egress=None draws a UA, sends, persists nothing.
         request = fetch_mod._Request(
             url="https://x.com/p",
@@ -1378,16 +1389,17 @@ class TestIdentityLayer:
 
 
 class TestEgressIp:
-    """``egress_ip`` probes an echo cascade for the host's public IP, memoizing
-    into the last-known global; ``cache=True`` reads it without a network call,
-    ``cache=False`` refreshes it, ``last_known_egress_ip`` is a pure read.
+    """``egress_ip`` probes an echo cascade for the host's public IP.
+
+    Memoizing into the last-known global; ``cache=True`` reads it without a network
+    call, ``cache=False`` refreshes it, ``last_known_egress_ip`` is a pure read.
     """
 
     @pytest.fixture(autouse=True)
-    def _real_egress(self, monkeypatch: Any) -> Any:
+    def _real_egress(self, monkeypatch: pytest.MonkeyPatch) -> object:
         # The module isolate_profiles fixture stubs egress_ip to a fixed value;
         # restore the REAL function here and just reset the last-known global.
-        monkeypatch.setattr(fetch_mod, "egress_ip", _real_egress_ip)
+        monkeypatch.setattr(fetch_mod, "egress_ip", egress_ip)
         monkeypatch.setattr(fetch_mod, "_last_egress_ip", None)
         return
 
@@ -1395,11 +1407,11 @@ class TestEgressIp:
         # egress_ip unpacks fetch's (body, session) tuple; adapt the byte-valued
         # mock so a bytes return becomes (bytes, session) and an exception still
         # raises (the echo-cascade paths this test exercises).
-        def adapt(*args: Any, **kwargs: Any) -> tuple[bytes, FetchSession]:
+        def adapt(*args: object, **kwargs: object) -> tuple[bytes, FetchSession]:
             return cast(bytes, fetch_mock(*args, **kwargs)), FetchSession()
 
         with patch.object(fetch_mod, "fetch", side_effect=adapt):
-            return _real_egress_ip(cache=False, ipv6=ipv6)
+            return egress_ip(cache=False, ipv6=ipv6)
 
     def test_first_echo_returned(self) -> None:
         assert self._probe(Mock(return_value=b" 203.0.113.7\n")) == "203.0.113.7"
@@ -1435,49 +1447,53 @@ class TestEgressIp:
         assert self._probe(Mock(return_value=b"ff:"), ipv6=True) is None
 
     def test_probe_records_last_known(self) -> None:
-        assert _last_known_egress_ip() is None
+        assert last_known_egress_ip() is None
         self._probe(Mock(return_value=b"203.0.113.7"))
-        assert _last_known_egress_ip() == "203.0.113.7"
+        assert last_known_egress_ip() == "203.0.113.7"
 
     def test_cache_true_returns_last_known_without_probing(
-        self, monkeypatch: Any
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(fetch_mod, "_last_egress_ip", "9.9.9.9")
         echo = Mock()
         with patch.object(fetch_mod, "fetch", echo):
-            assert _real_egress_ip() == "9.9.9.9"
+            assert egress_ip() == "9.9.9.9"
         echo.assert_not_called()
 
     def test_cache_true_probes_to_fill_empty(self) -> None:
         echo = Mock(return_value=(b"1.2.3.4", FetchSession()))
         with patch.object(fetch_mod, "fetch", echo):
-            assert _real_egress_ip() == "1.2.3.4"
+            assert egress_ip() == "1.2.3.4"
         assert echo.call_count == 1
-        assert _last_known_egress_ip() == "1.2.3.4"
+        assert last_known_egress_ip() == "1.2.3.4"
 
-    def test_cache_false_always_probes_and_refreshes(self, monkeypatch: Any) -> None:
+    def test_cache_false_always_probes_and_refreshes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(fetch_mod, "_last_egress_ip", "1.1.1.1")
         with patch.object(
             fetch_mod, "fetch", Mock(return_value=(b"2.2.2.2", FetchSession()))
         ):
-            assert _real_egress_ip(cache=False) == "2.2.2.2"
-        assert _last_known_egress_ip() == "2.2.2.2"
+            assert egress_ip(cache=False) == "2.2.2.2"
+        assert last_known_egress_ip() == "2.2.2.2"
 
-    def test_failed_probe_leaves_last_known_untouched(self, monkeypatch: Any) -> None:
+    def test_failed_probe_leaves_last_known_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(fetch_mod, "_last_egress_ip", "keepme")
         with patch.object(fetch_mod, "fetch", Mock(side_effect=OSError("x"))):
-            assert _real_egress_ip(cache=False) is None
-        assert _last_known_egress_ip() == "keepme"
+            assert egress_ip(cache=False) is None
+        assert last_known_egress_ip() == "keepme"
 
     def test_set_last_egress_ip_injects_without_probing(self) -> None:
         # A caller who knows the egress (e.g. just rolled the VPN) can set it;
         # a cached read then returns it with no network.
-        _set_last_egress_ip("5.5.5.5")
+        set_last_egress_ip("5.5.5.5")
         echo = Mock()
         with patch.object(fetch_mod, "fetch", echo):
-            assert _real_egress_ip() == "5.5.5.5"
+            assert egress_ip() == "5.5.5.5"
         echo.assert_not_called()
-        assert _last_known_egress_ip() == "5.5.5.5"
+        assert last_known_egress_ip() == "5.5.5.5"
 
 
 class TestBrowserBackend:
@@ -1554,7 +1570,7 @@ class TestBrowserBackend:
         with (
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=BrowserResult(body=b"ok", cookies={}, final_url=""),
             ),
         ):
@@ -1572,7 +1588,7 @@ class TestBrowserBackend:
         with (
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=result,
             ) as via,
         ):
@@ -1611,7 +1627,7 @@ class TestBrowserBackend:
         with (
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=result,
             ) as via,
             patch("wesearch.profile.ProfileStore.shared", return_value=store),
@@ -1637,7 +1653,7 @@ class TestBrowserBackend:
         with (
             patch.object(fetch_mod, "egress_ip", return_value="5.5.5.5"),
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=result,
             ),
             patch("wesearch.profile.ProfileStore.shared", return_value=store),
@@ -1689,7 +1705,7 @@ class TestCurlThenZendriverBackend:
         with (
             patch.object(fetch_mod, "_send_as", return_value=b"curl body"),
             patch.object(fetch_mod, "egress_ip", return_value=None),
-            patch("wesearch.fetch.fetch.zendriver_backend.fetch_zendriver") as via,
+            patch("wesearch.fetch.fetch.zendriver.fetch_zendriver") as via,
         ):
             body, _ = fetch(
                 "https://ok.example/",
@@ -1714,7 +1730,7 @@ class TestCurlThenZendriverBackend:
                 fetch_mod.transport_routing, "remember_zendriver_domain"
             ) as remember,
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=result,
             ) as via,
         ):
@@ -1772,7 +1788,7 @@ class TestCurlThenZendriverBackend:
                 fetch_mod.transport_routing, "remember_zendriver_domain"
             ) as remember,
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=result,
             ) as via,
         ):
@@ -1796,7 +1812,7 @@ class TestCurlThenZendriverBackend:
                 fetch_mod.transport_routing, "remember_zendriver_domain"
             ) as remember,
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 side_effect=PuzzleChallengeError("human required"),
             ),
             pytest.raises(PuzzleChallengeError, match="human required"),
@@ -1829,7 +1845,7 @@ class TestCurlThenZendriverBackend:
                 side_effect=domains.add,
             ),
             patch(
-                "wesearch.fetch.fetch.zendriver_backend.fetch_zendriver",
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
                 return_value=result,
             ) as via_browser,
         ):
@@ -1850,7 +1866,7 @@ class TestCurlThenZendriverBackend:
                 side_effect=FetchError("https://x/", 404, {}, b""),
             ),
             patch.object(fetch_mod, "egress_ip", return_value=None),
-            patch("wesearch.fetch.fetch.zendriver_backend.fetch_zendriver") as via,
+            patch("wesearch.fetch.fetch.zendriver.fetch_zendriver") as via,
             pytest.raises(FetchError),
         ):
             fetch(
@@ -1860,6 +1876,16 @@ class TestCurlThenZendriverBackend:
                 ),
             )
         via.assert_not_called()
+
+
+def _shared(store: ProfileStore) -> Callable[[type[ProfileStore]], ProfileStore]:
+    """Return a ``ProfileStore.shared`` replacement that always yields ``store``."""
+
+    def shared(cls: type[ProfileStore]) -> ProfileStore:
+        del cls
+        return store
+
+    return shared
 
 
 if __name__ == "__main__":

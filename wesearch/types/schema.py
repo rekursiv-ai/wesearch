@@ -98,20 +98,23 @@ class Field[T]:
         shape = _JSON_SHAPES.get(self._checkable)
         return shape.accepts if shape is not None else ()
 
+    # A subscripted generic reduces to its ORIGIN (``isinstance(v, dict[str, str])``
+    # raises); a union of non-literals reduces to nothing, since no single type
+    # describes it.
     @property
     def _checkable(self) -> object:
-        """The annotation reduced to something ``isinstance`` can take.
-
-        A subscripted generic reduces to its ORIGIN (``isinstance(v,
-        dict[str, str])`` raises); a union of non-literals reduces to nothing,
-        since no single type describes it.
-        """
+        """The annotation reduced to something ``isinstance`` can take."""
         if self.annotation is object:
             return object
         return get_origin(self.annotation) or self.annotation
 
     def schema(self) -> dict[str, object]:
-        """Render this field as one JSON-Schema property."""
+        """Render this field as one JSON-Schema property.
+
+        Returns:
+          prop: JSON-Schema fragment (type, enum, description, etc.).
+
+        """
         prop: dict[str, object] = {}
         if self.json_type is not None:
             prop["type"] = self.json_type
@@ -131,6 +134,13 @@ class Field[T]:
         would push a cast into every caller anyway. Callers that need the
         narrow type cast once, at the boundary, where the ``Literal`` is in
         scope.
+
+        Args:
+          name: Field name (for error messages).
+          value: JSON value to validate.
+
+        Returns:
+          value: Validated or coerced value (still type object).
 
         Raises:
           ValueError: When ``value`` is outside the accepted set. Carries the
@@ -152,106 +162,12 @@ class Field[T]:
         return value
 
 
-class Schema:
-    """One surface's parameters: subclass and declare :class:`Field` values.
-
-    The declared attribute name IS the parameter name, so there is no second
-    place to spell it. Inherited fields come first, which lets a surface that
-    accepts more (a POST-capable fetch) extend one that accepts less.
-    """
-
-    @classmethod
-    def fields(cls) -> Mapping[str, Field[object]]:
-        """Every declared field, base classes first, in declaration order."""
-        return {
-            name: value
-            for klass in reversed(cls.__mro__)
-            for name, value in vars(klass).items()
-            if isinstance(value, Field)
-        }
-
-    @classmethod
-    def json_schema(cls) -> dict[str, object]:
-        """Render the whole set as a JSON-Schema object."""
-        fields_ = cls.fields()
-        return {
-            "type": "object",
-            "properties": {name: f.schema() for name, f in fields_.items()},
-            "required": [name for name, f in fields_.items() if f.required],
-        }
-
-    @classmethod
-    def coerce(cls, args: Mapping[str, object]) -> dict[str, object]:
-        """Return every declared field, narrowed or defaulted.
-
-        Keys the schema does not declare are ignored, not rejected: a tool may
-        carry its own extras (a POST body) that no schema describes.
-
-        Raises:
-          ValueError: On a missing required field or an out-of-range value.
-
-        """
-        out: dict[str, object] = {}
-        for name, field_ in cls.fields().items():
-            if name not in args or args[name] is None:
-                if field_.required:
-                    raise ValueError(f"Missing required parameter {name!r}.")
-                out[name] = field_.default
-                continue
-            out[name] = field_.coerce(name, args[name])
-        return out
-
-    @classmethod
-    def asset_markdown(cls) -> str:
-        """Render the set as prose bullets for a tool-description asset."""
-        lines: list[str] = []
-        for name, field_ in cls.fields().items():
-            default = field_.default
-            suffix = f" Default `{default}`." if default is not None else ""
-            lines.append(f"- `{name}` -- {field_.description}{suffix}")
-        return "\n".join(lines)
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _JsonShape:
-    """One JSON type, and the Python types a decoded value of it may have.
-
-    Paired deliberately: the schema keyword and the runtime check are two
-    readings of ONE fact, and when they were separate tables they disagreed --
-    ``number`` admits a JSON integer but the check demanded ``float``, and
-    ``array`` decodes to ``list`` but the check demanded ``tuple``.
-    """
-
-    json_type: str | None
-    accepts: tuple[type, ...]
-
-
-_JSON_SHAPES: Mapping[object, _JsonShape] = {
-    str: _JsonShape(json_type="string", accepts=(str,)),
-    # JSON has one number syntax, so ``1`` is as valid a ``number`` as ``1.0``.
-    int: _JsonShape(json_type="integer", accepts=(int,)),
-    float: _JsonShape(json_type="number", accepts=(int, float)),
-    bool: _JsonShape(json_type="boolean", accepts=(bool,)),
-    # Every JSON array decodes to a ``list``; a ``tuple`` annotation describes
-    # what the CALLEE wants, not what arrives.
-    list: _JsonShape(json_type="array", accepts=(list,)),
-    tuple: _JsonShape(json_type="array", accepts=(list, tuple)),
-    dict: _JsonShape(json_type="object", accepts=(dict,)),
-    # "Any JSON value": no keyword, no check. A union of non-literals lands
-    # here too -- no single type describes it, so the schema stays open rather
-    # than advertising a shape the check cannot enforce.
-    object: _JsonShape(json_type=None, accepts=()),
-}
-
-
+# ``isinstance(True, int)`` is true, so a directive of ``{"count": true}`` satisfied an
+# ``int`` field and reached the tool as a boolean. JSON has distinct ``true`` and ``1``
+# literals, and the caller here is a model emitting JSON, so the two must not be
+# interchangeable.
 def _is_instance(value: object, kinds: tuple[type, ...]) -> bool:
-    """``isinstance`` over several types, minus bool-is-an-int inheritance.
-
-    ``isinstance(True, int)`` is true, so a directive of ``{"count": true}``
-    satisfied an ``int`` field and reached the tool as a boolean. JSON has
-    distinct ``true`` and ``1`` literals, and the caller here is a model
-    emitting JSON, so the two must not be interchangeable.
-    """
+    """``isinstance`` over several types, minus bool-is-an-int inheritance."""
     if bool not in kinds and isinstance(value, bool):
         return False
     return isinstance(value, kinds)
@@ -264,7 +180,7 @@ def literal_values(
         {types.UnionType, vars(typing)["Union"]}
     ),
 ) -> tuple[object, ...]:
-    """The ``Literal`` members of ``annotation``, or ``()`` for anything else.
+    """Return the ``Literal`` members of ``annotation``, or ``()`` for anything else.
 
     Unwraps a PEP-695 ``type`` alias (whose members hide behind ``__value__``)
     and an optional union, then flattens nested literals.
@@ -308,3 +224,116 @@ def literal_values(
             values.extend(members)
         return tuple(values)
     return get_args(annotation) if origin is Literal else ()
+
+
+class Schema:
+    """One surface's parameters: subclass and declare :class:`Field` values.
+
+    The declared attribute name IS the parameter name, so there is no second
+    place to spell it. Inherited fields come first, which lets a surface that
+    accepts more (a POST-capable fetch) extend one that accepts less.
+    """
+
+    @classmethod
+    def fields(cls) -> Mapping[str, Field[object]]:
+        """Every declared field, base classes first, in declaration order.
+
+        Returns:
+          result: Name to Field descriptor mapping.
+
+        """
+        return {
+            name: value
+            for klass in reversed(cls.__mro__)
+            for name, value in vars(klass).items()
+            if isinstance(value, Field)
+        }
+
+    @classmethod
+    def json_schema(cls) -> dict[str, object]:
+        """Render the whole set as a JSON-Schema object.
+
+        Returns:
+          result: JSON-Schema with type, properties, required.
+
+        """
+        fields_ = cls.fields()
+        return {
+            "type": "object",
+            "properties": {name: f.schema() for name, f in fields_.items()},
+            "required": [name for name, f in fields_.items() if f.required],
+        }
+
+    @classmethod
+    def coerce(cls, args: Mapping[str, object]) -> dict[str, object]:
+        """Return every declared field, narrowed or defaulted.
+
+        Keys the schema does not declare are ignored, not rejected: a tool may
+        carry its own extras (a POST body) that no schema describes.
+
+        Args:
+          args: Input mapping with keys to coerce.
+
+        Returns:
+          out: Narrowed mapping with defaults applied.
+
+        Raises:
+          ValueError: On a missing required field or an out-of-range value.
+
+        """
+        out: dict[str, object] = {}
+        for name, field_ in cls.fields().items():
+            if name not in args or args[name] is None:
+                if field_.required:
+                    raise ValueError(f"Missing required parameter {name!r}.")
+                out[name] = field_.default
+                continue
+            out[name] = field_.coerce(name, args[name])
+        return out
+
+    @classmethod
+    def asset_markdown(cls) -> str:
+        """Render the set as prose bullets for a tool-description asset.
+
+        Returns:
+          result: Markdown bullets for each field.
+
+        """
+        lines: list[str] = []
+        for name, field_ in cls.fields().items():
+            default = field_.default
+            suffix = f" Default `{default}`." if default is not None else ""
+            lines.append(f"- `{name}` -- {field_.description}{suffix}")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _JsonShape:
+    """One JSON type, and the Python types a decoded value of it may have.
+
+    Paired deliberately: the schema keyword and the runtime check are two
+    readings of ONE fact, and when they were separate tables they disagreed --
+    ``number`` admits a JSON integer but the check demanded ``float``, and
+    ``array`` decodes to ``list`` but the check demanded ``tuple``.
+    """
+
+    json_type: str | None
+    accepts: tuple[type, ...]
+
+
+_JSON_SHAPES: Mapping[object, _JsonShape] = {
+    str: _JsonShape(json_type="string", accepts=(str,)),
+    # JSON has one number syntax, so ``1`` is as valid a ``number`` as ``1.0``.
+    int: _JsonShape(json_type="integer", accepts=(int,)),
+    float: _JsonShape(json_type="number", accepts=(int, float)),
+    bool: _JsonShape(json_type="boolean", accepts=(bool,)),
+    # Every JSON array decodes to a ``list``; a ``tuple`` annotation describes
+    # what the CALLEE wants, not what arrives.
+    list: _JsonShape(json_type="array", accepts=(list,)),
+    tuple: _JsonShape(json_type="array", accepts=(list, tuple)),
+    dict: _JsonShape(json_type="object", accepts=(dict,)),
+    # "Any JSON value": no keyword, no check. A union of non-literals lands
+    # here too -- no single type describes it, so the schema stays open rather
+    # than advertising a shape the check cannot enforce.
+    object: _JsonShape(json_type=None, accepts=()),
+}

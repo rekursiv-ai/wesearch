@@ -32,13 +32,11 @@ from wesearch.fetch import (
 from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
-from wesearch.paper.paginate import (
-    Cursor,
-    Page,
-    paginate as paginate_cursor,
-)
+from wesearch.paper.paginate import Cursor, Page
 from wesearch.ratelimit import cross_process_limiter
 from wesearch.types.errors import FetchError
+
+import wesearch.paper.paginate
 
 
 __all__ = [
@@ -49,7 +47,6 @@ __all__ = [
     "author_record_from",
     "batch",
     "get",
-    "paginate",
     "paper_record_from",
     "search_paginate",
     "search_total",
@@ -120,54 +117,6 @@ def _default_author_fields() -> tuple[str, ...]:
 S2_PAPER_FIELDS = _default_paper_fields()
 S2_PAPER_FIELDS_STR = ",".join(S2_PAPER_FIELDS)
 AUTHOR_FIELDS_STR = ",".join(_default_author_fields())
-
-
-def _headers() -> dict[str, str]:
-    """Build S2 request headers, injecting ``x-api-key`` when present in env."""
-    headers: dict[str, str] = {"Accept": "application/json"}
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
-    if key:
-        headers["x-api-key"] = key
-    return headers
-
-
-def _attempt(
-    do_fetch: Callable[[], bytes],
-    *,
-    source: str = "s2",
-    interval_sec: float = 1.0,
-    max_retries: int = 2,
-    backoff_base_sec: float = 1.0,
-) -> bytes:
-    """Run one gated S2 request with 429 backoff; return bytes or raise."""
-    limiter = cross_process_limiter(source, per_seconds=interval_sec)
-    for attempt in range(max_retries + 1):
-        limiter.acquire()
-        try:
-            return do_fetch()
-        except FetchError as e:
-            if e.status == 429 and attempt < max_retries:
-                # Record the backoff into the shared cooldown so the next
-                # iteration's gate wait IS the backoff and concurrent requesters
-                # share one window rather than each rediscovering the throttle.
-                limiter.trigger_cooldown(backoff_base_sec * 2**attempt)
-                continue
-            raise translate_http_error(
-                e,
-                backend="Semantic Scholar",
-                rate_limit_message=(
-                    "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
-                    "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
-                ),
-            ) from e
-        except (TimeoutError, OSError) as e:
-            raise BackendError(
-                f"Semantic Scholar request failed (timeout or connection error): {e}",
-                status=0,
-            ) from e
-    raise AssertionError(  # pragma: no cover -- loop either returns or raises
-        "_attempt retry loop exited without returning"
-    )
 
 
 def get(
@@ -327,53 +276,6 @@ def paginate(
     )
 
 
-def _paginate(
-    path: str,
-    params: dict[str, str | int],
-    *,
-    limit: int | None,
-    keep: Callable[[MutableJSON], bool],
-    page_size: int,
-    transport: Transport,
-) -> Page:
-    """Build an S2 offset/next :class:`Cursor` and delegate to the walker."""
-    cursor = Cursor(
-        fetch=functools.partial(
-            _fetch_offset_page,
-            path,
-            params,
-            transport=transport,
-        ),
-        rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
-        advance=_next_offset_advance,
-        page_size_max=page_size,
-        # S2 answers a too-deep page with 400 ``offset + limit < 10000`` -- the
-        # only 400 a cursor walk can provoke -- so treat it as the depth ceiling.
-        is_depth_ceiling=lambda e: e.status == 400,
-    )
-    return paginate_cursor(cursor, limit=limit, keep=keep)
-
-
-def _fetch_offset_page(
-    path: str,
-    params: dict[str, str | int],
-    offset: int,
-    size: int,
-    *,
-    transport: Transport,
-) -> MutableJSON:
-    """GET one offset/limit page of an S2 list endpoint."""
-    page_params = {**params, "offset": offset, "limit": size}
-    return get(path, page_params, transport=transport)
-
-
-def _next_offset_advance(body: MutableJSON, _offset: int, _size: int) -> int | None:
-    """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
-    nxt = body.get("next")
-    rows = ListCodec.coerce(body.get("data"))
-    return nxt if isinstance(nxt, int) and rows else None
-
-
 def search_paginate(
     params: dict[str, str | int],
     *,
@@ -416,24 +318,9 @@ def search_paginate(
         page_size_max=search_page_max,
         is_depth_ceiling=lambda e: e.status == 400,
     )
-    return paginate_cursor(cursor, limit=limit, keep=lambda _e: True), total
-
-
-def _search_offset_advance(body: MutableJSON, offset: int, _size: int) -> int | None:
-    """Next ``/paper/search`` offset; None once ``total`` is reached or a page empties."""
-    rows = ListCodec.coerce(body.get("data"))
-    nxt = offset + len(rows)
-    return nxt if rows and nxt < IntCodec.coerce(body.get("total"), 0) else None
-
-
-def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
-    """Parse S2 JSON bytes, mapping a decode failure to :class:`BackendError`."""
-    try:
-        return cast(MutableJSON | list[object], json.loads(raw))
-    except json.JSONDecodeError as e:
-        raise BackendError(
-            f"Semantic Scholar returned invalid JSON for {what}: {e}"
-        ) from e
+    return wesearch.paper.paginate.paginate(
+        cursor, limit=limit, keep=lambda _e: True
+    ), total
 
 
 def paper_record_from(
@@ -483,6 +370,9 @@ def author_record_from(data: MutableJSON) -> AuthorRecord:
 
     Args:
       data: A raw S2 author record (the ``/author`` response shape).
+
+    Returns:
+      result: Parsed author with id, name, aliases, affiliations, h-index.
 
     """
     author_id = str(data.get("authorId") or "")
@@ -534,6 +424,9 @@ def author_papers(
       keep: Predicate selecting which paper entries to retain.
       transport: Retrieval transport forwarded to the HTTP layer.
 
+    Returns:
+      result: Paginated author's papers, filtered by keep() predicate.
+
     """
     return paginate(
         f"/author/{author_id}/papers",
@@ -550,5 +443,122 @@ def search_total(data: MutableJSON) -> int:
     Args:
       data: A raw S2 search response body.
 
+    Returns:
+      result: Total number of results in the S2 response, or 0 if missing.
+
     """
     return IntCodec.coerce(data.get("total"), 0)
+
+
+def _headers() -> dict[str, str]:
+    """Build S2 request headers, injecting ``x-api-key`` when present in env."""
+    headers: dict[str, str] = {"Accept": "application/json"}
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+    if key:
+        headers["x-api-key"] = key
+    return headers
+
+
+def _attempt(
+    do_fetch: Callable[[], bytes],
+    *,
+    source: str = "s2",
+    interval_sec: float = 1.0,
+    max_retries: int = 2,
+    backoff_base_sec: float = 1.0,
+) -> bytes:
+    """Run one gated S2 request with 429 backoff; return bytes or raise."""
+    limiter = cross_process_limiter(source, per_seconds=interval_sec)
+    for attempt in range(max_retries + 1):
+        limiter.acquire()
+        try:
+            return do_fetch()
+        except FetchError as e:
+            if e.status == 429 and attempt < max_retries:
+                # Record the backoff into the shared cooldown so the next
+                # iteration's gate wait IS the backoff and concurrent requesters
+                # share one window rather than each rediscovering the throttle.
+                limiter.trigger_cooldown(backoff_base_sec * 2**attempt)
+                continue
+            raise translate_http_error(
+                e,
+                backend="Semantic Scholar",
+                rate_limit_message=(
+                    "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
+                    "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
+                ),
+            ) from e
+        except (TimeoutError, OSError) as e:
+            raise BackendError(
+                f"Semantic Scholar request failed (timeout or connection error): {e}",
+                status=0,
+            ) from e
+    raise AssertionError(  # pragma: no cover -- loop either returns or raises
+        "_attempt retry loop exited without returning"
+    )
+
+
+def _paginate(
+    path: str,
+    params: dict[str, str | int],
+    *,
+    limit: int | None,
+    keep: Callable[[MutableJSON], bool],
+    page_size: int,
+    transport: Transport,
+) -> Page:
+    """Build an S2 offset/next :class:`Cursor` and delegate to the walker."""
+    cursor = Cursor(
+        fetch=functools.partial(
+            _fetch_offset_page,
+            path,
+            params,
+            transport=transport,
+        ),
+        rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
+        advance=_next_offset_advance,
+        page_size_max=page_size,
+        # S2 answers a too-deep page with 400 ``offset + limit < 10000`` -- the
+        # only 400 a cursor walk can provoke -- so treat it as the depth ceiling.
+        is_depth_ceiling=lambda e: e.status == 400,
+    )
+    return wesearch.paper.paginate.paginate(cursor, limit=limit, keep=keep)
+
+
+def _fetch_offset_page(
+    path: str,
+    params: dict[str, str | int],
+    offset: int,
+    size: int,
+    *,
+    transport: Transport,
+) -> MutableJSON:
+    """GET one offset/limit page of an S2 list endpoint."""
+    page_params = {**params, "offset": offset, "limit": size}
+    return get(path, page_params, transport=transport)
+
+
+def _next_offset_advance(body: MutableJSON, offset: int, size: int) -> int | None:
+    """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
+    del offset, size
+    nxt = body.get("next")
+    rows = ListCodec.coerce(body.get("data"))
+    return nxt if isinstance(nxt, int) and rows else None
+
+
+def _search_offset_advance(body: MutableJSON, offset: int, size: int) -> int | None:
+    """Return the next ``/paper/search`` offset; None at ``total`` or an empty page."""
+    del size
+    rows = ListCodec.coerce(body.get("data"))
+    nxt = offset + len(rows)
+    return nxt if rows and nxt < IntCodec.coerce(body.get("total"), 0) else None
+
+
+def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
+    """Parse S2 JSON bytes, mapping a decode failure to :class:`BackendError`."""
+    try:
+        return cast(MutableJSON | list[object], json.loads(raw))
+    except json.JSONDecodeError as e:
+        raise BackendError(
+            f"Semantic Scholar returned invalid JSON for {what}: {e}"
+        ) from e

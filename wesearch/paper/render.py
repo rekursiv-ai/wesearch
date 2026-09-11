@@ -31,7 +31,16 @@ __all__ = [
 
 
 def format_record(rec: PaperRecord, abstract_chars: int | None = None) -> str:
-    """Format a paper as one greppable line, followed by optional abstract."""
+    """Format a paper as one greppable line, followed by optional abstract.
+
+    Args:
+      rec: Paper record to format.
+      abstract_chars: Character limit for abstract, or None to include full.
+
+    Returns:
+      formatted: Single-line header with optional multi-line abstract block.
+
+    """
     id_block = _id_prefix(rec)
     year_str = str(rec.year) if rec.year is not None else "?"
     venue_str = rec.venue or "?"
@@ -62,7 +71,16 @@ def format_record(rec: PaperRecord, abstract_chars: int | None = None) -> str:
 
 
 def format_block(rec: PaperRecord, abstract_chars: int | None = None) -> str:
-    """Render a multi-line metadata block for ``PaperDetails`` lookup."""
+    """Render a multi-line metadata block for ``PaperDetails`` lookup.
+
+    Args:
+      rec: Paper record to format.
+      abstract_chars: Character limit for abstract, or None to include full.
+
+    Returns:
+      formatted: Multi-line metadata with fields like id, title, authors.
+
+    """
     lines: list[str] = []
     if rec.arxiv_id:
         lines.append(f"id: arXiv:{rec.arxiv_id}")
@@ -89,7 +107,15 @@ def format_block(rec: PaperRecord, abstract_chars: int | None = None) -> str:
 
 
 def format_author_line(rec: AuthorRecord) -> str:
-    """Format one greppable line per author for search results."""
+    """Format one greppable line per author for search results.
+
+    Args:
+      rec: Author record to format.
+
+    Returns:
+      formatted: Single-line author summary with id, name, metrics.
+
+    """
     id_block = f"[author:{rec.author_id}]"
     meta: list[str] = []
     if rec.h_index is not None:
@@ -107,7 +133,15 @@ def format_author_line(rec: AuthorRecord) -> str:
 
 
 def format_author_block(rec: AuthorRecord) -> str:
-    """Render a multi-line metadata block for ``PaperAuthor`` details lookup."""
+    """Render a multi-line metadata block for ``PaperAuthor`` details lookup.
+
+    Args:
+      rec: Author record to format.
+
+    Returns:
+      formatted: Multi-line metadata with author_id, name, affiliations.
+
+    """
     lines: list[str] = [
         f"author_id: {rec.author_id}",
         f"name: {rec.name}",
@@ -134,44 +168,6 @@ def truncation_notice(shown: int, total: int) -> str:
     return ""
 
 
-def _format_authors(authors: tuple[str, ...], limit: int = 3) -> str:
-    """Render first-``limit`` authors with ``+N`` suffix for the rest."""
-    if not authors:
-        return "unknown"
-    shown = ", ".join(authors[:limit])
-    extra = len(authors) - limit
-    if extra > 0:
-        return f"{shown} +{extra}"
-    return shown
-
-
-def _id_prefix(rec: PaperRecord) -> str:
-    """Bracketed identifier prefix: ``[doi:... | arXiv:...]`` / subset."""
-    parts: list[str] = []
-    if rec.doi:
-        parts.append(f"doi:{rec.doi}")
-    if rec.arxiv_id:
-        parts.append(f"arXiv:{rec.arxiv_id}")
-    inner = " | ".join(parts) if parts else "no-id"
-    return f"[{inner}]"
-
-
-def _trim_abstract(abstract: str | None, cap: int | None) -> str | None:
-    """Apply caller-supplied character cap to an abstract, if any.
-
-    ``None`` means uncapped. A non-positive cap does NOT: it used to return the
-    full abstract, so ``abstract_chars=0`` -- the plainest way to ask for no
-    abstract at all -- returned the longest possible one.
-    """
-    if abstract is None:
-        return None
-    if cap is None or len(abstract) <= cap:
-        return abstract
-    if cap < 1:
-        raise ValueError(f"'abstract_chars' must be >= 1, got {cap}.")
-    return abstract[:cap].rstrip() + "..."
-
-
 def lean_record(
     rec: PaperRecord, *, abstract_chars: int = 500, author_limit: int = 5
 ) -> dict[str, object]:
@@ -182,6 +178,15 @@ def lean_record(
     renderings pick the same fields and apply the same abstract cap, and when
     they lived in separate packages they drifted -- different author
     truncation, one silently omitting the influential flag.
+
+    Args:
+      rec: Paper record to format.
+      abstract_chars: Character limit for abstract; raises on value < 1.
+      author_limit: Maximum authors to include; raises on value < 1.
+
+    Returns:
+      compact: Dict with null/empty fields removed, "et al." added past limit.
+
     """
     if author_limit < 1:
         raise ValueError(f"'author_limit' must be >= 1, got {author_limit}.")
@@ -208,7 +213,15 @@ def lean_record(
 
 
 def lean_author(rec: AuthorRecord) -> dict[str, object]:
-    """Return one author as a compact dict, mirroring :func:`format_author_line`."""
+    """Return one author as a compact dict, mirroring :func:`format_author_line`.
+
+    Args:
+      rec: Author record to format.
+
+    Returns:
+      compact: Dict with null/empty fields removed.
+
+    """
     fields: dict[str, object] = {
         "author_id": rec.author_id,
         "name": rec.name,
@@ -218,3 +231,39 @@ def lean_author(rec: AuthorRecord) -> dict[str, object]:
         "paper_count": rec.paper_count,
     }
     return {k: v for k, v in fields.items() if v not in (None, [], "")}
+
+
+def _format_authors(authors: tuple[str, ...], limit: int = 3) -> str:
+    """Render first-``limit`` authors with ``+N`` suffix for the rest."""
+    if not authors:
+        return "unknown"
+    shown = ", ".join(authors[:limit])
+    extra = len(authors) - limit
+    if extra > 0:
+        return f"{shown} +{extra}"
+    return shown
+
+
+def _id_prefix(rec: PaperRecord) -> str:
+    """Bracketed identifier prefix: ``[doi:... | arXiv:...]`` / subset."""
+    parts: list[str] = []
+    if rec.doi:
+        parts.append(f"doi:{rec.doi}")
+    if rec.arxiv_id:
+        parts.append(f"arXiv:{rec.arxiv_id}")
+    inner = " | ".join(parts) if parts else "no-id"
+    return f"[{inner}]"
+
+
+# ``None`` means uncapped. A non-positive cap does NOT: it used to return the full
+# abstract, so ``abstract_chars=0`` -- the plainest way to ask for no abstract at all --
+# returned the longest possible one.
+def _trim_abstract(abstract: str | None, cap: int | None) -> str | None:
+    """Apply caller-supplied character cap to an abstract, if any."""
+    if abstract is None:
+        return None
+    if cap is None or len(abstract) <= cap:
+        return abstract
+    if cap < 1:
+        raise ValueError(f"'abstract_chars' must be >= 1, got {cap}.")
+    return abstract[:cap].rstrip() + "..."

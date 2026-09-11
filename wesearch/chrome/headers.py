@@ -72,6 +72,13 @@ def impersonate_version_platform(impersonate: str) -> tuple[int, ChromePlatform]
 
     Falls back to the desktop-Chrome default for an unrecognized target, so an
     unknown value degrades to a coherent desktop identity rather than raising.
+
+    Args:
+      impersonate: curl_cffi impersonate target (e.g., 'chrome', 'chrome_android').
+
+    Returns:
+      result: Tuple of (Chrome_major_version, platform) for that target.
+
     """
     return _IMPERSONATE.get(impersonate, _IMPERSONATE["chrome"])
 
@@ -98,7 +105,16 @@ _UA_OS: Final[dict[ChromePlatform, str]] = {
 
 
 def chrome_user_agent(major: int, platform: ChromePlatform = "macOS") -> str:
-    """Return the User-Agent string a Chrome of this major/platform presents."""
+    """Return the User-Agent string a Chrome of this major/platform presents.
+
+    Args:
+      major: Chrome major version number.
+      platform: OS platform (Windows/Linux/macOS/Android).
+
+    Returns:
+      result: User-Agent header value for this Chrome version and platform.
+
+    """
     if platform not in _UA_OS:
         raise ValueError(f"Unsupported platform {platform!r}.")
     tail = "Mobile Safari/537.36" if platform == "Android" else "Safari/537.36"

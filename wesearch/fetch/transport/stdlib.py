@@ -30,82 +30,6 @@ __all__ = ["fetch_stdlib"]
 HTTPConn = http.client.HTTPConnection | http.client.HTTPSConnection
 
 
-class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(
-        self,
-        host: str,
-        *,
-        port: int | None = None,
-        server_hostname: str,
-        timeout: float,
-        context: ssl.SSLContext,
-    ) -> None:
-        super().__init__(host, port=port, timeout=timeout, context=context)
-        self._server_hostname = server_hostname
-        self._ssl_context = context
-
-    @override
-    def connect(self) -> None:
-        http.client.HTTPConnection.connect(self)
-        assert self.sock is not None
-        self.sock = self._ssl_context.wrap_socket(
-            self.sock,
-            server_hostname=self._server_hostname,
-        )
-
-
-def _open_connection(
-    scheme: str,
-    hostname: str,
-    timeout_sec: float,
-    *,
-    connect_timeout_sec: float | None = None,
-    port: int | None = None,
-    resolved_ip: str = "",
-) -> HTTPConn:
-    """Open a new HTTP/HTTPS connection; pin to ``resolved_ip`` when given.
-
-    ``http.client`` keeps ONE timeout for the handshake and every later socket
-    read. The connection is therefore built with the CONNECT budget, and the
-    caller widens the live socket to ``timeout_sec`` once connected
-    (:func:`_widen_after_connect`). Matches curl_cffi's ``(connect, read)``
-    pair, which is what keeps the two backends from disagreeing on ``RetryParams``.
-    """
-    handshake_sec = (
-        connect_timeout_sec if connect_timeout_sec is not None else timeout_sec
-    )
-    connect_host = bracket_ipv6(resolved_ip or hostname)
-    if scheme == "https":
-        ctx = ssl.create_default_context()
-        if resolved_ip:
-            return _ValidatedHTTPSConnection(
-                connect_host,
-                port=port,
-                server_hostname=hostname,
-                timeout=handshake_sec,
-                context=ctx,
-            )
-        return http.client.HTTPSConnection(
-            connect_host,
-            port=port,
-            timeout=handshake_sec,
-            context=ctx,
-        )
-    return http.client.HTTPConnection(connect_host, port=port, timeout=handshake_sec)
-
-
-def _widen_after_connect(conn: HTTPConn, timeout_sec: float) -> None:
-    """Restore the full read budget on an already-connected socket.
-
-    The connection was built with the narrower CONNECT budget, which would
-    otherwise also cap every response read -- turning a slow page into a
-    spurious timeout. No-op before the socket exists; ``http.client`` connects
-    lazily, so the caller invokes this right after the first request.
-    """
-    if conn.sock is not None:
-        conn.sock.settimeout(timeout_sec)
-
-
 def fetch_stdlib(
     url: str,
     *,
@@ -129,6 +53,25 @@ def fetch_stdlib(
     impersonation and no pooled connection, so ``impersonate``, ``session``, and
     ``reseat`` are accepted for interface parity and ignored; the coherent Chrome
     header set is instead hand-built upstream, in ``fetch``'s own header assembly.
+
+    Args:
+      url: Request target; scheme determines http or https.
+      method: HTTP verb (GET, POST, etc.); used verbatim.
+      headers: Request headers dict; caller must not include Content-Length.
+      body: Request body bytes; None for GET or empty POST.
+      timeout_sec: Total time limit for the request; raised if exceeded.
+      connect_timeout_sec: Connection open limit; defaults to timeout_sec.
+      max_redirects: Maximum 3xx follow count; 0 disables following.
+      impersonate: User-Agent style name; accepted but ignored by this transport.
+      on_redirect: Callback(url) fired before each redirect; None to skip.
+      on_response: Observer for status and headers; None to skip.
+      trust: Trust level ("untrusted" or "trusted"); affects TLS validation.
+      session: Session handle; accepted but ignored; always None.
+      reseat: Callable to session-hop; accepted but ignored; always None.
+
+    Returns:
+      result: Response body as bytes, following redirects up to the limit.
+
     """
     del impersonate, session, reseat  # No impersonation or pooling here.
     # ``connect_timeout_sec`` is honored via _open_connection/_widen_after_connect.
@@ -248,3 +191,75 @@ def fetch_stdlib(
             return decompress(raw_body, encoding)
     finally:
         raw_conn.close()
+
+
+class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        host: str,
+        *,
+        port: int | None = None,
+        server_hostname: str,
+        timeout: float,
+        context: ssl.SSLContext,
+    ) -> None:
+        super().__init__(host, port=port, timeout=timeout, context=context)
+        self._server_hostname = server_hostname
+        self._ssl_context = context
+
+    @override
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        assert self.sock is not None
+        self.sock = self._ssl_context.wrap_socket(
+            self.sock,
+            server_hostname=self._server_hostname,
+        )
+
+
+# ``http.client`` keeps ONE timeout for the handshake and every later socket read. The
+# connection is therefore built with the CONNECT budget, and the caller widens the live
+# socket to ``timeout_sec`` once connected (:func:`_widen_after_connect`). Matches
+# curl_cffi's ``(connect, read)`` pair, which is what keeps the two backends from
+# disagreeing on ``RetryParams``.
+def _open_connection(
+    scheme: str,
+    hostname: str,
+    timeout_sec: float,
+    *,
+    connect_timeout_sec: float | None = None,
+    port: int | None = None,
+    resolved_ip: str = "",
+) -> HTTPConn:
+    """Open a new HTTP/HTTPS connection; pin to ``resolved_ip`` when given."""
+    handshake_sec = (
+        connect_timeout_sec if connect_timeout_sec is not None else timeout_sec
+    )
+    connect_host = bracket_ipv6(resolved_ip or hostname)
+    if scheme == "https":
+        ctx = ssl.create_default_context()
+        if resolved_ip:
+            return _ValidatedHTTPSConnection(
+                connect_host,
+                port=port,
+                server_hostname=hostname,
+                timeout=handshake_sec,
+                context=ctx,
+            )
+        return http.client.HTTPSConnection(
+            connect_host,
+            port=port,
+            timeout=handshake_sec,
+            context=ctx,
+        )
+    return http.client.HTTPConnection(connect_host, port=port, timeout=handshake_sec)
+
+
+# The connection was built with the narrower CONNECT budget, which would otherwise also
+# cap every response read -- turning a slow page into a spurious timeout. No-op before
+# the socket exists; ``http.client`` connects lazily, so the caller invokes this right
+# after the first request.
+def _widen_after_connect(conn: HTTPConn, timeout_sec: float) -> None:
+    """Restore the full read budget on an already-connected socket."""
+    if conn.sock is not None:
+        conn.sock.settimeout(timeout_sec)

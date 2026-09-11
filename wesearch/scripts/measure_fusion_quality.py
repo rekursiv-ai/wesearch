@@ -26,48 +26,6 @@ from wesearch.paper.fuse import normalize_title
 from wesearch.paper.search import SearchResult, search
 
 
-def _residual_duplicates(records: list[PaperRecord]) -> int:
-    """Records naming a paper another record already named.
-
-    Identity, not title: two records sharing a normalized title are the same
-    paper only when they also share an identifier, since distinct papers really
-    do share titles (``Discussion``). Counting every same-title pair scored
-    correct behavior as a defect -- it is the very collapsing this measurement
-    exists to show the absence of.
-    """
-    seen: set[str] = set()
-    duplicates = 0
-    for rec in records:
-        keys: set[str] = set()
-        if rec.doi:
-            keys.add(f"doi:{rec.doi.lower()}")
-        if rec.arxiv_id:
-            keys.add(f"arxiv:{rec.arxiv_id.lower()}")
-        if not keys:
-            keys = {f"title:{normalize_title(rec.title)}"}
-        if keys & seen:
-            duplicates += 1
-        seen |= keys
-    return duplicates
-
-
-def _sampled(query: str, *, limit: int, attempts: int = 4) -> SearchResult | None:
-    """Search ``query``, or return ``None`` when no usable sample came back.
-
-    A degraded result is not a sample of FUSED quality: with one backend lost
-    there is nothing to fuse, so counting it would report the duplication rate
-    of a single backend as fusion's.
-    """
-    for _attempt in range(attempts):
-        try:
-            result = search(query, limit=limit)
-        except PaperError:
-            time.sleep(6.0)
-            continue
-        return result if result.complete or result.records else None
-    return None
-
-
 def main(
     queries: tuple[str, ...] = (
         "attention",
@@ -119,6 +77,43 @@ def main(
         f"residual-duplicates={duplicates} limit-overruns={overruns}"
     )
     return 0 if sampled else 1
+
+
+# Identity, not title: two records sharing a normalized title are the same paper only
+# when they also share an identifier, since distinct papers really do share titles
+# (``Discussion``). Counting every same-title pair scored correct behavior as a defect
+# -- it is the very collapsing this measurement exists to show the absence of.
+def _residual_duplicates(records: list[PaperRecord]) -> int:
+    """Return records naming a paper another record already named."""
+    seen: set[str] = set()
+    duplicates = 0
+    for rec in records:
+        keys: set[str] = set()
+        if rec.doi:
+            keys.add(f"doi:{rec.doi.lower()}")
+        if rec.arxiv_id:
+            keys.add(f"arxiv:{rec.arxiv_id.lower()}")
+        if not keys:
+            keys = {f"title:{normalize_title(rec.title)}"}
+        if keys & seen:
+            duplicates += 1
+        seen |= keys
+    return duplicates
+
+
+# A degraded result is not a sample of FUSED quality: with one backend lost there is
+# nothing to fuse, so counting it would report the duplication rate of a single backend
+# as fusion's.
+def _sampled(query: str, *, limit: int, attempts: int = 4) -> SearchResult | None:
+    """Search ``query``, or return ``None`` when no usable sample came back."""
+    for _attempt in range(attempts):
+        try:
+            result = search(query, limit=limit)
+        except PaperError:
+            time.sleep(6.0)
+            continue
+        return result if result.complete or result.records else None
+    return None
 
 
 if __name__ == "__main__":

@@ -328,6 +328,13 @@ class PolicyParams:
         types the result for a caller whose annotation is a ``Literal``; it is
         not re-checked, since this class declared the value.
 
+        Args:
+          name: Field name to look up.
+          kind: Type hint for result (unchecked, for type-narrowing).
+
+        Returns:
+          value: Default value declared in the dataclass field.
+
         Raises:
           KeyError: When ``name`` is not a field of this class.
 

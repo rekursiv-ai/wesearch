@@ -1121,7 +1121,7 @@ class TestDataclassCodec:
 
     def test_encoded_form_is_json_serializable(self) -> None:
         doc = _Doc(when=datetime(2026, 1, 1, tzinfo=UTC), atts=(_Bytes(data=b"z"),))
-        json.dumps(DataclassCodec.to_json(doc))  # must not raise
+        json.dumps(DataclassCodec.to_json(doc))  # must not raise.
 
     def test_type_tag_present_and_ignored_on_decode(self) -> None:
         encoded = DataclassCodec.to_json(_Child(n=3))
@@ -1808,23 +1808,16 @@ class _Carrier(Protocol):
     value: object
 
 
+# Generating the carrier rather than declaring it is the point: the field's annotation
+# is the codec's entire schema, so a generated annotation tests a shape no hand-written
+# fixture covers.
+#
+# The carrier is built ONCE and compared against itself. Two ``make_dataclass`` calls
+# yield distinct classes, and a dataclass ``__eq__`` returns ``NotImplemented`` for a
+# foreign class, so a second carrier would make every comparison false regardless of
+# what the codec did.
 def _assert_round_trips(annotation: object, value: object) -> None:
-    """Assert a one-field dataclass survives encode then decode.
-
-    Generating the carrier rather than declaring it is the point: the field's
-    annotation is the codec's entire schema, so a generated annotation tests a
-    shape no hand-written fixture covers.
-
-    The carrier is built ONCE and compared against itself. Two ``make_dataclass``
-    calls yield distinct classes, and a dataclass ``__eq__`` returns
-    ``NotImplemented`` for a foreign class, so a second carrier would make every
-    comparison false regardless of what the codec did.
-
-    Args:
-      annotation: The field's declared type, as a runtime value.
-      value: The value to store, encode, and decode back.
-
-    """
+    """Assert a one-field dataclass survives encode then decode."""
     cls = dataclasses.make_dataclass(
         "_Generated",
         [("value", annotation)],

@@ -45,20 +45,6 @@ logger = logging.getLogger(__name__)
 _DUCKDUCKGO_URL: Final = "https://html.duckduckgo.com/html/"
 
 
-@cache
-def _duckduckgo_user_agent() -> str:
-    """A PROCESS-STABLE User-Agent for DuckDuckGo (drawn once, reused).
-
-    DuckDuckGo derives its ``vqd`` anti-bot token from ``(query, User-Agent)`` and
-    treats a UA that shifts between the results page and its follow-ups as a bot
-    (which lowers the IP's reputation and triggers CAPTCHAs). A stable UA keeps
-    the token valid across requests -- unlike the per-query UA the Google path
-    uses. Cached, so the whole process presents one consistent DDG client.
-    """
-    pool = user_agent_pool("chrome_android")
-    return f"{pool[0]} NSTNWV"
-
-
 def duckduckgo(
     query: str,
     num_results: int = 10,
@@ -168,14 +154,12 @@ def _duckduckgo_validate_body(body: bytes) -> None:
     _duckduckgo_check_captcha(body.decode("utf-8", "replace"))
 
 
+# One predicate, shared by the validator that rejects the page and the diagnostic that
+# explains an empty parse. Written twice, a selector change at DDG would make the
+# diagnostic report "markup changed" for exactly the challenge page it exists to tell
+# apart.
 def _duckduckgo_is_challenge(soup: bs4.BeautifulSoup) -> bool:
-    """Whether this page is DDG's bot challenge rather than a results page.
-
-    One predicate, shared by the validator that rejects the page and the
-    diagnostic that explains an empty parse. Written twice, a selector change
-    at DDG would make the diagnostic report "markup changed" for exactly the
-    challenge page it exists to tell apart.
-    """
+    """Whether this page is DDG's bot challenge rather than a results page."""
     return soup.select_one("form#challenge-form") is not None
 
 
@@ -209,7 +193,7 @@ def _duckduckgo_parse(
 ) -> list[SearchResult]:
     """Extract search results from DDG's HTML."""
     if max_results <= 0:
-        return []  # append-before-cap would otherwise return one at max=0
+        return []  # append-before-cap would otherwise return one at max=0.
     soup = bs4.BeautifulSoup(page_html, "html.parser")
     strip_scripts(soup)
     results: list[SearchResult] = []
@@ -248,3 +232,15 @@ def _duckduckgo_parse(
         else:
             logger.warning("No results parsed -- DDG may have changed markup.")
     return results
+
+
+# DuckDuckGo derives its ``vqd`` anti-bot token from ``(query, User-Agent)`` and treats
+# a UA that shifts between the results page and its follow-ups as a bot (which lowers
+# the IP's reputation and triggers CAPTCHAs). A stable UA keeps the token valid across
+# requests -- unlike the per-query UA the Google path uses. Cached, so the whole process
+# presents one consistent DDG client.
+@cache
+def _duckduckgo_user_agent() -> str:
+    """Return a PROCESS-STABLE User-Agent for DuckDuckGo (drawn once, reused)."""
+    pool = user_agent_pool("chrome_android")
+    return f"{pool[0]} NSTNWV"

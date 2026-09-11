@@ -29,13 +29,11 @@ __all__ = [
 ]
 
 
+# Here and not inside :func:`die_with_parent`, which runs between ``fork`` and ``exec``:
+# ``CDLL`` is a ``dlopen``, and the loader lock it takes is never released in the child
+# if another thread held it at the fork.
 def _load_libc() -> ctypes.CDLL | None:
-    """Resolve libc once, at import, or ``None`` off Linux.
-
-    Here and not inside :func:`die_with_parent`, which runs between ``fork``
-    and ``exec``: ``CDLL`` is a ``dlopen``, and the loader lock it takes is
-    never released in the child if another thread held it at the fork.
-    """
+    """Resolve libc once, at import, or ``None`` off Linux."""
     if not sys.platform.startswith("linux"):
         return None
     try:
@@ -132,17 +130,6 @@ def drive_chrome(
     return timed_out
 
 
-def _kill_group(process: subprocess.Popen[bytes]) -> None:
-    """SIGKILL a process and every child it forked.
-
-    :func:`die_with_parent` made it a group leader, so one ``killpg`` reaches
-    the zygote and renderers. A missing group is the normal race between the
-    timeout firing and Chrome finishing, not an error.
-    """
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGKILL)
-
-
 def die_with_parent() -> None:
     """Make the calling child its own group leader, killed when its parent dies.
 
@@ -166,7 +153,7 @@ def die_with_parent() -> None:
 
 
 def _chrome_binary() -> str | None:
-    """The first available Chrome binary name, or ``None``."""
+    """Return the first available Chrome binary name, or ``None``."""
     for name in (
         "google-chrome-stable",
         "google-chrome",
@@ -177,3 +164,12 @@ def _chrome_binary() -> str | None:
         if shutil.which(name) is not None:
             return name
     return None
+
+
+# :func:`die_with_parent` made it a group leader, so one ``killpg`` reaches the zygote
+# and renderers. A missing group is the normal race between the timeout firing and
+# Chrome finishing, not an error.
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL a process and every child it forked."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)

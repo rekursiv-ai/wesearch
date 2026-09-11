@@ -20,24 +20,23 @@ import yaml
 from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_THIS: Final = Path(__file__).resolve()
+_CWD: Final = _THIS.parent
 
 
+# Searched upward rather than counted: this file is copied into the exported package,
+# where ``wesearch/`` sits at the checkout root instead of under ``loop/``, so a fixed
+# ``parents[2]`` resolved to ``/tmp`` and the export died reading a config that exists
+# only in the monorepo.
+#
+# Bounded by the enclosing REPOSITORY, and that bound is the point. An unbounded walk
+# reaches ``/`` and adopts the first config it finds anywhere above -- verified: an
+# unrelated one two levels up was picked up, which in an installed package would be a
+# stranger's, and the assertions below would then be made against hooks wesearch does
+# not own.
 @functools.cache
 def _own_repo_config() -> Path | None:
-    """Return this checkout's ``.pre-commit-config.yaml``, or ``None``.
-
-    Searched upward rather than counted: this file is copied into the exported
-    package, where ``wesearch/`` sits at the checkout root instead of under
-    ``loop/``, so a fixed ``parents[2]`` resolved to ``/tmp`` and the export
-    died reading a config that exists only in the monorepo.
-
-    Bounded by the enclosing REPOSITORY, and that bound is the point. An
-    unbounded walk reaches ``/`` and adopts the first config it finds anywhere
-    above -- verified: an unrelated one two levels up was picked up, which in
-    an installed package would be a stranger's, and the assertions below would
-    then be made against hooks wesearch does not own.
-    """
+    """Return this checkout's ``.pre-commit-config.yaml``, or ``None``."""
     for candidate in [_CWD, *_CWD.parents]:
         config = candidate / ".pre-commit-config.yaml"
         if config.is_file():
@@ -147,7 +146,7 @@ def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
     offenders = [
         str(path.relative_to(_CWD))
         for path in sorted(_CWD.rglob("*_test.py"))
-        if path != Path(__file__)
+        if path != _THIS
         and _calls(
             ast.parse(path.read_text(encoding="utf-8"), str(path)), "shutdown_browsers"
         )
@@ -179,7 +178,7 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
     marked = [
         path.name
         for path in sorted(_CWD.rglob("*_test.py"))
-        if "xdist_group" in path.read_text(encoding="utf-8") and path != Path(__file__)
+        if "xdist_group" in path.read_text(encoding="utf-8") and path != _THIS
     ]
     assert marked, "no test file marks an xdist group; this guard is vacuous"
 

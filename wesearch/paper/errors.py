@@ -58,7 +58,7 @@ def translate_http_error(
     *,
     backend: str,
     rate_limit_message: str = "",
-    not_found_on_404: bool = True,
+    treat_404_as_missing: bool = True,
 ) -> PaperError:
     """Map a transport :class:`FetchError` to the paper exception hierarchy.
 
@@ -71,16 +71,16 @@ def translate_http_error(
       backend: Human name for messages (e.g. ``"Semantic Scholar"``).
       rate_limit_message: Backend-specific 429 guidance (API-key hint, budget
         reset, ...). Empty for a generic message.
-      not_found_on_404: When True (default) a 404 is :class:`NotFoundError`.
+      treat_404_as_missing: When True (default) a 404 is :class:`NotFoundError`.
         Set False for a backend whose real not-found is SEMANTIC (e.g. OpenAlex
         returns 200 + empty results), so an HTTP 404 there is a bad endpoint --
         a :class:`BackendError`, not a missing entity.
 
     Returns:
-      The matching :class:`PaperError` subclass (caller ``raise ... from e``).
+      error: The matching :class:`PaperError` (caller ``raise ... from e``).
 
     """
-    if e.status == 404 and not_found_on_404:
+    if e.status == 404 and treat_404_as_missing:
         return NotFoundError(f"{backend}: not found.")
     if e.status == 429:
         return RateLimitError(

@@ -61,27 +61,6 @@ def format_result(result: SearchResult) -> str:
     return f"{head}\n{body}" if body else head
 
 
-def _labelled(
-    name: str,
-    value: object,
-    *,
-    prefixes: Mapping[str, str] = MappingProxyType(
-        {"doi": "doi:", "citations": "cites:", "seed": "seed:", "leech": "leech:"}
-    ),
-    suffixes: Mapping[str, str] = MappingProxyType({"views": " views"}),
-) -> str:
-    """Render one detail field for the TEXT surface, with its reading label.
-
-    The labels live on this function rather than beside the data, because
-    only the text rendering wants them: ``lean_result`` feeds a JSON protocol,
-    where ``"doi": "doi:10.1/x"`` forces every client to strip a prefix to
-    recover the identifier -- the mistake ``paper/render.py`` avoids by
-    emitting ``rec.doi`` raw. Passed as defaults, not module state, so a
-    caller can respell them without reaching through a global.
-    """
-    return f"{prefixes.get(name, '')}{value}{suffixes.get(name, '')}"
-
-
 def lean_result(result: SearchResult) -> dict[str, object]:
     """Return one result as a compact dict, empty fields dropped.
 
@@ -119,6 +98,15 @@ def detail_fields(result: SearchResult) -> Mapping[str, object]:
     Ordered most-derived first: :class:`VideoResult` subclasses
     :class:`MediaResult`, so testing the base first would render a video as a
     plain media result and silently lose its view count and channel.
+
+    Args:
+      result: SearchResult (Paper, Image, Video, Place, etc.) to extract
+        category-specific metadata from.
+
+    Returns:
+      fields: Dict mapping field name to value for the result's category
+        (e.g., {"authors": "...", "doi": "..."} for a PaperResult).
+
     """
     if isinstance(result, PaperResult):
         authors = ", ".join(result.authors[:3]) + (
@@ -188,3 +176,21 @@ def detail_fields(result: SearchResult) -> Mapping[str, object]:
             "magnet_url": result.magnet_url,
         }
     return {}
+
+
+# The labels live on this function rather than beside the data, because only the text
+# rendering wants them: ``lean_result`` feeds a JSON protocol, where ``"doi":
+# "doi:10.1/x"`` forces every client to strip a prefix to recover the identifier -- the
+# mistake ``paper/render.py`` avoids by emitting ``rec.doi`` raw. Passed as defaults,
+# not module state, so a caller can respell them without reaching through a global.
+def _labelled(
+    name: str,
+    value: object,
+    *,
+    prefixes: Mapping[str, str] = MappingProxyType(
+        {"doi": "doi:", "citations": "cites:", "seed": "seed:", "leech": "leech:"}
+    ),
+    suffixes: Mapping[str, str] = MappingProxyType({"views": " views"}),
+) -> str:
+    """Render one detail field for the TEXT surface, with its reading label."""
+    return f"{prefixes.get(name, '')}{value}{suffixes.get(name, '')}"

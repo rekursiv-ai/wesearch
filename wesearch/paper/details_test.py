@@ -85,7 +85,7 @@ class TestCitations:
         with patch.object(s2, "paginate", side_effect=fake):
             listing = citations("doi", "10.1/x", limit=5, influential_only=True)
         assert [r.title for r in listing.records] == ["keep"]
-        assert not listing.complete  # cursor not exhausted -> more may exist
+        assert not listing.complete  # cursor not exhausted -> more may exist.
 
 
 class TestMetadata:
@@ -144,7 +144,7 @@ class TestOpenAlexGraphSource:
         ) as oa_cites:
             listing = citations("doi", "10.1/x", limit=1, source="openalex")
         assert [r.title for r in listing.records] == ["citer"]
-        assert not listing.complete  # total 500 > 1 returned
+        assert not listing.complete  # total 500 > 1 returned.
         assert oa_cites.call_args.kwargs["year_from"] is None
 
     def test_openalex_citations_complete_when_all_returned(self) -> None:

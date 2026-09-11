@@ -93,6 +93,31 @@ class Profile:
     created: float = field(default_factory=time.time)
 
 
+def _encode(profile: Profile) -> bytes:
+    """Serialize a profile to JSON bytes."""
+    return json.dumps(
+        {
+            "ua": profile.ua,
+            "cookies": profile.cookies,
+            "created": profile.created,
+        }
+    ).encode()
+
+
+# A partial write, a manual edit, or a disk error yields bytes that are not a valid
+# profile; the store treats those as absent so a bad file never raises out of a fetch
+# (it self-heals on the next save).
+def _try_decode(raw: bytes) -> Profile | None:
+    """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
+    try:
+        obj = json.loads(raw)
+        return Profile(
+            ua=obj["ua"], cookies=dict(obj["cookies"]), created=obj["created"]
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
 class ProfileStore:
     """Persists :class:`Profile` per ``(egress_ip, domain)`` across processes.
 
@@ -124,7 +149,7 @@ class ProfileStore:
     @classmethod
     @cache
     def shared(cls) -> ProfileStore:
-        """The process-wide store, built once (the default for every fetch)."""
+        """Return the process-wide store, built once (the default for every fetch)."""
         return cls()
 
     def load(self, egress_ip: str, domain: str) -> Profile | None:
@@ -135,6 +160,14 @@ class ProfileStore:
         so a bad file never propagates an exception out of a fetch. An
         expired file is unlinked, not merely ignored, so stale keys don't
         accumulate.
+
+        Args:
+          egress_ip: Source IP address for this profile.
+          domain: Registrable domain.
+
+        Returns:
+          profile: The Profile | None.
+
         """
         path = self._path(egress_ip, domain)
         with self._lock:
@@ -170,6 +203,12 @@ class ProfileStore:
         no-op when no profile exists for the key -- a jar has no identity without
         a User-Agent, and the store does not mint one; :meth:`save` establishes
         the profile first.
+
+        Args:
+          egress_ip: Source IP address.
+          domain: Registrable domain.
+          cookies: Name=value pairs to add or update.
+
         """
         if not cookies:
             return
@@ -198,11 +237,9 @@ class ProfileStore:
         key = f"{quote(egress_ip, safe='')}|{quote(domain, safe='')}"
         return self._base / f"{key}.json"
 
+    # ``max_bytes`` (default 1 MiB) caps a runaway file; cookie jars are small.
     def _read(self, path: Path, *, max_bytes: int = 1 << 20) -> bytes | None:
-        """Read a key's bytes under the file lock, or ``None`` when absent.
-
-        ``max_bytes`` (default 1 MiB) caps a runaway file; cookie jars are small.
-        """
+        """Read a key's bytes under the file lock, or ``None`` when absent."""
         try:
             fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
         except FileNotFoundError:
@@ -214,15 +251,13 @@ class ProfileStore:
             os.close(fd)
         return data or None
 
+    # ``os.replace`` is atomic on POSIX, so a concurrent reader (or a crash) sees either
+    # the complete old file or the complete new one -- never a truncated partial. A
+    # crash after the temp is written but before the rename leaves only the stray temp
+    # (cleaned on the next successful write to the key), never a corrupt file at the key
+    # path.
     def _write(self, path: Path, data: bytes) -> None:
-        """Atomically replace a key's file: write a temp sibling, then rename.
-
-        ``os.replace`` is atomic on POSIX, so a concurrent reader (or a crash)
-        sees either the complete old file or the complete new one -- never a
-        truncated partial. A crash after the temp is written but before the
-        rename leaves only the stray temp (cleaned on the next successful write
-        to the key), never a corrupt file at the key path.
-        """
+        """Atomically replace a key's file: write a temp sibling, then rename."""
         path.parent.mkdir(parents=True, exist_ok=True)
         # A per-pid temp name avoids two writers colliding on one temp file; the
         # atomic rename serializes them so the key always holds a complete file.
@@ -236,13 +271,29 @@ class ProfileStore:
         tmp.replace(path)
 
 
-def _is_deletion(attributes: list[str]) -> bool:
-    """Whether cookie attributes mark it expired (past ``Max-Age`` or ``Expires``).
+def parsedate_to_datetime_or_none(value: str) -> datetime | None:
+    """Parse an HTTP-date; return ``None`` on any malformed value.
 
-    ``Max-Age`` wins when present (RFC 6265 precedence); otherwise a past
-    ``Expires`` date is a deletion. A malformed value is treated as non-deletion
-    (keep the cookie) rather than raising.
+    Args:
+      value: HTTP date string (RFC 2822 or similar).
+
+    Returns:
+      result: The datetime | None.
+
     """
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    # A naive datetime (no tz in the header) is interpreted as UTC, per HTTP.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+# ``Max-Age`` wins when present (RFC 6265 precedence); otherwise a past ``Expires`` date
+# is a deletion. A malformed value is treated as non-deletion (keep the cookie) rather
+# than raising.
+def _is_deletion(attributes: list[str]) -> bool:
+    """Whether cookie attributes mark it expired (past ``Max-Age`` or ``Expires``)."""
     for attr in attributes:
         key, _, value = attr.strip().partition("=")
         if key.strip().lower() == "max-age":
@@ -257,40 +308,3 @@ def _is_deletion(attributes: list[str]) -> bool:
             if expires is not None:
                 return expires <= datetime.now(UTC)
     return False
-
-
-def parsedate_to_datetime_or_none(value: str) -> datetime | None:
-    """Parse an HTTP-date; return ``None`` on any malformed value."""
-    try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    # A naive datetime (no tz in the header) is interpreted as UTC, per HTTP.
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-
-
-def _encode(profile: Profile) -> bytes:
-    """Serialize a profile to JSON bytes."""
-    return json.dumps(
-        {
-            "ua": profile.ua,
-            "cookies": profile.cookies,
-            "created": profile.created,
-        }
-    ).encode()
-
-
-def _try_decode(raw: bytes) -> Profile | None:
-    """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed.
-
-    A partial write, a manual edit, or a disk error yields bytes that are not a
-    valid profile; the store treats those as absent so a bad file never raises
-    out of a fetch (it self-heals on the next save).
-    """
-    try:
-        obj = json.loads(raw)
-        return Profile(
-            ua=obj["ua"], cookies=dict(obj["cookies"]), created=obj["created"]
-        )
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None

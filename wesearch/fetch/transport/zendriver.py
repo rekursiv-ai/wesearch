@@ -1,5 +1,5 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300, T201 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
@@ -52,6 +52,8 @@ from wesearch.types.params import Trust
 
 
 if TYPE_CHECKING:
+    from argparse import ArgumentParser
+
     import zendriver
     import zendriver.core.connection
 else:
@@ -84,253 +86,6 @@ class BrowserUnavailableError(RuntimeError):
     browser cannot proceed, and environments without a usable one (CI, headless
     boxes) should treat it as "browser subsystem unavailable" rather than a bug.
     """
-
-
-class _PoolControlServer(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-
-    def __init__(self, profile_dir: Path, release: Callable[[], None]) -> None:
-        self.release = release
-        address = _control_address(profile_dir)
-        self._control_path = None if address.startswith("\0") else Path(address)
-        super().__init__(address, _PoolControlHandler)
-        self._thread = threading.Thread(
-            target=lambda: self.serve_forever(poll_interval=0.01),
-            name="loop-web-browser-control",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def close(self) -> None:
-        self.shutdown()
-        self.server_close()
-        self._thread.join()
-        if self._control_path is not None:
-            self._control_path.unlink(missing_ok=True)
-
-
-class _PoolControlHandler(socketserver.StreamRequestHandler):
-    @override
-    def handle(self) -> None:
-        if self.rfile.readline(64) != b"release\n":
-            return
-        cast(_PoolControlServer, self.server).release()
-
-
-def _control_address(profile_dir: Path, platform: str = sys.platform) -> str:
-    """Return the Unix-socket address coordinating one profile."""
-    digest = hashlib.sha256(str(profile_dir.resolve()).encode()).hexdigest()[:24]
-    if platform == "linux":
-        return f"\0loop-zendriver-{digest}"
-    return str(Path(tempfile.gettempdir()) / f"loop-zd-{digest}.sock")
-
-
-def _request_pool_release(profile_dir: Path) -> None:
-    """Ask another process's browser pool to release ``profile_dir``."""
-    address = _control_address(profile_dir)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(10)
-    try:
-        client.connect(address)
-        client.sendall(b"release\n")
-        # EOF is the acknowledgement: the handler closes only after the release
-        # callback returns, including graceful browser and loop shutdown.
-        if client.recv(64) != b"":
-            raise RuntimeError("Zendriver browser pool returned an invalid response.")
-    except ConnectionRefusedError:
-        if not address.startswith("\0"):
-            Path(address).unlink(missing_ok=True)
-    except FileNotFoundError:
-        pass
-    finally:
-        client.close()
-    # Another process can leave a stale control listener that acknowledges this
-    # profile without owning its Chrome. Verify and close the actual owner.
-    _close_orphan_browser(profile_dir)
-
-
-def _close_orphan_browser(profile_dir: Path) -> None:
-    """Close a live Chrome whose owning pool no longer serves control."""
-    port = _devtools_port(profile_dir)
-    if port is None:
-        return
-    try:
-        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
-    except OSError:
-        return
-    connection.close()
-    asyncio.run(_close_browser_on_port(port))
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            connection = socket.create_connection(("127.0.0.1", port), timeout=0.1)
-        except OSError:
-            return
-        connection.close()
-        time.sleep(0.05)
-    # A capability condition, not a fetch fault: it blocks every later browser
-    # fetch, so it must be the error such callers already catch.
-    raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
-
-
-def _devtools_port(
-    profile_dir: Path,
-    *,
-    proc_root: Path = Path("/proc"),
-    platform: str = sys.platform,
-) -> int | None:
-    """Read the verified profile owner's active DevTools port."""
-    try:
-        owner = (profile_dir / "SingletonLock").readlink()
-        pid = int(str(owner).rsplit("-", 1)[1])
-        command = _process_command(pid, proc_root=proc_root, platform=platform)
-    except (FileNotFoundError, IndexError, OSError, UnicodeError, ValueError):
-        return None
-    if _command_flag(command, "--user-data-dir=") != str(profile_dir.resolve()):
-        return None
-    try:
-        port_text = _command_flag(command, "--remote-debugging-port=") or ""
-        port = int(port_text.split(maxsplit=1)[0])
-        if port:
-            return port
-        return int((profile_dir / "DevToolsActivePort").read_text().splitlines()[0])
-    except (FileNotFoundError, IndexError, ValueError):
-        return None
-
-
-def _process_command(pid: int, *, proc_root: Path, platform: str) -> str:
-    """Read a process command from the host's process interface."""
-    proc_command = proc_root / str(pid) / "cmdline"
-    if proc_command.is_file() or platform != "darwin":
-        return proc_command.read_bytes().replace(b"\0", b" ").decode()
-    result = subprocess.run(  # noqa: S603 -- PID is parsed as an integer.
-        ["/bin/ps", "-p", str(pid), "-o", "command="],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode:
-        raise OSError(f"Could not inspect process {pid}.")
-    return result.stdout
-
-
-def _command_flag(command: str, marker: str) -> str | None:
-    """Extract a Chrome flag value from NUL- or space-flattened proc args."""
-    _, found, suffix = command.partition(marker)
-    if not found:
-        return None
-    return suffix.split(" --", 1)[0].strip()
-
-
-async def _close_browser_on_port(port: int) -> None:
-    browser = await zendriver.start(host="127.0.0.1", port=port)
-    await browser.stop()
-
-
-def _sandbox() -> bool:
-    """Whether to run Chrome sandboxed (yes, unless we are root).
-
-    Chrome's setuid sandbox refuses to start as root, so a root context (CI,
-    containers) must pass ``--no-sandbox``. A normal desktop user keeps the
-    sandbox -- disabling it there needlessly weakens security AND makes Chrome
-    show a persistent "unsupported command-line flag: --no-sandbox" banner.
-    """
-    return os.geteuid() != 0
-
-
-def _fetch_browser(*, platform: str = sys.platform) -> str:
-    """A Chrome that will not capture the user's link clicks.
-
-    On macOS a headless Chrome launched from the installed bundle registers
-    as ``com.google.Chrome`` and outranks the user's own windows, so
-    LaunchServices hands it every ``open https://...`` -- what a
-    command-click becomes -- and it drops them. Links stop opening
-    system-wide for the duration of a fetch, and ``open`` still exits 0.
-
-    No launch flag avoids this; only a different bundle id does, and it must
-    come from the vendor, since editing a copy's breaks Chrome's signature
-    and the kernel then kills it. Chrome for Testing ships as
-    ``com.google.chrome.for.testing``.
-
-    Args:
-      platform: Platform tag to resolve against; defaults to the running one.
-
-    Returns:
-      executable: Chrome for Testing path, or ``""`` when none is installed
-          and on every non-macOS host. ``zendriver.Config`` reads ``""`` as
-          "find Chrome yourself", so a miss costs click capture, not a fetch.
-
-    """
-    # Elsewhere a URL reaches a browser through xdg-open and the desktop
-    # file, never a running process, so there is no capture to prevent.
-    if platform != "darwin":
-        return ""
-    for candidate in _fetch_browser_candidates():
-        if candidate.is_file():
-            return str(candidate)
-    logger.debug("no Chrome for Testing found; falling back to zendriver's Chrome")
-    return ""
-
-
-def _fetch_browser_candidates() -> Iterator[Path]:
-    """Chrome for Testing binaries, newest build first.
-
-    Read from wherever Puppeteer or Playwright already downloaded one;
-    neither is a dependency, and nothing here installs a browser.
-    """
-    roots = (
-        # Puppeteer hardcodes ~/.cache on every platform, so this one does
-        # NOT follow the macOS convention that ``cache_dir()`` implements.
-        Path.home() / ".cache" / "puppeteer" / "chrome",
-        cache_dir() / "ms-playwright",
-    )
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for build in sorted(root.iterdir(), key=_build_order, reverse=True):
-            # Both arches: the tag names the download, and Rosetta runs an
-            # x64 build on Apple silicon.
-            yield from (
-                build / arch / name / "Contents" / "MacOS" / stem
-                for arch in ("chrome-mac-arm64", "chrome-mac-x64")
-                for name, stem in (
-                    ("Google Chrome for Testing.app", "Google Chrome for Testing"),
-                    ("Chromium.app", "Chromium"),
-                )
-            )
-
-
-def _build_order(build: Path) -> tuple[list[int], str]:
-    """Sort key ranking a download directory by version, newest highest.
-
-    Numeric, not lexical: these names carry a dotted version
-    (``mac_arm-147.0.7727.57``) or a bare revision (``chromium-1217``), and
-    comparing them as text ranks 99 above 100.
-    """
-    # The name second, so unversioned directories still order deterministically
-    # rather than by whatever iteration order the filesystem returns.
-    return [int(part) for part in re.findall(r"\d+", build.name)], build.name
-
-
-def _fetch_browser_args(
-    executable: str,
-    *,
-    mock_keychain: str = "--use-mock-keychain",
-) -> list[str]:
-    """Extra Chrome flags the fetch browser needs.
-
-    Args:
-      executable: Path from :func:`_fetch_browser`; ``""`` means stock Chrome.
-      mock_keychain: Encrypts cookies with a throwaway key. Chrome for Testing
-          otherwise blocks in startup on a Safe Storage keychain prompt, which
-          looks like a browser that launched but never exposed DevTools.
-
-    Returns:
-      args: Flags to append. Empty for stock Chrome, which owns a real
-          keychain entry that mocking would cut it off from.
-
-    """
-    return [mock_keychain] if executable else []
 
 
 class BrowserResult(NamedTuple):
@@ -463,734 +218,6 @@ def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
         clear_domain_cooldowns(domain)
 
 
-async def _open_instance(url: str, profile_dir: Path) -> None:
-    """Open a headed browser, navigate to ``url``, and block until it is closed."""
-    browser = await _launch_browser(profile_dir, headless=False)
-    try:
-        await _navigate_tab(browser, url)
-        # Block until the user closes the window (Chrome exits, so the browser reports
-        # stopped). Polled, not event-driven: the window-closed signal is Chrome's
-        # process exit, which zendriver exposes only as the polled ``stopped`` flag.
-        while not browser.stopped:  # noqa: ASYNC110 -- no event source; poll the flag.
-            await asyncio.sleep(0.5)
-    except BaseException:
-        await _stopped(browser)
-        raise
-
-
-async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> None:
-    """Stop ``browser``, giving up rather than waiting on a wedged connection.
-
-    ``Browser.stop`` awaits ``connection.send(cdp.browser.close())`` with no
-    ceiling; its own ``except Exception`` cannot cover this, because an await
-    that never returns raises nothing to catch. Unbounded, that turns a
-    reportable setup failure into a hang: this runs while the real error is in
-    flight, and nothing above supplies a deadline -- :func:`open_instance` calls
-    ``run`` with no ``timeout_sec``, which waits forever by contract.
-
-    ``budget_sec`` matches :meth:`_BrowserPool.shutdown`'s ceiling on the same
-    call. Long, deliberately: a healthy stop terminates Chrome and waits up to
-    3s for the process, so a tight bound would abandon live browsers that were
-    about to exit.
-
-    Every failure is swallowed, not just the timeout: this runs from an
-    ``except BaseException`` with the real error in flight, so anything raised
-    here REPLACES it -- the operator learns the browser would not close and
-    never learns why the page failed. Cleanup reports nothing over its caller.
-    """
-    try:
-        async with asyncio.timeout(budget_sec):
-            await browser.stop()
-    except TimeoutError:
-        logger.warning("browser stop timed out; killing the browser process")
-        _kill_browser_process(browser)
-    except Exception:
-        logger.warning(
-            "browser stop failed; killing the browser process", exc_info=True
-        )
-        _kill_browser_process(browser)
-
-
-def _kill_browser_process(browser: zendriver.Browser) -> None:
-    """SIGKILL a browser whose cooperative ``stop()`` did not complete.
-
-    Abandoning it instead leaks the whole Chrome tree: the process holds its
-    profile's ``SingletonLock``, so a later launch on that profile fails with
-    no usable diagnosis. Measured on a leaked tree: killing the root alone
-    took all ten of its processes with it, because Chrome's zygotes and
-    renderers die with the browser -- so signalling the root is sufficient and
-    no process-group handling is needed.
-
-    Signals through zendriver's ``Popen`` handle rather than the raw pid.
-    ``Popen.kill`` polls first and skips a process it has already reaped,
-    which is what makes this safe against the kernel recycling that pid onto
-    an unrelated process while a wedged ``stop()`` was still in flight.
-
-    Cleanup reports nothing over its caller, so every failure is swallowed:
-    this runs with the real error in flight.
-    """
-    process = getattr(browser, "_process", None)
-    if process is None:
-        return  # Never launched by us, or already cleared by a completed stop.
-    with contextlib.suppress(OSError):
-        process.kill()
-
-
-async def _launch_browser(
-    profile_dir: Path,
-    *,
-    headless: bool,
-) -> zendriver.Browser:
-    """Launch vanilla Chrome on the persistent profile."""
-    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
-    _tolerate_late_cdp_replies()
-    # Headed too, not just headless: an instance answering for
-    # ``com.google.Chrome`` takes the operator's links either way, and one
-    # rule is easier to keep true than a per-mode one.
-    executable = await asyncio.to_thread(_fetch_browser)
-    try:
-        return await zendriver.start(
-            zendriver.Config(
-                headless=headless,
-                user_data_dir=str(profile_dir),
-                sandbox=_sandbox(),
-                browser_executable_path=executable,
-                browser_args=_fetch_browser_args(executable),
-                # zendriver retries the DevTools connection ``max_tries`` times,
-                # each bounded by ``timeout``; the product is the launch's dead
-                # time when Chrome cannot connect. Healthy Chrome exposes
-                # DevTools in ~0.3s, so 0.5s clears it with margin while 6 tries
-                # cap a dead-browser launch at 3s -- a fast skip rather than the
-                # default 10x1.0s=10s hang that stacked past live-test timeouts.
-                browser_connection_timeout=0.5,
-                browser_connection_max_tries=6,
-            )
-        )
-    except Exception as error:
-        # zendriver raises a bare ``Exception`` when Chrome cannot start or the
-        # DevTools connection never comes up. Re-raise it typed so callers can
-        # tell "no usable browser here" apart from a fetch/parse failure.
-        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
-
-
-def _tolerate_late_cdp_replies() -> None:
-    """Make zendriver drop a CDP reply whose transaction already finished.
-
-    ``Transaction.__call__`` calls ``set_result`` unconditionally, so a reply
-    that lands after its future was CANCELLED raises ``InvalidStateError`` --
-    inside ``Listener.listener_loop``, which kills the listener task for the
-    whole connection. Every fetch here is
-    cancellable by construction (:func:`_navigate` wraps the navigation in
-    ``asyncio.timeout``), and Chrome answers the in-flight ``Page.navigate``
-    afterwards, so the race is not exotic: it is what a timed-out fetch does.
-
-    The damage outlives the fetch that caused it. A dead listener stops
-    dispatching CDP replies AND events, so the pooled browser is silently deaf
-    to every later fetch -- the visible symptom is only the "Task exception was
-    never retrieved" traceback pytest prints at teardown.
-
-    Armed on the launch path, before any CDP traffic exists, and idempotent so
-    repeated launches patch once. Upstream carries the same fix as PR #242,
-    which was auto-closed for inactivity rather than merged.
-
-    References:
-      https://github.com/cdpdriver/zendriver/pull/242
-
-    """
-    # Reached through the module, not bound at import: ``zendriver`` here is a
-    # ``lazy_import`` proxy, and a proxied CLASS answers ``__call__`` with its
-    # own construction hook rather than the class attribute -- patching that
-    # leaves the real ``Transaction`` untouched.
-    transaction = zendriver.core.connection.Transaction
-    vendor = cast(Callable[..., None], transaction.__call__)
-    # Keyed on the DEFINING module, so a second launch does not stack a second
-    # wrapper: an armed class carries this module's function.
-    if vendor.__module__ == __name__:
-        return
-
-    def call(self: zendriver.core.connection.Transaction, **response: Any) -> None:
-        if not self.done():
-            vendor(self, **response)
-
-    transaction.__call__ = call
-
-
-async def _navigate_tab(
-    browser: zendriver.Browser,
-    url: str,
-    *,
-    headers: dict[str, str] | None = None,
-    trust: Trust = "untrusted",
-    max_redirects: int = 10,
-    on_redirect: Callable[[str], None] | None = None,
-) -> zendriver.Tab:
-    """Open a blank tab, arm the per-request guard, apply headers, navigate."""
-    tab = await browser.get("about:blank", new_tab=True)
-    try:
-        await _guard_requests(
-            tab,
-            url,
-            trust=trust,
-            on_redirect=on_redirect,
-            max_redirects=max_redirects,
-            headers=headers,
-        )
-        # Installed tab-wide are ONLY the headers no origin owns. An
-        # origin-bound one (a credential, an extended client hint) is attached
-        # by the guard, per document hop, to the origin entitled to it:
-        # ``set_extra_http_headers`` reaches every request the tab makes,
-        # including the cross-origin subresources the guard never sees.
-        ambient = {
-            name: value
-            for name, value in (headers or {}).items()
-            if name.lower() not in _origin_bound()
-        }
-        if ambient:
-            await tab.send(zendriver.cdp.network.enable())
-            await tab.send(
-                zendriver.cdp.network.set_extra_http_headers(
-                    zendriver.cdp.network.Headers(ambient)
-                )
-            )
-        await tab.get(url)
-        await tab.wait_for_ready_state("complete")
-    except BaseException:
-        await _closed(tab)
-        raise
-    return tab
-
-
-async def _closed(tab: zendriver.Tab, *, budget_sec: float = 5.0) -> None:
-    """Close ``tab``, giving up rather than waiting on a wedged connection.
-
-    ``Tab.close`` awaits ``Target.closeTarget``'s reply with no ceiling of its
-    own, so a connection that stopped answering parks here forever. That is
-    survivable only while the caller can still be cancelled -- and on every path
-    that reaches here from a CANCELLED body it cannot: an ``asyncio.timeout``
-    scope delivers exactly one cancellation, the body consumed it, and this
-    cleanup runs unguarded. The enclosing coroutine then never completes, so its
-    ``TimeoutError`` is never raised and the caller waits out
-    :func:`fetch_zendriver`'s ``timeout_sec + 30`` for a wall-less one instead.
-
-    ``shield`` is what makes the bound real here: the cleanup often runs with a
-    cancellation already in flight, and an unshielded await would re-deliver it
-    to the close rather than time the close out.
-
-    An abandoned close is CANCELLED AND AWAITED, never merely cancelled:
-    ``cancel`` only requests it, so returning straight after leaves the task
-    pending on a loop that outlives this call -- the pool's loop runs forever
-    (see :meth:`_BrowserPool._run_loop`), so the task finalizes late or not at
-    all and raises into a loop nobody is watching. Under ``asyncio.run`` the
-    loop dies immediately, which is why a test on one cannot see this.
-
-    Every failure is swallowed, not just the timeout: this runs from
-    :func:`_navigate`'s ``finally`` and :func:`_navigate_tab`'s ``except``, so
-    anything raised here replaces the result or error the caller was about to
-    see. Cleanup reports nothing over its caller.
-
-    Args:
-      tab: The tab to close.
-      budget_sec: Seconds allowed for the teardown. Bounds a wedged CDP
-        connection without racing a healthy close, which is one round trip on a
-        live socket.
-
-    """
-    task = asyncio.ensure_future(tab.close())
-    try:
-        async with asyncio.timeout(budget_sec):
-            await asyncio.shield(task)
-    except TimeoutError:
-        task.cancel()
-        # Shielded again: this await inherits any cancellation already in
-        # flight, and re-delivering it here would abandon the reaping too.
-        await asyncio.gather(asyncio.shield(task), return_exceptions=True)
-        logger.debug("tab close timed out; abandoning the tab")
-    except Exception:
-        logger.debug("tab close failed; abandoning the tab", exc_info=True)
-
-
-async def _guard_requests(
-    tab: zendriver.Tab,
-    url: str,
-    *,
-    trust: Trust,
-    on_redirect: Callable[[str], None] | None,
-    max_redirects: int,
-    headers: dict[str, str] | None = None,
-) -> None:
-    """Validate every DOCUMENT request this tab makes BEFORE Chrome connects.
-
-    The header transports re-validate each redirect hop (``curl.py`` and
-    ``stdlib.py`` both call :func:`pinned_host` per hop) because
-    :func:`wesearch.fetch.common.pinned_host` states the rule: a redirect
-    target is a URL like any other, and skipping the re-check is the classic
-    SSRF bypass. Chrome follows redirects ITSELF, so validating only the URL the
-    caller passed left every subsequent hop -- and every subresource -- reaching
-    the network with nothing watching. A public URL redirecting to
-    ``169.254.169.254`` or loopback was fetched, and the transport learned of it
-    only after the response had already been read.
-
-    ``Fetch.requestPaused`` is the one seam that runs before the connection, so
-    the same ``pinned_host`` that guards curl guards Chrome, and ``on_redirect``
-    regains the pre-follow abort :class:`~wesearch.types.params.ObserveParams`
-    documents. A rejected request is failed with ``AccessDenied`` rather than
-    silently continued: Chrome surfaces that as a navigation error, which is the
-    honest outcome for a target policy forbids.
-
-    ``max_redirects`` is enforced here for the same structural reason: Chrome
-    follows hops itself, so this handler is the only place that can refuse one.
-    Without it the browser leg silently ignored a budget both header transports
-    honor, and ``RetryParams`` documents as "0 disables".
-    """
-    # Fragment stripped: it never reaches the wire, so the initial request would
-    # compare unequal and read as a redirect.
-    origin_url = urlunsplit(urlsplit(url)._replace(fragment=""))
-    # Captured here, where a running loop is guaranteed: zendriver invokes the
-    # handler from its own connection thread, which has no running loop of its
-    # own, so a ``get_running_loop`` inside the callback raises.
-    loop = asyncio.get_running_loop()
-    # Where the tab is NOW, not the one URL the caller named. A hop is a
-    # document request that moves off the CURRENT document, which only a
-    # running position can answer: measured against the origin spelling
-    # forever, Chrome's own canonicalization of the initial URL reads as a
-    # redirect, and a genuine hop back to the start reads as none. Mutable
-    # state is safe here -- zendriver dispatches every event for one connection
-    # on a single thread.
-    position = [origin_url]
-    followed = [0]
-
-    def on_paused(event: object, *_unused: object) -> None:
-        # Two-arg tolerant and isinstance-guarded for the same reasons as
-        # ``_main_frame_navigations``: zendriver retries a one-arg callback
-        # through an exception path, and dispatches by ``type(event)``.
-        if not isinstance(event, zendriver.cdp.fetch.RequestPaused):
-            return
-        target = event.request.url
-        # Interception is scoped to documents (see the pattern below), so every
-        # event here is a navigation; only one that LEAVES the current document
-        # is a redirect the caller should hear about.
-        is_hop = not _same_document(target, position[0])
-        position[0] = target
-        if is_hop:
-            followed[0] += 1
-            if followed[0] > max_redirects:
-                # Refused exactly like a forbidden host: Chrome reports it as a
-                # navigation error, which is the honest outcome for a hop the
-                # caller's budget does not cover.
-                logger.debug(
-                    "redirect budget of %d exhausted at %r", max_redirects, target
-                )
-                _dispatch(loop, tab, _fail(event.request_id))
-                return
-        try:
-            pinned_host(target, trust)
-            if is_hop and on_redirect is not None:
-                on_redirect(target)
-        except Exception:  # noqa: BLE001 -- any refusal aborts the request.
-            # ``on_redirect`` is documented as "raise to abort", so its
-            # exception is a decision, not a fault, and is handled identically
-            # to a failed host validation.
-            _dispatch(loop, tab, _fail(event.request_id))
-            return
-        _dispatch(
-            loop,
-            tab,
-            _continue(
-                event.request_id,
-                _carried_headers(event.request.headers, headers, target, origin_url),
-            ),
-        )
-
-    event_type = zendriver.cdp.fetch.RequestPaused
-    register = cast(
-        Callable[[type[object], Callable[..., None]], None], tab.add_handler
-    )
-    register(event_type, on_paused)
-    # DOCUMENT requests only. Intercepting everything pauses each subresource
-    # until this handler answers, and the answer costs a DNS resolution on
-    # zendriver's connection thread -- measured as a page that never finished
-    # loading (Google's live fetch timed out waiting for readyState). Documents
-    # are also the whole SSRF surface: a redirect chain is documents, and a
-    # subresource cannot redirect the NAVIGATION anywhere.
-    pattern = zendriver.cdp.fetch.RequestPattern(
-        url_pattern="*",
-        resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
-        request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
-    )
-    await tab.send(zendriver.cdp.fetch.enable(patterns=[pattern]))
-
-
-def _same_document(target: str, current: str) -> bool:
-    """Whether ``target`` is the document already at ``current``, not a hop.
-
-    Compares what the WIRE carries, so the differences Chrome introduces on its
-    way there are not mistaken for a redirect:
-
-    - The fragment never leaves the client, so ``/page#a`` requests ``/page``.
-    - An empty path is canonicalized to ``/``, so ``https://host`` requests
-      ``https://host/``.
-
-    Both were measured reporting a spurious first hop, and ``on_redirect`` is
-    raise-to-abort -- Google's raises on ``/sorry`` -- so a false hop aborts an
-    ordinary fetch.
-    """
-    return _wire_url(target) == _wire_url(current)
-
-
-def _wire_url(url: str) -> str:
-    """Return ``url`` as it goes on the wire: no fragment, path never empty."""
-    parts = urlsplit(url)
-    return urlunsplit(parts._replace(fragment="", path=parts.path or "/"))
-
-
-def _fail(request_id: object) -> object:
-    """The CDP verb refusing one intercepted request."""
-    return zendriver.cdp.fetch.fail_request(
-        cast(Any, request_id), zendriver.cdp.network.ErrorReason.ACCESS_DENIED
-    )
-
-
-def _continue(request_id: object, headers: list[object] | None) -> object:
-    """The CDP verb releasing one intercepted request, optionally overriding headers.
-
-    ``headers=None`` sends no override, which is NOT the same as echoing the
-    request's own headers back. An override is unreliable in two documented
-    ways, and both bite a challenge handoff:
-
-    - It is applied INTERMITTENTLY to ``Cookie`` (crbug 40762053: "setting the
-      cookie header override is intermittent -- only 3 of 21 requests ... have
-      the cookie override"). A clearance cookie that rides only sometimes reads
-      as a client that never solved the challenge.
-    - It does "not extend to subsequent redirect hops" (CDP ``Fetch``
-      docs), and the clear IS a redirect chain -- measured as GET, POST, GET.
-
-    So an echo is strictly worse than silence: it can only subtract. Measured
-    on one live Cloudflare-fronted URL, interleaved against the no-override
-    control on a fresh egress, the echo served the wall every run and the
-    omission served the page every run.
-    """
-    if headers is None:
-        return zendriver.cdp.fetch.continue_request(cast(Any, request_id))
-    return zendriver.cdp.fetch.continue_request(
-        cast(Any, request_id), headers=cast(Any, headers)
-    )
-
-
-def _carried_headers(
-    request_headers: Mapping[str, str],
-    caller_headers: dict[str, str] | None,
-    target: str,
-    origin_url: str,
-) -> list[object] | None:
-    """Return the header OVERRIDE for this hop, or ``None`` to send none.
-
-    An origin-bound header is never installed tab-wide (see
-    :func:`_navigate_tab`), so it must be attached HERE, and only for a hop that
-    stays on the origin it was seeded for.
-
-    Adding nothing yields ``None`` rather than an echo of ``request_headers``:
-    an override is applied unreliably and does not survive a redirect hop (see
-    :func:`_continue`), so echoing headers back can only lose them. The
-    withholding case is ``None`` too -- a cross-origin hop never carried the
-    credential, since it was never installed tab-wide, so there is nothing here
-    to remove.
-
-    An override that DOES fire is therefore reserved for the one case worth its
-    unreliability: a caller credential the tab cannot hold. It is not a way to
-    restore Chrome's own headers -- interception already costs every client
-    hint (measured: a guarded navigation sends no ``sec-ch-ua`` at all, with or
-    without an override), and no CDP verb adds one header without replacing the
-    set.
-
-    Args:
-      request_headers: What Chrome already reports on the paused request.
-      caller_headers: The headers the caller asked this fetch to carry.
-      target: The URL this hop will fetch.
-      origin_url: The URL the caller named, fragment stripped.
-
-    Returns:
-      entries: The CDP header list to override with, or ``None`` for no override.
-
-    """
-    if not caller_headers or origin(target) != origin(origin_url):
-        return None
-    bound = _origin_bound()
-    entitled = {
-        name: value for name, value in caller_headers.items() if name.lower() in bound
-    }
-    if not entitled:
-        return None
-    # Merged case-INSENSITIVELY, unlike a plain dict union: field names are
-    # case-insensitive on the wire but not as dict keys, and Chrome reports the
-    # paused request Title-Cased, so a caller's lower-case "cookie" beside
-    # Chrome's "Cookie" emitted the header twice. ``fetch.py`` collapses the
-    # same collision on the curl leg for the same reason -- two Cookie lines
-    # are a bot tell. The caller's value wins, matching that leg's
-    # ``set_session_cookies``.
-    replaced = {name.lower() for name in entitled}
-    kept = {
-        name: value
-        for name, value in request_headers.items()
-        if name.lower() not in replaced
-    }
-    return _header_entries(kept | entitled)
-
-
-def _origin_bound() -> frozenset[str]:
-    """The header names a cross-origin hop may not carry.
-
-    Read off :func:`~wesearch.fetch.common.apply_redirect`'s own default
-    rather than restated: Chrome follows its own redirects, so this transport
-    applies the rule itself instead of through that function, and a second copy
-    is how the two legs came to disagree.
-
-    Only ``authorization`` and ``cookie`` are live here. The set also names the
-    extended client hints, which matter on the header transports because THOSE
-    build the hints themselves; an intercepted navigation carries none to begin
-    with (measured: zero ``sec-ch-ua`` headers reach the wire, with or without
-    an override), so for this leg those entries are inert. Borrowing the shared
-    set anyway is deliberate -- it cannot drift from the contract, and a hint
-    that Chrome someday does emit under interception is then already covered.
-    """
-    default = inspect.signature(apply_redirect).parameters["origin_bound"].default
-    assert isinstance(default, frozenset)
-    return cast(frozenset[str], default)
-
-
-def _header_entries(headers: Mapping[str, str]) -> list[object]:
-    """Render a header mapping as the CDP ``HeaderEntry`` list."""
-    return [
-        cast(object, zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
-        for name, value in headers.items()
-    ]
-
-
-def _dispatch(
-    loop: asyncio.AbstractEventLoop, tab: zendriver.Tab, command: object
-) -> None:
-    """Send a CDP command from the synchronous event-handler thread.
-
-    The handler is invoked by zendriver's callback machinery, which is not a
-    coroutine context, so the command is scheduled on the tab's own loop rather
-    than awaited here. A handler that blocked on the send would deadlock the
-    connection it is trying to answer.
-    """
-    coroutine = tab.send(cast(Any, command))
-    if loop.is_closed():
-        coroutine.close()  # Nothing left to answer; do not warn on a stray task.
-        return
-    # ``call_soon_threadsafe``, not ``create_task``: the callback runs on
-    # zendriver's connection thread, and creating a task on another thread's
-    # loop is not safe.
-    loop.call_soon_threadsafe(lambda: loop.create_task(coroutine))
-
-
-def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
-    """Return an Event set whenever the MAIN frame commits a new document.
-
-    Chrome fires ``FrameNavigated`` for every frame, and a challenge page is
-    dense with sub-frames (the Turnstile widget alone accounts for most of the
-    17 events one interstitial emits). Only the main frame -- the one with no
-    parent -- means "the document you are reading was replaced".
-    """
-    navigated = asyncio.Event()
-    # Captured here: the handler below runs on a thread with no running loop.
-    loop = asyncio.get_running_loop()
-
-    # Two-arg tolerant on purpose: zendriver calls a handler as
-    # ``callback(event, connection)`` and retries as ``callback(event)`` only
-    # after catching TypeError. A one-arg signature reaches the handler through
-    # that exception path, where a TypeError raised INSIDE the handler is
-    # indistinguishable from the arity mismatch and silently re-runs it.
-    #
-    # ``isinstance`` rather than a bare attribute read: zendriver dispatches on
-    # ``type(event)`` (connection.py), yet a live run delivered a
-    # ``FrameStartedLoading`` here and the handler raised AttributeError inside
-    # zendriver's callback thread. That exception cannot fail the fetch -- it is
-    # logged and swallowed -- so the cost is a silent miss of the wakeup this
-    # exists to deliver, not a crash. Guarding the shape is cheap; the event
-    # this cares about is the one with a frame.
-    def on_navigated(event: object, *_unused: object) -> None:
-        if (
-            isinstance(event, zendriver.cdp.page.FrameNavigated)
-            and event.frame.parent_id is None
-        ):
-            # Not a bare ``set()``: zendriver runs this handler off-loop, and a
-            # cross-thread set flips the flag without waking the selector.
-            loop.call_soon_threadsafe(navigated.set)
-
-    # zendriver annotates this parameter as a bare ``Callable`` -- i.e.
-    # ``Callable[..., Unknown]`` -- under a suppression of its own in
-    # connection.py, so the bound method is partially unknown before an argument
-    # is even passed. A stub cannot repair it in place: ``add_handler`` is
-    # inherited from ``Connection``, and a partial ``.pyi`` for that class would
-    # blank its other 66 members. Naming the real contract at this one call site
-    # is the narrowest fix, and it keeps ``event.frame.parent_id`` checked above.
-    event_type = zendriver.cdp.page.FrameNavigated
-    register = cast(
-        Callable[[type[object], Callable[..., None]], None], tab.add_handler
-    )
-    register(event_type, on_navigated)
-    return navigated
-
-
-async def _settled_content(tab: zendriver.Tab, *, budget_sec: float) -> str:
-    """Return the tab's HTML once it is no longer a challenge interstitial.
-
-    A single load event is not the end of a challenge-walled fetch. The
-    interstitial is itself a complete document: it reaches ``readyState ==
-    "complete"``, THEN its JS navigates the tab to the real page. Measured on
-    one live URL::
-
-        t=0.00s   5516 bytes  challenge   readyState=complete   <- interstitial
-        t=1.10s    386 bytes  clear       readyState=loading    <- real doc parsing
-        t=2.20s 380404 bytes  clear       readyState=complete   <- the page
-
-    Both intermediate states are traps. Harvesting at the first ``complete``
-    returns the wall; harvesting the moment the challenge markup disappears
-    returns a 386-byte ``<head>`` whose title looks right and whose body is
-    empty. So each iteration waits for a real main-frame navigation and THEN
-    for that new document to finish parsing -- never for a duration.
-
-    This is event-driven rather than polled deliberately: Chrome already knows
-    when it replaced the document, so sampling the DOM on a timer both guesses
-    at an interval and can only ever observe the states its grid lands on (the
-    386-byte phase is exactly such a miss). One wait per real transition, no
-    sampling rate to tune.
-
-    ``on_success_body=True`` is load-bearing: this body came from a browser that
-    rendered the page, so a generic CAPTCHA widget in it is ordinary furniture
-    (a login form's reCAPTCHA), not proof of a wall. Only structural
-    interstitial evidence means "this document is about to replace itself".
-
-    ``budget_sec`` bounds a challenge that never clears -- a real block rather
-    than a delay -- and must stay under the caller's overall fetch timeout, so a
-    walled page surfaces the wall instead of raising ``TimeoutError``. The last
-    body read is returned for the caller's classifier to judge; this layer
-    decides only WHEN the page stopped changing, never what it means.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + budget_sec
-    navigated = _main_frame_navigations(tab)
-    while True:
-        # Cleared BEFORE the read, never after: a navigation that commits
-        # between reading the body and starting the wait must still count. Clear
-        # afterwards and that wakeup is dropped, so a page that cleared in the
-        # gap blocks for the whole budget -- the classic lost-wakeup.
-        navigated.clear()
-        body = await tab.get_content()
-        if classify_challenge(body, on_success_body=True) is None:
-            return body
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            return body
-        try:
-            await asyncio.wait_for(navigated.wait(), timeout=remaining)
-            # The navigation only COMMITS the new document; its markup arrives as
-            # it parses. Without this the next read catches the half-built
-            # 386-byte phase above -- right title, empty body.
-            #
-            # Bounded by the SAME deadline as the wait above, not left open: a
-            # document that commits just before the deadline and then stalls
-            # would otherwise park here with no ceiling of its own, spending the
-            # caller's entire fetch timeout. That is precisely what ``budget_sec``
-            # promises not to do -- give up in time to return the last body and
-            # let the caller classify the wall.
-            await asyncio.wait_for(
-                tab.wait_for_ready_state("complete"),
-                timeout=max(deadline - loop.time(), 0.0),
-            )
-        except TimeoutError:
-            return await tab.get_content()
-
-
-async def _navigate(
-    url: str,
-    *,
-    profile_dir: Path,
-    egress: str,
-    timeout_sec: float,
-    headless: bool,
-    headers: dict[str, str] | None = None,
-    cookies: dict[str, str] | None = None,
-    trust: Trust = "untrusted",
-    max_redirects: int = 10,
-    on_redirect: Callable[[str], None] | None = None,
-) -> BrowserResult:
-    """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies.
-
-    Each fetch runs in its OWN tab that is CLOSED when the fetch returns. The
-    Chrome process stays warm in the pool (fast reuse), but the tab -- which
-    holds the scraped page's DOM, JS heap, and images -- is the unit of memory
-    teardown, so a sequence of fetches does not accumulate resident pages. A
-    per-fetch tab also isolates concurrent fetches sharing the one browser.
-
-    Readiness is Chrome's real load signal (``document.readyState ==
-    "complete"``) plus :func:`_settled_content` for the interstitial that
-    outlives it, bounded by ``timeout_sec``. The transport returns what Chrome
-    rendered without assigning provider semantics to it.
-    """
-    async with asyncio.timeout(timeout_sec):
-        browser = await _pool().browser(egress, profile_dir, headless=headless)
-        if cookies:
-            await browser.cookies.set_all(
-                [
-                    zendriver.cdp.network.CookieParam(
-                        name=name,
-                        value=value,
-                        url=url,
-                    )
-                    for name, value in cookies.items()
-                ]
-            )
-        tab = await _navigate_tab(
-            browser,
-            url,
-            headers=headers,
-            trust=trust,
-            max_redirects=max_redirects,
-            on_redirect=on_redirect,
-        )
-        try:
-            # Half the overall budget: the settle poll must be able to give up
-            # and still leave time to harvest cookies and return the wall, so a
-            # blocked page surfaces its BotDetectionError instead of a timeout.
-            body = await _settled_content(tab, budget_sec=timeout_sec / 2)
-            final_url = cast(str, await tab.evaluate("document.location.href")) or url
-            # Cookies are browser-wide (shared jar), so harvest before closing the
-            # tab; the closed tab's cookies persist in the profile regardless.
-            #
-            # Keyed on the FINAL url, not the requested one: a cross-origin
-            # redirect seats the target's cookies, and filtering by the source
-            # host dropped exactly the cookies a following fetch to the target
-            # needs. ``on_redirect`` already fired per hop in the guard, before
-            # each was followed.
-            harvested = await _domain_cookies(browser, final_url)
-        finally:
-            await _closed(tab)
-    return BrowserResult(
-        body=_unwrap_viewer(body).encode(), cookies=harvested, final_url=final_url
-    )
-
-
-def _unwrap_viewer(body: str) -> str:
-    """Return the original payload when Chrome wrapped it in its viewer shell.
-
-    ``get_content`` serializes the DOM, and a non-HTML response has no DOM of
-    its own -- Chrome SYNTHESIZES one to display it, re-emitting the bytes
-    inside ``<pre>`` under a generated ``<head>``. A caller that asked a JSON
-    endpoint for JSON would otherwise receive markup wrapped around valid data
-    and fail to parse it, reporting a malformed response the server never sent.
-
-    Matched on the synthesized shell specifically, not on "contains a ``<pre>``":
-    a real HTML page carrying a code sample must come back whole.
-    """
-    match = _VIEWER_SHELL.match(body.strip())
-    if match is None:
-        return body
-    return unescape(match.group("payload"))
-
-
 # Chrome's generated viewer: a color-scheme meta it inserts itself, then the
 # payload as the document's ONLY content. Anchored at both ends so a real page
 # that merely opens with a <pre> does not match.
@@ -1205,45 +232,83 @@ _VIEWER_SHELL = re.compile(
 )
 
 
-async def _domain_cookies(browser: zendriver.Browser, url: str) -> dict[str, str]:
-    """Return the browser's cookies whose domain matches ``url``'s host."""
-    host = urlparse(url).hostname or ""
-    jar: dict[str, str] = {}
-    for cookie in await browser.cookies.get_all():
-        domain = (cookie.domain or "").lstrip(".")
-        if domain and (host == domain or host.endswith(f".{domain}")):
-            jar[cookie.name] = cookie.value or ""
-    return jar
+# Numeric, not lexical: these names carry a dotted version (``mac_arm-147.0.7727.57``)
+# or a bare revision (``chromium-1217``), and comparing them as text ranks 99 above 100.
+def _build_order(build: Path) -> tuple[list[int], str]:
+    """Sort key ranking a download directory by version, newest highest."""
+    # The name second, so unversioned directories still order deterministically
+    # rather than by whatever iteration order the filesystem returns.
+    return [int(part) for part in re.findall(r"\d+", build.name)], build.name
 
 
-# The single pooled browser manager, built once on first browser fetch. A
-# deliberate module singleton: it owns a live loop thread and open Chrome
-# processes -- shared runtime resources, not a tunable.
-# config-globals: ignore -- live pool of open browsers + its loop thread.
-_pool_singleton: _BrowserPool | None = None
-_pool_lock = threading.Lock()  # config-globals: ignore -- guards the singleton.
+def _process_command(pid: int, *, proc_root: Path, platform: str) -> str:
+    """Read a process command from the host's process interface."""
+    proc_command = proc_root / str(pid) / "cmdline"
+    if proc_command.is_file() or platform != "darwin":
+        return proc_command.read_bytes().replace(b"\0", b" ").decode()
+    result = subprocess.run(  # noqa: S603 -- PID is parsed as an integer.
+        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise OSError(f"Could not inspect process {pid}.")
+    return result.stdout
 
 
-def _pool() -> _BrowserPool:
-    """Return the process-wide browser pool, creating it once.
+class _PoolControlHandler(socketserver.StreamRequestHandler):
+    @override
+    def handle(self) -> None:
+        if self.rfile.readline(64) != b"release\n":
+            return
+        cast(_PoolControlServer, self.server).release()
 
-    Registers teardown WITH the pool that needs it, on the one path that can
-    create one. A browser is ~70 MB across ~17 processes and nothing else ever
-    closes one, so a process that exits without this leaves every browser it
-    opened resident: measured at 378 processes holding 27.5 GiB, 225 of them
-    older than the session that spawned them.
 
-    ``atexit`` and not a parent-death signal, because the exit that leaked was
-    an ORDINARY one -- pytest finished normally. It fires here under plain
-    pytest and under `xdist -n=2` (both measured), and can still drive the
-    pool's daemon loop thread, which is alive until interpreter teardown.
-    """
-    global _pool_singleton  # noqa: PLW0603 -- memoize the shared pool.
-    with _pool_lock:
-        if _pool_singleton is None:
-            _pool_singleton = _BrowserPool()
-            atexit.register(shutdown_browsers)
-        return _pool_singleton
+async def _close_browser_on_port(port: int) -> None:
+    browser = await zendriver.start(host="127.0.0.1", port=port)
+    await browser.stop()
+
+
+# Chrome's setuid sandbox refuses to start as root, so a root context (CI, containers)
+# must pass ``--no-sandbox``. A normal desktop user keeps the sandbox -- disabling it
+# there needlessly weakens security AND makes Chrome show a persistent "unsupported
+# command-line flag: --no-sandbox" banner.
+def _sandbox() -> bool:
+    """Whether to run Chrome sandboxed (yes, unless we are root)."""
+    return os.geteuid() != 0
+
+
+def _command_flag(command: str, marker: str) -> str | None:
+    """Extract a Chrome flag value from NUL- or space-flattened proc args."""
+    _, found, suffix = command.partition(marker)
+    if not found:
+        return None
+    return suffix.split(" --", 1)[0].strip()
+
+
+def _close_orphan_browser(profile_dir: Path) -> None:
+    """Close a live Chrome whose owning pool no longer serves control."""
+    port = _devtools_port(profile_dir)
+    if port is None:
+        return
+    try:
+        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+    except OSError:
+        return
+    connection.close()
+    asyncio.run(_close_browser_on_port(port))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            connection = socket.create_connection(("127.0.0.1", port), timeout=0.1)
+        except OSError:
+            return
+        connection.close()
+        time.sleep(0.05)
+    # A capability condition, not a fetch fault: it blocks every later browser
+    # fetch, so it must be the error such callers already catch.
+    raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
 
 
 class _BrowserPool:
@@ -1307,7 +372,17 @@ class _BrowserPool:
         *,
         headless: bool,
     ) -> zendriver.Browser:
-        """Return the warm browser for one egress and profile."""
+        """Return the warm browser for one egress and profile.
+
+        Args:
+          egress: Egress IP or identifier string.
+          profile_dir: Chrome user-data directory path.
+          headless: Whether to launch headless (vs headed).
+
+        Returns:
+          browser: Warm zendriver.Browser instance, cached or launched.
+
+        """
         # Resolved, matching ``_control_address``: two spellings of one profile
         # are one user-data dir, and Chrome allows it a single owner.
         key = (egress, str(profile_dir.resolve()))  # noqa: ASYNC240 -- one stat
@@ -1390,18 +465,16 @@ class _BrowserPool:
         """Launch one Chrome under ``profile_dir`` on the pool's loop."""
         return await _launch_browser(profile_dir, headless=headless)
 
+    # zendriver's CDP dispatch calls the deprecated ``asyncio.iscoroutinefunction``
+    # (connection.py) and leaves reader pipes for the GC to close, emitting a
+    # ``DeprecationWarning`` / ``ResourceWarning`` from inside the browser coroutine.
+    # Under a ``-W error`` caller (the repo's pytest turns every warning into an
+    # exception) that warning would raise INSIDE the awaited CDP handler and wedge the
+    # fetch. The pool loop thread runs only zendriver coroutines, so scoping the filter
+    # to this thread's ``run_forever`` mutes the upstream noise without hiding warnings
+    # from any caller's own code.
     def _run_loop(self) -> None:
-        """Run the pool's loop until :meth:`shutdown`, muting zendriver's warnings.
-
-        zendriver's CDP dispatch calls the deprecated ``asyncio.iscoroutinefunction``
-        (connection.py) and leaves reader pipes for the GC to close, emitting a
-        ``DeprecationWarning`` / ``ResourceWarning`` from inside the browser
-        coroutine. Under a ``-W error`` caller (the repo's pytest turns every
-        warning into an exception) that warning would raise INSIDE the awaited CDP
-        handler and wedge the fetch. The pool loop thread runs only zendriver
-        coroutines, so scoping the filter to this thread's ``run_forever`` mutes
-        the upstream noise without hiding warnings from any caller's own code.
-        """
+        """Run the pool's loop until :meth:`shutdown`, muting zendriver's warnings."""
         asyncio.set_event_loop(self._loop)
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -1413,8 +486,251 @@ class _BrowserPool:
             self._loop.run_forever()
 
 
+# ``Transaction.__call__`` calls ``set_result`` unconditionally, so a reply that lands
+# after its future was CANCELLED raises ``InvalidStateError`` -- inside
+# ``Listener.listener_loop``, which kills the listener task for the whole connection.
+# Every fetch here is cancellable by construction (:func:`_navigate` wraps the
+# navigation in ``asyncio.timeout``), and Chrome answers the in-flight ``Page.navigate``
+# afterwards, so the race is not exotic: it is what a timed-out fetch does.
+#
+# The damage outlives the fetch that caused it. A dead listener stops dispatching CDP
+# replies AND events, so the pooled browser is silently deaf to every later fetch -- the
+# visible symptom is only the "Task exception was never retrieved" traceback pytest
+# prints at teardown.
+#
+# Armed on the launch path, before any CDP traffic exists, and idempotent so repeated
+# launches patch once. Upstream carries the same fix as PR #242, which was auto-closed
+# for inactivity rather than merged.
+def _tolerate_late_cdp_replies() -> None:
+    """Make zendriver drop a CDP reply whose transaction already finished."""
+    # Reached through the module, not bound at import: ``zendriver`` here is a
+    # ``lazy_import`` proxy, and a proxied CLASS answers ``__call__`` with its
+    # own construction hook rather than the class attribute -- patching that
+    # leaves the real ``Transaction`` untouched.
+    transaction = zendriver.core.connection.Transaction
+    vendor = cast(Callable[..., None], transaction.__call__)
+    # Keyed on the DEFINING module, so a second launch does not stack a second
+    # wrapper: an armed class carries this module's function.
+    if vendor.__module__ == __name__:
+        return
+
+    def call(self: zendriver.core.connection.Transaction, **response: object) -> None:
+        if not self.done():
+            vendor(self, **response)
+
+    transaction.__call__ = call
+
+
+async def _launch_browser(
+    profile_dir: Path,
+    *,
+    headless: bool,
+) -> zendriver.Browser:
+    """Launch vanilla Chrome on the persistent profile."""
+    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
+    _tolerate_late_cdp_replies()
+    # Headed too, not just headless: an instance answering for
+    # ``com.google.Chrome`` takes the operator's links either way, and one
+    # rule is easier to keep true than a per-mode one.
+    executable = await asyncio.to_thread(_fetch_browser)
+    try:
+        return await zendriver.start(
+            zendriver.Config(
+                headless=headless,
+                user_data_dir=str(profile_dir),
+                sandbox=_sandbox(),
+                browser_executable_path=executable,
+                browser_args=_fetch_browser_args(executable),
+                # ``zendriver`` retries the DevTools connection ``max_tries`` times,
+                # each bounded by ``timeout``; the product is the launch's dead
+                # time when Chrome cannot connect. Healthy Chrome exposes
+                # DevTools in ~0.3s, so 0.5s clears it with margin while 6 tries
+                # cap a dead-browser launch at 3s -- a fast skip rather than the
+                # default 10x1.0s=10s hang that stacked past live-test timeouts.
+                browser_connection_timeout=0.5,
+                browser_connection_max_tries=6,
+            )
+        )
+    except Exception as error:
+        # ``zendriver`` raises a bare ``Exception`` when Chrome cannot start or the
+        # DevTools connection never comes up. Re-raise it typed so callers can
+        # tell "no usable browser here" apart from a fetch/parse failure.
+        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
+
+
+def _control_address(profile_dir: Path, platform: str = sys.platform) -> str:
+    """Return the Unix-socket address coordinating one profile."""
+    digest = hashlib.sha256(str(profile_dir.resolve()).encode()).hexdigest()[:24]
+    if platform == "linux":
+        return f"\0loop-zendriver-{digest}"
+    return str(Path(tempfile.gettempdir()) / f"loop-zd-{digest}.sock")
+
+
+class _PoolControlServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, profile_dir: Path, release: Callable[[], None]) -> None:
+        self.release = release
+        address = _control_address(profile_dir)
+        self._control_path = None if address.startswith("\0") else Path(address)
+        super().__init__(address, _PoolControlHandler)
+        self._thread = threading.Thread(
+            target=lambda: self.serve_forever(poll_interval=0.01),
+            name="loop-web-browser-control",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        self.shutdown()
+        self.server_close()
+        self._thread.join()
+        if self._control_path is not None:
+            self._control_path.unlink(missing_ok=True)
+
+
+# On macOS a headless Chrome launched from the installed bundle registers as
+# ``com.google.Chrome`` and outranks the user's own windows, so LaunchServices hands it
+# every ``open https://...`` -- what a command-click becomes -- and it drops them. Links
+# stop opening system-wide for the duration of a fetch, and ``open`` still exits 0.
+#
+# No launch flag avoids this; only a different bundle id does, and it must come from the
+# vendor, since editing a copy's breaks Chrome's signature and the kernel then kills it.
+# Chrome for Testing ships as ``com.google.chrome.for.testing``.
+def _fetch_browser(*, platform: str = sys.platform) -> str:
+    """Return a Chrome that will not capture the user's link clicks."""
+    # Elsewhere a URL reaches a browser through xdg-open and the desktop
+    # file, never a running process, so there is no capture to prevent.
+    if platform != "darwin":
+        return ""
+    for candidate in _fetch_browser_candidates():
+        if candidate.is_file():
+            return str(candidate)
+    logger.debug("no Chrome for Testing found; falling back to zendriver's Chrome")
+    return ""
+
+
+# Abandoning it instead leaks the whole Chrome tree: the process holds its profile's
+# ``SingletonLock``, so a later launch on that profile fails with no usable diagnosis.
+# Measured on a leaked tree: killing the root alone took all ten of its processes with
+# it, because Chrome's zygotes and renderers die with the browser -- so signalling the
+# root is sufficient and no process-group handling is needed.
+#
+# Signals through zendriver's ``Popen`` handle rather than the raw pid. ``Popen.kill``
+# polls first and skips a process it has already reaped, which is what makes this safe
+# against the kernel recycling that pid onto an unrelated process while a wedged
+# ``stop()`` was still in flight.
+#
+# Cleanup reports nothing over its caller, so every failure is swallowed: this runs with
+# the real error in flight.
+def _kill_browser_process(browser: zendriver.Browser) -> None:
+    """SIGKILL a browser whose cooperative ``stop()`` did not complete."""
+    process = getattr(browser, "_process", None)
+    if process is None:
+        return  # Never launched by us, or already cleared by a completed stop.
+    with contextlib.suppress(OSError):
+        process.kill()
+
+
+def _fetch_browser_args(
+    executable: str,
+    *,
+    mock_keychain: str = "--use-mock-keychain",
+) -> list[str]:
+    """Extra Chrome flags the fetch browser needs."""
+    return [mock_keychain] if executable else []
+
+
+# Read from wherever Puppeteer or Playwright already downloaded one; neither is a
+# dependency, and nothing here installs a browser.
+def _fetch_browser_candidates() -> Iterator[Path]:
+    """Chrome for Testing binaries, newest build first."""
+    roots = (
+        # Puppeteer hardcodes ~/.cache on every platform, so this one does
+        # NOT follow the macOS convention that ``cache_dir()`` implements.
+        Path.home() / ".cache" / "puppeteer" / "chrome",
+        cache_dir() / "ms-playwright",
+    )
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for build in sorted(root.iterdir(), key=_build_order, reverse=True):
+            # Both arches: the tag names the download, and Rosetta runs an
+            # x64 build on Apple silicon.
+            yield from (
+                build / arch / name / "Contents" / "MacOS" / stem
+                for arch in ("chrome-mac-arm64", "chrome-mac-x64")
+                for name, stem in (
+                    ("Google Chrome for Testing.app", "Google Chrome for Testing"),
+                    ("Chromium.app", "Chromium"),
+                )
+            )
+
+
+def _devtools_port(
+    profile_dir: Path,
+    *,
+    proc_root: Path = Path("/proc"),
+    platform: str = sys.platform,
+) -> int | None:
+    """Read the verified profile owner's active DevTools port."""
+    try:
+        owner = (profile_dir / "SingletonLock").readlink()
+        pid = int(str(owner).rsplit("-", 1)[1])
+        command = _process_command(pid, proc_root=proc_root, platform=platform)
+    except (FileNotFoundError, IndexError, OSError, UnicodeError, ValueError):
+        return None
+    if _command_flag(command, "--user-data-dir=") != str(profile_dir.resolve()):
+        return None
+    try:
+        port_text = _command_flag(command, "--remote-debugging-port=") or ""
+        port = int(port_text.split(maxsplit=1)[0])
+        if port:
+            return port
+        return int((profile_dir / "DevToolsActivePort").read_text().splitlines()[0])
+    except (FileNotFoundError, IndexError, ValueError):
+        return None
+
+
+def _request_pool_release(profile_dir: Path) -> None:
+    """Ask another process's browser pool to release ``profile_dir``."""
+    address = _control_address(profile_dir)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(10)
+    try:
+        client.connect(address)
+        client.sendall(b"release\n")
+        # EOF is the acknowledgement: the handler closes only after the release
+        # callback returns, including graceful browser and loop shutdown.
+        if client.recv(64) != b"":
+            raise RuntimeError("Zendriver browser pool returned an invalid response.")
+    except ConnectionRefusedError:
+        if not address.startswith("\0"):
+            Path(address).unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+    finally:
+        client.close()
+    # Another process can leave a stale control listener that acknowledges this
+    # profile without owning its Chrome. Verify and close the actual owner.
+    _close_orphan_browser(profile_dir)
+
+
+# The single pooled browser manager, built once on first browser fetch. A
+# deliberate module singleton: it owns a live loop thread and open Chrome
+# processes -- shared runtime resources, not a tunable.
+# config-globals: ignore -- live pool of open browsers + its loop thread.
+_pool_singleton: _BrowserPool | None = None
+_pool_lock = threading.Lock()  # config-globals: ignore -- guards the singleton.
+
+
 def main() -> int:
-    """Open a URL in a headed Chrome on the backend's profile; return exit code."""
+    """Open a URL in a headed Chrome on the backend's profile; return exit code.
+
+    Returns:
+      exit_code: 0 on success.
+
+    """
     import argparse  # noqa: PLC0415 -- CLI-only import, off the library path.
 
     parser = argparse.ArgumentParser(
@@ -1439,6 +755,20 @@ def main() -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _add_arguments(parser)
+    args = parser.parse_args()
+    print(
+        f"Opening {args.url} in Chrome on "
+        f"{data_dir() / 'rekursiv-ai' / 'wesearch' / 'fetch-zendriver'} -- "
+        "close the window when done."
+    )
+    open_instance(args.url)
+    print("Window closed.")
+    return 0
+
+
+def _add_arguments(parser: ArgumentParser) -> None:
+    """Register flags on ``parser``."""
     parser.add_argument(
         "url",
         nargs="?",
@@ -1446,15 +776,607 @@ def main() -> int:
         help="The URL to open (typically the one whose headless fetch failed). "
         "Omit to open a blank page and navigate by hand.",
     )
-    args = parser.parse_args()
-    print(  # noqa: T201 -- CLI user feedback.
-        f"Opening {args.url} in Chrome on "
-        f"{data_dir() / 'rekursiv-ai' / 'wesearch' / 'fetch-zendriver'} -- "
-        "close the window when done."
+
+
+async def _open_instance(url: str, profile_dir: Path) -> None:
+    """Open a headed browser, navigate to ``url``, and block until it is closed."""
+    browser = await _launch_browser(profile_dir, headless=False)
+    try:
+        await _navigate_tab(browser, url)
+        # Block until the user closes the window (Chrome exits, so the browser reports
+        # stopped). Polled, not event-driven: the window-closed signal is Chrome's
+        # process exit, which zendriver exposes only as the polled ``stopped`` flag.
+        while not browser.stopped:  # noqa: ASYNC110 -- no event source; poll the flag.
+            await asyncio.sleep(0.5)
+    except BaseException:
+        await _stopped(browser)
+        raise
+
+
+# ``Browser.stop`` awaits ``connection.send(cdp.browser.close())`` with no ceiling; its
+# own ``except Exception`` cannot cover this, because an await that never returns raises
+# nothing to catch. Unbounded, that turns a reportable setup failure into a hang: this
+# runs while the real error is in flight, and nothing above supplies a deadline --
+# :func:`open_instance` calls ``run`` with no ``timeout_sec``, which waits forever by
+# contract.
+#
+# ``budget_sec`` matches :meth:`_BrowserPool.shutdown`'s ceiling on the same call. Long,
+# deliberately: a healthy stop terminates Chrome and waits up to 3s for the process, so
+# a tight bound would abandon live browsers that were about to exit.
+#
+# Every failure is swallowed, not just the timeout: this runs from an ``except
+# BaseException`` with the real error in flight, so anything raised here REPLACES it --
+# the operator learns the browser would not close and never learns why the page failed.
+# Cleanup reports nothing over its caller.
+async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> None:
+    """Stop ``browser``, giving up rather than waiting on a wedged connection."""
+    try:
+        async with asyncio.timeout(budget_sec):
+            await browser.stop()
+    except TimeoutError:
+        logger.warning("browser stop timed out; killing the browser process")
+        _kill_browser_process(browser)
+    except Exception:
+        logger.warning(
+            "browser stop failed; killing the browser process", exc_info=True
+        )
+        _kill_browser_process(browser)
+
+
+async def _navigate_tab(
+    browser: zendriver.Browser,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    trust: Trust = "untrusted",
+    max_redirects: int = 10,
+    on_redirect: Callable[[str], None] | None = None,
+) -> zendriver.Tab:
+    """Open a blank tab, arm the per-request guard, apply headers, navigate."""
+    tab = await browser.get("about:blank", new_tab=True)
+    try:
+        await _guard_requests(
+            tab,
+            url,
+            trust=trust,
+            on_redirect=on_redirect,
+            max_redirects=max_redirects,
+            headers=headers,
+        )
+        # Installed tab-wide are ONLY the headers no origin owns. An
+        # origin-bound one (a credential, an extended client hint) is attached
+        # by the guard, per document hop, to the origin entitled to it:
+        # ``set_extra_http_headers`` reaches every request the tab makes,
+        # including the cross-origin subresources the guard never sees.
+        ambient = {
+            name: value
+            for name, value in (headers or {}).items()
+            if name.lower() not in _origin_bound()
+        }
+        if ambient:
+            await tab.send(zendriver.cdp.network.enable())
+            await tab.send(
+                zendriver.cdp.network.set_extra_http_headers(
+                    zendriver.cdp.network.Headers(ambient)
+                )
+            )
+        await tab.get(url)
+        await tab.wait_for_ready_state("complete")
+    except BaseException:
+        await _closed(tab)
+        raise
+    return tab
+
+
+# ``Tab.close`` awaits ``Target.closeTarget``'s reply with no ceiling of its own, so a
+# connection that stopped answering parks here forever. That is survivable only while
+# the caller can still be cancelled -- and on every path that reaches here from a
+# CANCELLED body it cannot: an ``asyncio.timeout`` scope delivers exactly one
+# cancellation, the body consumed it, and this cleanup runs unguarded. The enclosing
+# coroutine then never completes, so its ``TimeoutError`` is never raised and the caller
+# waits out :func:`fetch_zendriver`'s ``timeout_sec + 30`` for a wall-less one instead.
+#
+# ``shield`` is what makes the bound real here: the cleanup often runs with a
+# cancellation already in flight, and an unshielded await would re-deliver it to the
+# close rather than time the close out.
+#
+# An abandoned close is CANCELLED AND AWAITED, never merely cancelled: ``cancel`` only
+# requests it, so returning straight after leaves the task pending on a loop that
+# outlives this call -- the pool's loop runs forever (see
+# :meth:`_BrowserPool._run_loop`), so the task finalizes late or not at all and raises
+# into a loop nobody is watching. Under ``asyncio.run`` the loop dies immediately, which
+# is why a test on one cannot see this.
+#
+# Every failure is swallowed, not just the timeout: this runs from :func:`_navigate`'s
+# ``finally`` and :func:`_navigate_tab`'s ``except``, so anything raised here replaces
+# the result or error the caller was about to see. Cleanup reports nothing over its
+# caller.
+async def _closed(tab: zendriver.Tab, *, budget_sec: float = 5.0) -> None:
+    """Close ``tab``, giving up rather than waiting on a wedged connection."""
+    task = asyncio.ensure_future(tab.close())
+    try:
+        async with asyncio.timeout(budget_sec):
+            await asyncio.shield(task)
+    except TimeoutError:
+        task.cancel()
+        # Shielded again: this await inherits any cancellation already in
+        # flight, and re-delivering it here would abandon the reaping too.
+        await asyncio.gather(asyncio.shield(task), return_exceptions=True)
+        logger.debug("tab close timed out; abandoning the tab")
+    except Exception:
+        logger.debug("tab close failed; abandoning the tab", exc_info=True)
+
+
+# The header transports re-validate each redirect hop (``curl.py`` and ``stdlib.py``
+# both call :func:`pinned_host` per hop) because
+# :func:`wesearch.fetch.common.pinned_host` states the rule: a redirect target is a
+# URL like any other, and skipping the re-check is the classic SSRF bypass. Chrome
+# follows redirects ITSELF, so validating only the URL the caller passed left every
+# subsequent hop -- and every subresource -- reaching the network with nothing watching.
+# A public URL redirecting to ``169.254.169.254`` or loopback was fetched, and the
+# transport learned of it only after the response had already been read.
+#
+# ``Fetch.requestPaused`` is the one seam that runs before the connection, so the same
+# ``pinned_host`` that guards curl guards Chrome, and ``on_redirect`` regains the pre-
+# follow abort :class:`~wesearch.types.params.ObserveParams` documents. A rejected
+# request is failed with ``AccessDenied`` rather than silently continued: Chrome
+# surfaces that as a navigation error, which is the honest outcome for a target policy
+# forbids.
+#
+# ``max_redirects`` is enforced here for the same structural reason: Chrome follows hops
+# itself, so this handler is the only place that can refuse one. Without it the browser
+# leg silently ignored a budget both header transports honor, and ``RetryParams``
+# documents as "0 disables".
+async def _guard_requests(
+    tab: zendriver.Tab,
+    url: str,
+    *,
+    trust: Trust,
+    on_redirect: Callable[[str], None] | None,
+    max_redirects: int,
+    headers: dict[str, str] | None = None,
+) -> None:
+    """Validate every DOCUMENT request this tab makes BEFORE Chrome connects."""
+    # Fragment stripped: it never reaches the wire, so the initial request would
+    # compare unequal and read as a redirect.
+    origin_url = urlunsplit(urlsplit(url)._replace(fragment=""))
+    # Captured here, where a running loop is guaranteed: zendriver invokes the
+    # handler from its own connection thread, which has no running loop of its
+    # own, so a ``get_running_loop`` inside the callback raises.
+    loop = asyncio.get_running_loop()
+    # Where the tab is NOW, not the one URL the caller named. A hop is a
+    # document request that moves off the CURRENT document, which only a
+    # running position can answer: measured against the origin spelling
+    # forever, Chrome's own canonicalization of the initial URL reads as a
+    # redirect, and a genuine hop back to the start reads as none. Mutable
+    # state is safe here -- zendriver dispatches every event for one connection
+    # on a single thread.
+    position = [origin_url]
+    followed = [0]
+
+    def on_paused(event: object, *_unused: object) -> None:
+        # Two-arg tolerant and isinstance-guarded for the same reasons as
+        # ``_main_frame_navigations``: zendriver retries a one-arg callback
+        # through an exception path, and dispatches by ``type(event)``.
+        if not isinstance(event, zendriver.cdp.fetch.RequestPaused):
+            return
+        target = event.request.url
+        # Interception is scoped to documents (see the pattern below), so every
+        # event here is a navigation; only one that LEAVES the current document
+        # is a redirect the caller should hear about.
+        is_hop = not _same_document(target, position[0])
+        position[0] = target
+        if is_hop:
+            followed[0] += 1
+            if followed[0] > max_redirects:
+                # Refused exactly like a forbidden host: Chrome reports it as a
+                # navigation error, which is the honest outcome for a hop the
+                # caller's budget does not cover.
+                logger.debug(
+                    "redirect budget of %d exhausted at %r", max_redirects, target
+                )
+                _dispatch(loop, tab, _fail(event.request_id))
+                return
+        try:
+            pinned_host(target, trust)
+            if is_hop and on_redirect is not None:
+                on_redirect(target)
+        except Exception:  # noqa: BLE001 -- any refusal aborts the request.
+            # ``on_redirect`` is documented as "raise to abort", so its
+            # exception is a decision, not a fault, and is handled identically
+            # to a failed host validation.
+            _dispatch(loop, tab, _fail(event.request_id))
+            return
+        _dispatch(
+            loop,
+            tab,
+            _continue(
+                event.request_id,
+                _carried_headers(event.request.headers, headers, target, origin_url),
+            ),
+        )
+
+    event_type = zendriver.cdp.fetch.RequestPaused
+    register = cast(
+        Callable[[type[object], Callable[..., None]], None], tab.add_handler
     )
-    open_instance(args.url)
-    print("Window closed.")  # noqa: T201 -- CLI feedback.
-    return 0
+    register(event_type, on_paused)
+    # DOCUMENT requests only. Intercepting everything pauses each subresource
+    # until this handler answers, and the answer costs a DNS resolution on
+    # zendriver's connection thread -- measured as a page that never finished
+    # loading (Google's live fetch timed out waiting for readyState). Documents
+    # are also the whole SSRF surface: a redirect chain is documents, and a
+    # subresource cannot redirect the NAVIGATION anywhere.
+    pattern = zendriver.cdp.fetch.RequestPattern(
+        url_pattern="*",
+        resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
+        request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
+    )
+    await tab.send(zendriver.cdp.fetch.enable(patterns=[pattern]))
+
+
+# Compares what the WIRE carries, so the differences Chrome introduces on its way there
+# are not mistaken for a redirect:
+#
+# - The fragment never leaves the client, so ``/page#a`` requests ``/page``. - An empty
+# path is canonicalized to ``/``, so ``https://host`` requests ``https://host/``.
+#
+# Both were measured reporting a spurious first hop, and ``on_redirect`` is raise-to-
+# abort -- Google's raises on ``/sorry`` -- so a false hop aborts an ordinary fetch.
+def _same_document(target: str, current: str) -> bool:
+    """Whether ``target`` is the document already at ``current``, not a hop."""
+    return _wire_url(target) == _wire_url(current)
+
+
+def _wire_url(url: str) -> str:
+    """Return ``url`` as it goes on the wire: no fragment, path never empty."""
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(fragment="", path=parts.path or "/"))
+
+
+def _fail(request_id: object) -> object:
+    """Return the CDP verb refusing one intercepted request."""
+    return zendriver.cdp.fetch.fail_request(
+        cast(Any, request_id), zendriver.cdp.network.ErrorReason.ACCESS_DENIED
+    )
+
+
+# ``headers=None`` sends no override, which is NOT the same as echoing the request's own
+# headers back. An override is unreliable in two documented ways, and both bite a
+# challenge handoff:
+#
+# - It is applied INTERMITTENTLY to ``Cookie`` (crbug 40762053: "setting the cookie
+# header override is intermittent -- only 3 of 21 requests ... have the cookie
+# override"). A clearance cookie that rides only sometimes reads as a client that never
+# solved the challenge. - It does "not extend to subsequent redirect hops" (CDP
+# ``Fetch`` docs), and the clear IS a redirect chain -- measured as GET, POST, GET.
+#
+# So an echo is strictly worse than silence: it can only subtract. Measured on one live
+# Cloudflare-fronted URL, interleaved against the no-override control on a fresh egress,
+# the echo served the wall every run and the omission served the page every run.
+# headers.
+def _continue(request_id: object, headers: list[object] | None) -> object:
+    """Return the CDP verb releasing one intercepted request, optionally overriding."""
+    if headers is None:
+        return zendriver.cdp.fetch.continue_request(cast(Any, request_id))
+    return zendriver.cdp.fetch.continue_request(
+        cast(Any, request_id), headers=cast(Any, headers)
+    )
+
+
+# An origin-bound header is never installed tab-wide (see :func:`_navigate_tab`), so it
+# must be attached HERE, and only for a hop that stays on the origin it was seeded for.
+#
+# Adding nothing yields ``None`` rather than an echo of ``request_headers``: an override
+# is applied unreliably and does not survive a redirect hop (see :func:`_continue`), so
+# echoing headers back can only lose them. The withholding case is ``None`` too -- a
+# cross-origin hop never carried the credential, since it was never installed tab-wide,
+# so there is nothing here to remove.
+#
+# An override that DOES fire is therefore reserved for the one case worth its
+# unreliability: a caller credential the tab cannot hold. It is not a way to restore
+# Chrome's own headers -- interception already costs every client hint (measured: a
+# guarded navigation sends no ``sec-ch-ua`` at all, with or without an override), and no
+# CDP verb adds one header without replacing the set.
+def _carried_headers(
+    request_headers: Mapping[str, str],
+    caller_headers: dict[str, str] | None,
+    target: str,
+    origin_url: str,
+) -> list[object] | None:
+    """Return the header OVERRIDE for this hop, or ``None`` to send none."""
+    if not caller_headers or origin(target) != origin(origin_url):
+        return None
+    bound = _origin_bound()
+    entitled = {
+        name: value for name, value in caller_headers.items() if name.lower() in bound
+    }
+    if not entitled:
+        return None
+    # Merged case-INSENSITIVELY, unlike a plain dict union: field names are
+    # case-insensitive on the wire but not as dict keys, and Chrome reports the
+    # paused request Title-Cased, so a caller's lower-case "cookie" beside
+    # Chrome's "Cookie" emitted the header twice. ``fetch.py`` collapses the
+    # same collision on the curl leg for the same reason -- two Cookie lines
+    # are a bot tell. The caller's value wins, matching that leg's
+    # ``set_session_cookies``.
+    replaced = {name.lower() for name in entitled}
+    kept = {
+        name: value
+        for name, value in request_headers.items()
+        if name.lower() not in replaced
+    }
+    return _header_entries(kept | entitled)
+
+
+# Read off :func:`~wesearch.fetch.common.apply_redirect`'s own default rather than
+# restated: Chrome follows its own redirects, so this transport applies the rule itself
+# instead of through that function, and a second copy is how the two legs came to
+# disagree.
+#
+# Only ``authorization`` and ``cookie`` are live here. The set also names the extended
+# client hints, which matter on the header transports because THOSE build the hints
+# themselves; an intercepted navigation carries none to begin with (measured: zero
+# ``sec-ch-ua`` headers reach the wire, with or without an override), so for this leg
+# those entries are inert. Borrowing the shared set anyway is deliberate -- it cannot
+# drift from the contract, and a hint that Chrome someday does emit under interception
+# is then already covered.
+def _origin_bound() -> frozenset[str]:
+    """Return the header names a cross-origin hop may not carry."""
+    default = inspect.signature(apply_redirect).parameters["origin_bound"].default
+    assert isinstance(default, frozenset)
+    return cast(frozenset[str], default)
+
+
+def _header_entries(headers: Mapping[str, str]) -> list[object]:
+    """Render a header mapping as the CDP ``HeaderEntry`` list."""
+    return [
+        cast(object, zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
+        for name, value in headers.items()
+    ]
+
+
+# The handler is invoked by zendriver's callback machinery, which is not a coroutine
+# context, so the command is scheduled on the tab's own loop rather than awaited here. A
+# handler that blocked on the send would deadlock the connection it is trying to answer.
+def _dispatch(
+    loop: asyncio.AbstractEventLoop, tab: zendriver.Tab, command: object
+) -> None:
+    """Send a CDP command from the synchronous event-handler thread."""
+    coroutine = tab.send(cast(Any, command))
+    if loop.is_closed():
+        coroutine.close()  # Nothing left to answer; do not warn on a stray task.
+        return
+    # ``call_soon_threadsafe``, not ``create_task``: the callback runs on
+    # zendriver's connection thread, and creating a task on another thread's
+    # loop is not safe.
+    loop.call_soon_threadsafe(lambda: loop.create_task(coroutine))
+
+
+# Chrome fires ``FrameNavigated`` for every frame, and a challenge page is dense with
+# sub-frames (the Turnstile widget alone accounts for most of the 17 events one
+# interstitial emits). Only the main frame -- the one with no parent -- means "the
+# document you are reading was replaced".
+def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
+    """Return an Event set whenever the MAIN frame commits a new document."""
+    navigated = asyncio.Event()
+    # Captured here: the handler below runs on a thread with no running loop.
+    loop = asyncio.get_running_loop()
+
+    # Two-arg tolerant on purpose: zendriver calls a handler as
+    # ``callback(event, connection)`` and retries as ``callback(event)`` only
+    # after catching TypeError. A one-arg signature reaches the handler through
+    # that exception path, where a TypeError raised INSIDE the handler is
+    # indistinguishable from the arity mismatch and silently re-runs it.
+    #
+    # ``isinstance`` rather than a bare attribute read: zendriver dispatches on
+    # ``type(event)`` (connection.py), yet a live run delivered a
+    # ``FrameStartedLoading`` here and the handler raised AttributeError inside
+    # zendriver's callback thread. That exception cannot fail the fetch -- it is
+    # logged and swallowed -- so the cost is a silent miss of the wakeup this
+    # exists to deliver, not a crash. Guarding the shape is cheap; the event
+    # this cares about is the one with a frame.
+    def on_navigated(event: object, *_unused: object) -> None:
+        if (
+            isinstance(event, zendriver.cdp.page.FrameNavigated)
+            and event.frame.parent_id is None
+        ):
+            # Not a bare ``set()``: zendriver runs this handler off-loop, and a
+            # cross-thread set flips the flag without waking the selector.
+            loop.call_soon_threadsafe(navigated.set)
+
+    # ``zendriver`` annotates this parameter as a bare ``Callable`` -- i.e.
+    # ``Callable[..., Unknown]`` -- under a suppression of its own in
+    # connection.py, so the bound method is partially unknown before an argument
+    # is even passed. A stub cannot repair it in place: ``add_handler`` is
+    # inherited from ``Connection``, and a partial ``.pyi`` for that class would
+    # blank its other 66 members. Naming the real contract at this one call site
+    # is the narrowest fix, and it keeps ``event.frame.parent_id`` checked above.
+    event_type = zendriver.cdp.page.FrameNavigated
+    register = cast(
+        Callable[[type[object], Callable[..., None]], None], tab.add_handler
+    )
+    register(event_type, on_navigated)
+    return navigated
+
+
+# A single load event is not the end of a challenge-walled fetch. The interstitial is
+# itself a complete document: it reaches ``readyState == "complete"``, THEN its JS
+# navigates the tab to the real page. Measured on one live URL::
+#
+# t=0.00s 5516 bytes challenge readyState=complete <- interstitial t=1.10s 386 bytes
+# clear readyState=loading <- real doc parsing t=2.20s 380404 bytes clear
+# readyState=complete <- the page
+#
+# Both intermediate states are traps. Harvesting at the first ``complete`` returns the
+# wall; harvesting the moment the challenge markup disappears returns a 386-byte
+# ``<head>`` whose title looks right and whose body is empty. So each iteration waits
+# for a real main-frame navigation and THEN for that new document to finish parsing --
+# never for a duration.
+#
+# This is event-driven rather than polled deliberately: Chrome already knows when it
+# replaced the document, so sampling the DOM on a timer both guesses at an interval and
+# can only ever observe the states its grid lands on (the 386-byte phase is exactly such
+# a miss). One wait per real transition, no sampling rate to tune.
+#
+# ``on_success_body=True`` is load-bearing: this body came from a browser that rendered
+# the page, so a generic CAPTCHA widget in it is ordinary furniture (a login form's
+# reCAPTCHA), not proof of a wall. Only structural interstitial evidence means "this
+# document is about to replace itself".
+#
+# ``budget_sec`` bounds a challenge that never clears -- a real block rather than a
+# delay -- and must stay under the caller's overall fetch timeout, so a walled page
+# surfaces the wall instead of raising ``TimeoutError``. The last body read is returned
+# for the caller's classifier to judge; this layer decides only WHEN the page stopped
+# changing, never what it means.
+async def _settled_content(tab: zendriver.Tab, *, budget_sec: float) -> str:
+    """Return the tab's HTML once it is no longer a challenge interstitial."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget_sec
+    navigated = _main_frame_navigations(tab)
+    while True:
+        # Cleared BEFORE the read, never after: a navigation that commits
+        # between reading the body and starting the wait must still count. Clear
+        # afterwards and that wakeup is dropped, so a page that cleared in the
+        # gap blocks for the whole budget -- the classic lost-wakeup.
+        navigated.clear()
+        body = await tab.get_content()
+        if classify_challenge(body, on_success_body=True) is None:
+            return body
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return body
+        try:
+            await asyncio.wait_for(navigated.wait(), timeout=remaining)
+            # The navigation only COMMITS the new document; its markup arrives as
+            # it parses. Without this the next read catches the half-built
+            # 386-byte phase above -- right title, empty body.
+            #
+            # Bounded by the SAME deadline as the wait above, not left open: a
+            # document that commits just before the deadline and then stalls
+            # would otherwise park here with no ceiling of its own, spending the
+            # caller's entire fetch timeout. That is precisely what ``budget_sec``
+            # promises not to do -- give up in time to return the last body and
+            # let the caller classify the wall.
+            await asyncio.wait_for(
+                tab.wait_for_ready_state("complete"),
+                timeout=max(deadline - loop.time(), 0.0),
+            )
+        except TimeoutError:
+            return await tab.get_content()
+
+
+# Each fetch runs in its OWN tab that is CLOSED when the fetch returns. The Chrome
+# process stays warm in the pool (fast reuse), but the tab -- which holds the scraped
+# page's DOM, JS heap, and images -- is the unit of memory teardown, so a sequence of
+# fetches does not accumulate resident pages. A per-fetch tab also isolates concurrent
+# fetches sharing the one browser.
+#
+# Readiness is Chrome's real load signal (``document.readyState == "complete"``) plus
+# :func:`_settled_content` for the interstitial that outlives it, bounded by
+# ``timeout_sec``. The transport returns what Chrome rendered without assigning provider
+# semantics to it.
+async def _navigate(
+    url: str,
+    *,
+    profile_dir: Path,
+    egress: str,
+    timeout_sec: float,
+    headless: bool,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    trust: Trust = "untrusted",
+    max_redirects: int = 10,
+    on_redirect: Callable[[str], None] | None = None,
+) -> BrowserResult:
+    """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies."""
+    async with asyncio.timeout(timeout_sec):
+        browser = await _pool().browser(egress, profile_dir, headless=headless)
+        if cookies:
+            await browser.cookies.set_all(
+                [
+                    zendriver.cdp.network.CookieParam(
+                        name=name,
+                        value=value,
+                        url=url,
+                    )
+                    for name, value in cookies.items()
+                ]
+            )
+        tab = await _navigate_tab(
+            browser,
+            url,
+            headers=headers,
+            trust=trust,
+            max_redirects=max_redirects,
+            on_redirect=on_redirect,
+        )
+        try:
+            # Half the overall budget: the settle poll must be able to give up
+            # and still leave time to harvest cookies and return the wall, so a
+            # blocked page surfaces its BotDetectionError instead of a timeout.
+            body = await _settled_content(tab, budget_sec=timeout_sec / 2)
+            final_url = cast(str, await tab.evaluate("document.location.href")) or url
+            # Cookies are browser-wide (shared jar), so harvest before closing the
+            # tab; the closed tab's cookies persist in the profile regardless.
+            #
+            # Keyed on the FINAL url, not the requested one: a cross-origin
+            # redirect seats the target's cookies, and filtering by the source
+            # host dropped exactly the cookies a following fetch to the target
+            # needs. ``on_redirect`` already fired per hop in the guard, before
+            # each was followed.
+            harvested = await _domain_cookies(browser, final_url)
+        finally:
+            await _closed(tab)
+    return BrowserResult(
+        body=_unwrap_viewer(body).encode(), cookies=harvested, final_url=final_url
+    )
+
+
+# ``get_content`` serializes the DOM, and a non-HTML response has no DOM of its own --
+# Chrome SYNTHESIZES one to display it, re-emitting the bytes inside ``<pre>`` under a
+# generated ``<head>``. A caller that asked a JSON endpoint for JSON would otherwise
+# receive markup wrapped around valid data and fail to parse it, reporting a malformed
+# response the server never sent.
+#
+# Matched on the synthesized shell specifically, not on "contains a ``<pre>``": a real
+# HTML page carrying a code sample must come back whole.
+def _unwrap_viewer(body: str) -> str:
+    """Return the original payload when Chrome wrapped it in its viewer shell."""
+    match = _VIEWER_SHELL.match(body.strip())
+    if match is None:
+        return body
+    return unescape(match.group("payload"))
+
+
+async def _domain_cookies(browser: zendriver.Browser, url: str) -> dict[str, str]:
+    """Return the browser's cookies whose domain matches ``url``'s host."""
+    host = urlparse(url).hostname or ""
+    jar: dict[str, str] = {}
+    for cookie in await browser.cookies.get_all():
+        domain = (cookie.domain or "").lstrip(".")
+        if domain and (host == domain or host.endswith(f".{domain}")):
+            jar[cookie.name] = cookie.value or ""
+    return jar
+
+
+# Registers teardown WITH the pool that needs it, on the one path that can create one. A
+# browser is ~70 MB across ~17 processes and nothing else ever closes one, so a process
+# that exits without this leaves every browser it opened resident: measured at 378
+# processes holding 27.5 GiB, 225 of them older than the session that spawned them.
+#
+# ``atexit`` and not a parent-death signal, because the exit that leaked was an ORDINARY
+# one -- pytest finished normally. It fires here under plain pytest and under `xdist
+# -n=2` (both measured), and can still drive the pool's daemon loop thread, which is
+# alive until interpreter teardown.
+def _pool() -> _BrowserPool:
+    """Return the process-wide browser pool, creating it once."""
+    global _pool_singleton  # noqa: PLW0603 -- memoize the shared pool.
+    with _pool_lock:
+        if _pool_singleton is None:
+            _pool_singleton = _BrowserPool()
+            atexit.register(shutdown_browsers)
+        return _pool_singleton
 
 
 if __name__ == "__main__":

@@ -43,7 +43,10 @@ def search_authors(query: str, *, limit: int | None) -> AuthorSearchResult:
 
     Args:
       query: Author-name query string.
-      limit: Maximum authors to return, or ``None`` for the backend page.
+      limit: Maximum authors to return, or ``None`` for backend page size.
+
+    Returns:
+      result: AuthorSearchResult with matching records and total count.
 
     """
     data = s2.get("/author/search", {"query": query, "fields": s2.AUTHOR_FIELDS_STR})
@@ -62,6 +65,9 @@ def author_metadata(author_ids: list[str]) -> list[AuthorRecord | None]:
     Args:
       author_ids: S2 author ids to resolve in one batched request.
 
+    Returns:
+      result: The list[AuthorRecord | None].
+
     """
     records = s2.batch(author_ids, s2.AUTHOR_FIELDS_STR, endpoint="author")
     return [s2.author_record_from(r) if r is not None else None for r in records]
@@ -70,7 +76,7 @@ def author_metadata(author_ids: list[str]) -> list[AuthorRecord | None]:
 def author_papers(
     author_id: str,
     *,
-    limit: int | None,
+    limit: int | None = None,
     year_from: int | None = None,
     year_to: int | None = None,
 ) -> Listing:
@@ -81,6 +87,9 @@ def author_papers(
       limit: Maximum papers to return, or ``None`` for one page.
       year_from: Inclusive lower publication-year bound, when set.
       year_to: Inclusive upper publication-year bound, when set.
+
+    Returns:
+      listing: Listing with paper records and completeness flag.
 
     """
     keep = functools.partial(_year_in_bounds, year_from=year_from, year_to=year_to)

@@ -40,26 +40,20 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
 
 from wesearch.fetch.custom_types import FetchParamsSchema
 from wesearch.lib.userdirs import cache_dir
-from wesearch.paper import (
-    authors as paper_authors_mod,
-    details as paper_details_mod,
-    fetch as paper_fetch_mod,
-    search as paper_search_mod,
-)
+from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
 from wesearch.search.custom_types import SearchBackends, SearxngCategory
 from wesearch.search.render import lean_result
-from wesearch.search.search import (
-    SearchParamsSchema,
-    search as web_search_fn,
-)
+from wesearch.search.search import SearchParamsSchema
 from wesearch.types.params import (
     Extractor,
     PolicyParams,
     Transport,
 )
 from wesearch.web import fetch_web
+
+import wesearch.search.search
 
 
 mcp = MCPServer(
@@ -73,15 +67,13 @@ mcp = MCPServer(
 )
 
 
+# A docstring cannot interpolate, and the MCP SDK publishes ``__doc__`` as the tool
+# description -- so a generated list (the SearXNG tabs) would otherwise have to be hand-
+# copied into the docstring, which is exactly how both surfaces came to omit the
+# ``social media`` tab. Applied UNDER ``@mcp.tool()``, which reads the attribute after
+# this runs.
 def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
-    """Append generated prose to a tool's docstring before the SDK reads it.
-
-    A docstring cannot interpolate, and the MCP SDK publishes ``__doc__`` as
-    the tool description -- so a generated list (the SearXNG tabs) would
-    otherwise have to be hand-copied into the docstring, which is exactly how
-    both surfaces came to omit the ``social media`` tab. Applied UNDER
-    ``@mcp.tool()``, which reads the attribute after this runs.
-    """
+    """Append generated prose to a tool's docstring before the SDK reads it."""
 
     def decorate(fn: F) -> F:
         fn.__doc__ = f"{(fn.__doc__ or '').rstrip()}\n{extra}\n"
@@ -103,10 +95,24 @@ def paper_search(
     """Search scholarly literature. The default "fused" source rank-fuses
     Semantic Scholar and OpenAlex and degrades gracefully if one is down
     (complete=false means a backend was lost or more matches remain).
+
+    Args:
+      query: Search term(s) for papers.
+      source: Search backend: "fused" (rank-fused S2 + OpenAlex),
+        "s2", "openalex", or "searxng".
+      limit: Maximum number of results to return.
+      year_from: Minimum publication year (inclusive), or None for all.
+      year_to: Maximum publication year (inclusive), or None for all.
+      open_access_only: Restrict to papers with free full-text PDFs.
+
+    Returns:
+      result: Dict with "records" (list of papers), "total" (estimated
+        result count), and "complete" (false if a backend was unreachable).
+
     """
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
-    result = paper_search_mod.search(
+    result = search.search(
         query,
         source=source,
         limit=limit,
@@ -125,9 +131,16 @@ def paper_search(
 def paper_details(paper_id: str) -> dict[str, object]:
     """Full metadata for one paper. Accepts a DOI or arXiv id in any common
     form (bare, doi:/arxiv: prefixed, or full URL).
+
+    Args:
+      paper_id: DOI or arXiv id (bare, prefixed, or full URL).
+
+    Returns:
+      metadata: Dict of paper metadata with extended abstract (1500 chars).
+
     """
     kind, canonical = normalize_id(paper_id)
-    record = paper_details_mod.metadata(kind, canonical)
+    record = details.metadata(kind, canonical)
     # Three times the search clip: a detail lookup is one paper the caller
     # already chose, so the abstract is what they asked for.
     lean = lean_record(record, abstract_chars=1_500)
@@ -143,11 +156,21 @@ def paper_references(
 ) -> dict[str, object]:
     """Papers this paper cites (its bibliography). source="openalex" reaches
     an independent quota when Semantic Scholar is throttled (DOI seeds only).
+
+    Args:
+      paper_id: DOI or arXiv id to fetch bibliography of.
+      limit: Maximum citations to return.
+      source: Search backend (s2 or openalex; openalex DOI-only).
+
+    Returns:
+      citations: Dict with "records" (papers this paper cites) and "complete"
+        (false if results were truncated).
+
     """
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
     kind, canonical = normalize_id(paper_id)
-    listing = paper_details_mod.references(kind, canonical, limit=limit, source=source)
+    listing = details.references(kind, canonical, limit=limit, source=source)
     return {
         "records": [lean_record(r) for r in listing.records],
         "complete": listing.complete,
@@ -165,11 +188,24 @@ def paper_citations(
     """Papers that cite this paper. influential_only keeps only citations
     Semantic Scholar flags as influential (S2 only). source="openalex" reaches
     an independent quota when Semantic Scholar is throttled (DOI seeds only).
+
+    Args:
+      paper_id: DOI or arXiv id to fetch citations of.
+      limit: Maximum papers to return.
+      influential_only: Include only citations Semantic Scholar flags as
+        influential (S2 backend only).
+      year_from: Minimum publication year (inclusive), or None for all.
+      source: Search backend (s2 or openalex; openalex DOI-only).
+
+    Returns:
+      citations: Dict with "records" (papers citing this paper) and "complete"
+        (false if results were truncated).
+
     """
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
     kind, canonical = normalize_id(paper_id)
-    listing = paper_details_mod.citations(
+    listing = details.citations(
         kind,
         canonical,
         limit=limit,
@@ -187,9 +223,17 @@ def paper_citations(
 def paper_pdf(paper_id: str) -> dict[str, object]:
     """Download a paper's PDF (arXiv direct, then open-access lookup) into
     the local cache and return its filesystem path.
+
+    Args:
+      paper_id: DOI or arXiv id of the paper to download.
+
+    Returns:
+      pdf: Dict with "path" (filesystem location in cache), "bytes" (size),
+        and "source" (arXiv or open-access database name).
+
     """
     kind, canonical = normalize_id(paper_id)
-    pdf_bytes, source = paper_fetch_mod.download(kind, canonical)
+    pdf_bytes, source = fetch.download(kind, canonical)
     target_dir = cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
     target_dir.mkdir(parents=True, exist_ok=True)
     # Slug for a human, digest for identity: ``id_slug`` maps every unsafe
@@ -204,13 +248,23 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
 
 @mcp.tool()
 def author_search(query: str, limit: int = 10) -> dict[str, object]:
-    """Find scholars by name; results are ranked by h-index."""
+    """Find scholars by name; results are ranked by h-index.
+
+    Args:
+      query: Scholar name or name fragment.
+      limit: Maximum results to return (ranked by h-index).
+
+    Returns:
+      authors: Dict with "records" (author profiles) and "total" (estimated
+        result count).
+
+    """
     # Same guard the paper tools carry: the library slices directly, so a
     # negative limit performed the network call and then returned every record
     # except the last.
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
-    result = paper_authors_mod.search_authors(query, limit=limit)
+    result = authors.search_authors(query, limit=limit)
     return {
         "records": [lean_author(r) for r in result.records],
         "total": result.total,
@@ -224,12 +278,24 @@ def author_papers(
     year_from: int | None = None,
     year_to: int | None = None,
 ) -> dict[str, object]:
-    """Publications of one author (author_id from author_search)."""
+    """Publications of one author (author_id from author_search).
+
+    Args:
+      author_id: Scholar id from author_search.
+      limit: Maximum papers to return.
+      year_from: Minimum publication year (inclusive), or None for all.
+      year_to: Maximum publication year (inclusive), or None for all.
+
+    Returns:
+      papers: Dict with "records" (authored papers) and "total" (estimated
+        result count).
+
+    """
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
     if year_from is not None and year_to is not None and year_from > year_to:
         raise ValueError(f"'year_from' ({year_from}) exceeds 'year_to' ({year_to}).")
-    listing = paper_authors_mod.author_papers(
+    listing = authors.author_papers(
         author_id,
         limit=limit,
         year_from=year_from,
@@ -250,19 +316,32 @@ def web_search(
     categories: SearxngCategory = "general",
     transport: Transport = "auto",
 ) -> list[dict[str, object]]:
-    """Web search. Omitting ``backend`` takes this build's default, which is
-    DuckDuckGo in the public package. Pass ``backend="searxng"`` explicitly for
-    a SearXNG instance; it reads ``SEARXNG_URL`` and fails without it.
-    ``categories`` selects a SearXNG result tab, which selects that backend
-    when none is named and is rejected alongside an explicit non-SearXNG one.
-    ``transport`` picks the retrieval path; see ``web_fetch`` for the values.
-    Category tabs and what each returns:
+    """Web search.
+
+    Omitting ``backend`` takes this build's default, which is DuckDuckGo in the public
+    package. Pass ``backend="searxng"`` explicitly for a SearXNG instance; it reads
+    ``SEARXNG_URL`` and fails without it. ``categories`` selects a SearXNG result tab,
+    which selects that backend when none is named and is rejected alongside an explicit
+    non-SearXNG one. ``transport`` picks the retrieval path; see ``web_fetch`` for the
+    values. Category tabs and what each returns:
+
+    Args:
+      query: Search terms.
+      num_results: Maximum number of results to return.
+      backend: Search provider (DuckDuckGo by default; "searxng" requires
+        SEARXNG_URL environment variable).
+      categories: SearXNG result tab to query (general, news, images, etc.).
+      transport: HTTP method (see web_fetch for details).
+
+    Returns:
+      results: List of web search results with url, title, snippet, and
+        category-specific metadata (DOI/authors for science results, etc.).
 
     """
     # Deliberately not env-sniffing here: nothing in the dispatch path inspects
     # SEARXNG_URL, so a docstring promising "SearXNG when configured" described
     # a behavior no build had.
-    results = web_search_fn(
+    results = wesearch.search.search.search(
         query,
         backend=backend,
         num_results=num_results,
@@ -292,6 +371,17 @@ def web_fetch(
     GET only; ``max_chars`` caps the returned body. Every other knob is
     described below from the shared spec, so this surface and the sagent tool
     cannot document the same parameter differently.
+
+    Args:
+      url: Page URL to fetch and extract text from.
+      max_chars: Maximum characters of body text to return (capped at 8000).
+      transport: HTTP method ("auto", "get", "post", "browser_http2").
+      extractor: Parser ("html2text" for plain text, "trafilatura" for article
+        mode with title/content separation).
+
+    Returns:
+      page: Dict with "url", "title", "body" (extracted text), "status" (HTTP
+        code), and "elapsed_sec" (fetch time).
 
     """
     if max_chars < 1:

@@ -9,10 +9,9 @@ import socket
 import pytest
 
 from wesearch.fetch.common import ValidatedHost
-from wesearch.fetch.test_helpers import StubSession
+from wesearch.fetch.testing import StubSession
+from wesearch.fetch.transport import curl
 from wesearch.profile import ProfileStore
-
-import wesearch.fetch.transport.curl as curl_mod
 
 
 fetch_mod = importlib.import_module("wesearch.fetch.fetch")
@@ -73,7 +72,8 @@ def isolate_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     store = ProfileStore(base_dir=tmp_path)
 
-    def shared(_cls: type[ProfileStore]) -> ProfileStore:
+    def shared(cls: type[ProfileStore]) -> ProfileStore:
+        del cls
         return store
 
     monkeypatch.setattr(ProfileStore, "shared", classmethod(shared))
@@ -92,4 +92,4 @@ def isolate_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         return StubSession()
 
     monkeypatch.setattr(fetch_mod, "curl_session", stub_session)
-    monkeypatch.setattr(curl_mod, "_curl_sessions", {})
+    monkeypatch.setattr(curl, "_curl_sessions", {})

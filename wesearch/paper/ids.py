@@ -110,7 +110,10 @@ def looks_like_paper_id(token: str) -> bool:
     """Whether ``token`` parses as a DOI or arXiv id.
 
     Args:
-      token: The candidate identifier string to test.
+      token: String to test.
+
+    Returns:
+      valid: True if token is a valid DOI or arXiv identifier.
 
     """
     try:

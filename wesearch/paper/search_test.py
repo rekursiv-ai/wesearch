@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from wesearch.lib.custom_json import MutableJSON, MutableJSONValue
-from wesearch.paper import search as search_mod
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import (
@@ -15,6 +14,8 @@ from wesearch.paper.providers import (
     s2,
 )
 from wesearch.paper.search import search
+
+import wesearch.paper.search
 
 
 def _rec(title: str, source: str) -> PaperRecord:
@@ -63,7 +64,7 @@ class TestFusedSearch:
                 openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
             ),
         ):
-            result = search("q")  # fused default
+            result = search("q")  # fused default.
         assert {r.title for r in result.records} == {"s", "o"}
         assert result.total == 2
         assert result.complete
@@ -73,7 +74,9 @@ class TestFusedSearch:
         # total must not be less than what's returned (max(1,1,2) == 2).
         with (
             patch.object(
-                search_mod, "_s2_search", return_value=([_rec("s", "s2")], 1, True)
+                wesearch.paper.search,
+                "_s2_search",
+                return_value=([_rec("s", "s2")], 1, True),
             ),
             patch.object(
                 openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
@@ -85,14 +88,18 @@ class TestFusedSearch:
 
     def test_one_backend_error_is_partial_not_fatal(self) -> None:
         with (
-            patch.object(search_mod, "_s2_search", side_effect=PaperError("s2 down")),
+            patch.object(
+                wesearch.paper.search,
+                "_s2_search",
+                side_effect=PaperError("s2 down"),
+            ),
             patch.object(
                 openalex, "search", return_value=([_rec("o", "openalex")], 3, True)
             ),
         ):
             result = search("q")
         assert [r.title for r in result.records] == ["o"]
-        assert not result.complete  # partial -> caller may decline to cache
+        assert not result.complete  # partial -> caller may decline to cache.
 
     def test_a_malformed_backend_payload_still_degrades(self) -> None:
         # The whole point of fusing: one backend returning garbage must not
@@ -100,7 +107,9 @@ class TestFusedSearch:
         # escaping the provider aborted the entire search.
         with (
             patch.object(
-                search_mod, "_s2_search", return_value=([_rec("s", "s2")], 1, True)
+                wesearch.paper.search,
+                "_s2_search",
+                return_value=([_rec("s", "s2")], 1, True),
             ),
             patch.object(openalex, "fetch", return_value=(b"[]", object())),
         ):
@@ -110,7 +119,11 @@ class TestFusedSearch:
 
     def test_total_failure_raises(self) -> None:
         with (
-            patch.object(search_mod, "_s2_search", side_effect=PaperError("s2 down")),
+            patch.object(
+                wesearch.paper.search,
+                "_s2_search",
+                side_effect=PaperError("s2 down"),
+            ),
             patch.object(openalex, "search", side_effect=PaperError("oa down")),
             pytest.raises(PaperError),
         ):
@@ -124,7 +137,11 @@ class TestFusedSearch:
         s2_hits = [_rec(f"s{i}", "s2") for i in range(5)]
         oa_hits = [_rec(f"o{i}", "openalex") for i in range(5)]
         with (
-            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 100, False)),
+            patch.object(
+                wesearch.paper.search,
+                "_s2_search",
+                return_value=(s2_hits, 100, False),
+            ),
             patch.object(openalex, "search", return_value=(oa_hits, 100, False)),
         ):
             result = search("q", limit=5)
@@ -140,7 +157,11 @@ class TestFusedSearch:
         s2_hits = [_rec("solo", "s2"), _rec("shared", "s2")]
         oa_hits = [_rec("oa_solo", "openalex"), _rec("shared", "openalex")]
         with (
-            patch.object(search_mod, "_s2_search", return_value=(s2_hits, 9, False)),
+            patch.object(
+                wesearch.paper.search,
+                "_s2_search",
+                return_value=(s2_hits, 9, False),
+            ),
             patch.object(openalex, "search", return_value=(oa_hits, 9, False)),
         ):
             result = search("q", limit=1)
@@ -151,7 +172,9 @@ class TestFusedSearch:
         # returned, so trimming must not drag it below the honest backend total.
         with (
             patch.object(
-                search_mod, "_s2_search", return_value=([_rec("s", "s2")], 7, False)
+                wesearch.paper.search,
+                "_s2_search",
+                return_value=([_rec("s", "s2")], 7, False),
             ),
             patch.object(
                 openalex, "search", return_value=([_rec("o", "openalex")], 3, False)
@@ -227,7 +250,7 @@ class TestS2SearchParams:
 
         with patch.object(s2, "get", side_effect=fake_get):
             search("q", source="s2", limit=200)
-        assert seen  # a limit was sent
+        assert seen  # a limit was sent.
         assert all(lim <= 100 for lim in seen)
 
     def test_limit_over_ceiling_paginates(self) -> None:

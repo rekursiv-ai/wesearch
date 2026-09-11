@@ -27,7 +27,7 @@ class TestAuthors:
         assert [r.name for r in result.records] == [
             "High",
             "Mid",
-        ]  # h-index desc, capped
+        ]  # h-index desc, capped.
         assert result.total == 3
 
     def test_author_metadata_batch(self) -> None:

@@ -79,7 +79,9 @@ class EchoOracle:
         # to reach close(), so anything already acquired would be stranded.
         self._stack = ExitStack()
         try:
-            directory = Path(self._stack.enter_context(tempfile.TemporaryDirectory()))
+            directory = Path(
+                self._stack.enter_context(tempfile.TemporaryDirectory(prefix="echo-"))
+            )
             self.ca_path = directory / "cert.pem"
             key_path = directory / "key.pem"
             self_signed_localhost_cert(self.ca_path, key_path)
@@ -248,30 +250,6 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
     )
 
 
-def _read_head(conn: _Recvable, *, max_bytes: int = 1 << 16) -> str:
-    """Read a request up to and including the end of its header block.
-
-    Returns ``""`` for a head that never terminated -- the peer hung up, stalled
-    past its timeout mid-request, or ran past ``max_bytes`` without ending the
-    block. Returning the PARTIAL bytes instead let ``GET / HTTP`` (Chrome's
-    preconnect, and what the resilience test sends) parse as a request to ``/``
-    carrying zero headers, which then overwrote the real capture as the most
-    recent one.
-
-    Bytes past the terminator are DROPPED: one ``recv`` can deliver head and
-    body together, and a body line containing a colon is indistinguishable from
-    a header to every downstream parser -- letting a request forge the Cookie
-    lines the parity suite counts.
-    """
-    data = b""
-    while (end := data.find(b"\r\n\r\n")) == -1 and len(data) < max_bytes:
-        chunk = conn.recv(min(4096, max_bytes - len(data)))
-        if not chunk:
-            return ""
-        data += chunk
-    return data[: end + 4].decode("latin-1") if end != -1 else ""
-
-
 class _Recvable(Protocol):
     """The one operation reading a head needs.
 
@@ -282,6 +260,27 @@ class _Recvable(Protocol):
     """
 
     def recv(self, bufsize: int, /) -> bytes: ...
+
+
+# Returns ``""`` for a head that never terminated -- the peer hung up, stalled past its
+# timeout mid-request, or ran past ``max_bytes`` without ending the block. Returning the
+# PARTIAL bytes instead let ``GET / HTTP`` (Chrome's preconnect, and what the resilience
+# test sends) parse as a request to ``/`` carrying zero headers, which then overwrote
+# the real capture as the most recent one.
+#
+# Bytes past the terminator are DROPPED: one ``recv`` can deliver head and body
+# together, and a body line containing a colon is indistinguishable from a header to
+# every downstream parser -- letting a request forge the Cookie lines the parity suite
+# counts.
+def _read_head(conn: _Recvable, *, max_bytes: int = 1 << 16) -> str:
+    """Read a request up to and including the end of its header block."""
+    data = b""
+    while (end := data.find(b"\r\n\r\n")) == -1 and len(data) < max_bytes:
+        chunk = conn.recv(min(4096, max_bytes - len(data)))
+        if not chunk:
+            return ""
+        data += chunk
+    return data[: end + 4].decode("latin-1") if end != -1 else ""
 
 
 def _requests_root(request: str) -> bool:
@@ -296,12 +295,10 @@ def _header_names(request: str) -> tuple[str, ...]:
     return tuple(line.split(":", 1)[0].lower() for line in _header_lines(request))
 
 
+# Stops at the blank line ending the block, so a body that arrived in the same read
+# cannot contribute a colon-bearing line as a header.
 def _header_lines(request: str) -> tuple[str, ...]:
-    """Verbatim ``name: value`` header lines from a raw HTTP/1.1 request head.
-
-    Stops at the blank line ending the block, so a body that arrived in the
-    same read cannot contribute a colon-bearing line as a header.
-    """
+    """Verbatim ``name: value`` header lines from a raw HTTP/1.1 request head."""
     lines = request.split("\r\n")[1:]
     end = lines.index("") if "" in lines else len(lines)
     return tuple(line for line in lines[:end] if ":" in line)

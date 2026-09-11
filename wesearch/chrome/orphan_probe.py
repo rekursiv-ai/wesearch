@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")/../../.." run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Stand-in for Chrome in the process-reaping tests: spawn a child, then hang.
 
 ``capture_test`` asserts two properties of a spawned browser -- that killing its
@@ -28,7 +28,12 @@ from wesearch.chrome.capture import die_with_parent
 
 
 def main() -> int:
-    """Start a child that hangs, print its PID, then hang until killed."""
+    """Start a child that hangs, print its PID, then hang until killed.
+
+    Returns:
+      exit_code: 0 on clean exit or after timeout; child PID printed to stdout.
+
+    """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 2)[2])
     _add_arguments(parser)
     args = parser.parse_args()
@@ -69,20 +74,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _spawn_child(*, proofed: bool, hang_seconds: float) -> int:
-    """Start the hanging child and return its PID.
-
-    Args:
-      proofed: Launch through ``subprocess`` with ``die_with_parent``, matching
-        how a browser is started. The unproofed arm forks WITHOUT arming, so it
-        stands in for the pre-fix state; the parent-death signal is armed on the
-        forking thread, so only the proofed arm arms it against a thread that
-        outlives the child.
-      hang_seconds: How long the child sleeps.
-
-    Returns:
-      pid: The child's process id.
-
-    """
+    """Start the hanging child and return its PID."""
     if not proofed:
         child = os.fork()
         if child == 0:

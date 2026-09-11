@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -46,7 +45,7 @@ class TestFetch:
     ) -> None:
         seen: dict[str, str] = {}
 
-        def fake_fetch(target: str, *, request: Any) -> tuple[bytes, None]:
+        def fake_fetch(target: str, *, request: object) -> tuple[bytes, None]:
             del request
             seen["target"] = target
             return b"<xml/>", None

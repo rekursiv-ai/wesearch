@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    bs4 = lazy_import("bs4")  # 140ms
+    bs4 = lazy_import("bs4")  # 140ms.
 
 
 __all__ = [

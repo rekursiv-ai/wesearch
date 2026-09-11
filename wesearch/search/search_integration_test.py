@@ -77,17 +77,9 @@ _searxng_required = pytest.mark.skipif(
 # Per USER, not per machine. This lived in ``gettempdir()``, which is shared:
 # every checkout and every operator on the host queued on one file, so a
 # colleague's gate run blocked this one.
-_LOCK_DIR = state_dir() / "rekursiv-ai" / "wesearch"
-# ``state_dir`` resolves a path and does not create it.
-_LOCK_DIR.mkdir(parents=True, exist_ok=True)
-
 # Concurrency admitted against the live backends. Sized under the measured
 # ceiling above, not at it, because these run beside the rest of the suite.
 _SEARCH_LANES = 4
-_SEARCH_LOCKS = tuple(
-    filelock.FileLock(str(_LOCK_DIR / f"live-search.{lane}.lock"))
-    for lane in range(_SEARCH_LANES)
-)
 
 # Backends already proved unroutable, so the remaining cases skip instead of
 # each re-paying the connect timeout. An egress either reaches a host or does
@@ -97,9 +89,6 @@ _SEARCH_LOCKS = tuple(
 # A marker FILE, not a module-level set: under ``-n`` every xdist worker is a
 # separate process, so an in-process set is re-learned once per worker -- and
 # each re-learning holds a lane for the full connect timeout.
-_UNREACHABLE_DIR = _LOCK_DIR / "unreachable"
-_UNREACHABLE_DIR.mkdir(parents=True, exist_ok=True)
-
 # How long a marker suppresses retries. Bounded because the marker outlives the
 # run: a route restored after a VPN or network change must not leave the backend
 # permanently skipped, which would silently retire a test. One run's worth of
@@ -107,21 +96,25 @@ _UNREACHABLE_DIR.mkdir(parents=True, exist_ok=True)
 _UNREACHABLE_TTL_SEC = 300.0
 
 
+# A counting semaphore built from N lock files: try each in turn without blocking, so an
+# idle lane is taken immediately and only a genuinely saturated set falls through to a
+# bounded wait. The wait is bounded by ONE QUERY -- derived, not tuned. That constant
+# was picked three times (20s, 5s, 30s) and every value was wrong the same way: a case
+# waiting longer than one query pays MORE to be skipped than an uncontended case pays to
+# actually run, which is strictly worse than having no lock at all.
 @contextmanager
 def _admitted(*, timeout_sec: float) -> Generator[None]:
-    """Hold one of :data:`_SEARCH_LANES` lanes, or raise ``filelock.Timeout``.
-
-    A counting semaphore built from N lock files: try each in turn without
-    blocking, so an idle lane is taken immediately and only a genuinely
-    saturated set falls through to a bounded wait. The wait is bounded by ONE
-    QUERY -- derived, not tuned. That constant was picked three times (20s, 5s,
-    30s) and every value was wrong the same way: a case waiting longer than one
-    query pays MORE to be skipped than an uncontended case pays to actually
-    run, which is strictly worse than having no lock at all.
-    """
+    """Hold one of :data:`_SEARCH_LANES` lanes, or raise ``filelock.Timeout``."""
+    # ``state_dir`` resolves a path and does not create it.
+    lock_dir = state_dir() / "rekursiv-ai" / "wesearch"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    locks = tuple(
+        filelock.FileLock(str(lock_dir / f"live-search.{lane}.lock"))
+        for lane in range(_SEARCH_LANES)
+    )
     deadline = time.monotonic() + timeout_sec
     while True:
-        for lock in _SEARCH_LOCKS:
+        for lock in locks:
             try:
                 with lock.acquire(blocking=False):
                     yield
@@ -133,52 +126,30 @@ def _admitted(*, timeout_sec: float) -> Generator[None]:
         # to hold it while three others go idle -- measured as 15 of 25 cases
         # skipping under ``-n 24``.
         if time.monotonic() >= deadline:
-            raise filelock.Timeout(str(_LOCK_DIR))
+            raise filelock.Timeout(str(lock_dir))
         time.sleep(0.05)
 
 
+# Exactly ONE attempt, deliberately. A retry loop lived here and was the single largest
+# cost in the file: every outcome these tests treat as a skip (empty page, soft block)
+# first paid the full backoff schedule, so a backend serving nothing cost ~30s per case
+# instead of one query. Retrying also cannot change any verdict -- an empty result skips
+# whether it took one attempt or three -- so the wait bought latency and no signal.
+#
+# A failure that is availability rather than a parser fault skips: an unroutable egress
+# (``FetchError`` with ``status == 0``), a missing browser, a bot-detection block, a
+# backend that never answered within the ceiling, or a lock another worker holds. A
+# malformed result still fails, which is what the caller asserts on. Unit coverage for
+# that classification lives in ``search_test.py`` -- everything in THIS file carries
+# ``integration`` and is deselected by default, so a test of the helper placed here
+# would not run.
 def _query_once[T](
     fetch: Callable[[float], list[T]], *, backend: str, timeout_sec: float = 8.0
 ) -> list[T]:
-    """Run one live query under the search lock and return its results.
-
-    Exactly ONE attempt, deliberately. A retry loop lived here and was the single
-    largest cost in the file: every outcome these tests treat as a skip (empty
-    page, soft block) first paid the full backoff schedule, so a backend serving
-    nothing cost ~30s per case instead of one query. Retrying also cannot change
-    any verdict -- an empty result skips whether it took one attempt or three --
-    so the wait bought latency and no signal.
-
-    A failure that is availability rather than a parser fault skips: an
-    unroutable egress (``FetchError`` with ``status == 0``), a missing browser,
-    a bot-detection block, a backend that never answered within the ceiling, or
-    a lock another worker holds. A malformed result still fails, which is what
-    the caller asserts on. Unit coverage for that classification lives in
-    ``search_test.py`` -- everything in THIS file carries ``integration`` and is
-    deselected by default, so a test of the helper placed here would not run.
-
-    Args:
-      fetch: Performs one live query, given the HTTP ceiling to apply, and
-        returns its results.
-      backend: Backend name, used to remember an unroutable egress across the
-        parametrized cases so only the first one pays the connect timeout.
-      timeout_sec: HTTP ceiling handed to ``fetch``, and the lock wait. These
-        tests assert PARSER shape, so a backend that answers slowly proves
-        nothing a fast answer does not; the ceiling exists to bound a wedged
-        egress. Measured: on the library defaults (``timeout_sec=30``,
-        ``retries=2``) one DuckDuckGo case took 94s against an unroutable
-        egress, tripping the 60s pytest-timeout as a FAILURE rather than the
-        availability skip it is. The HANDSHAKE ceiling is deliberately NOT set
-        here -- each BACKEND defaults it to 3s, which already fails an
-        unroutable host in a handshake, and a value restated here would drift
-        from theirs. (Not the library's: ``RetryParams.connect_timeout_sec``
-        defaults to ``None``, which shares ``timeout_sec``.)
-
-    Returns:
-      results: The backend's results, empty when it served none.
-
-    """
-    unreachable_marker = _UNREACHABLE_DIR / backend
+    """Run one live query under the search lock and return its results."""
+    unreachable_dir = state_dir() / "rekursiv-ai" / "wesearch" / "unreachable"
+    unreachable_dir.mkdir(parents=True, exist_ok=True)
+    unreachable_marker = unreachable_dir / backend
     if (
         unreachable_marker.exists()
         and time.time() - unreachable_marker.stat().st_mtime < _UNREACHABLE_TTL_SEC
@@ -261,13 +232,11 @@ _QUERIES = [
 ]
 
 
+# An empty response is availability (a soft IP-level block from this egress), not a
+# parser fault, so it skips rather than fails. Any returned result must still be a well-
+# formed :class:`SearchResult`.
 def _assert_web_results(results: list[SearchResult], query: str, backend: str) -> None:
-    """Assert live web results are well-shaped; skip when the backend served none.
-
-    An empty response is availability (a soft IP-level block from this egress),
-    not a parser fault, so it skips rather than fails. Any returned result must
-    still be a well-formed :class:`SearchResult`.
-    """
+    """Assert live web results are well-shaped; skip when the backend served none."""
     if not results:
         pytest.skip(f"{backend} returned no results for {query!r} (soft block?)")
     for r in results:
@@ -381,7 +350,7 @@ class TestSearxngCategoriesLive:
         results = _category_results("videos")
         first = _require(results, "videos")
         assert isinstance(first, VideoResult)
-        assert isinstance(first, MediaResult)  # VideoResult is-a MediaResult
+        assert isinstance(first, MediaResult)  # VideoResult is-a MediaResult.
 
     def test_news(self) -> None:
         results = _category_results("news")

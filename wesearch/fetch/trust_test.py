@@ -53,7 +53,8 @@ def profiled_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """Pin an egress and seat a stored cookie for ``example.com``."""
     store = ProfileStore(base_dir=tmp_path)
 
-    def shared(_cls: type[ProfileStore]) -> ProfileStore:
+    def shared(cls: type[ProfileStore]) -> ProfileStore:
+        del cls
         return store
 
     def fixed_egress(**_kw: object) -> str:
@@ -125,18 +126,18 @@ class TestBrowserUnderUntrusted:
         del profiled
         reached: list[str] = []
 
-        def browser(url: str, **_kw: Any) -> BrowserResult:
+        def browser(url: str, **_kw: object) -> BrowserResult:
             reached.append(url)
             return BrowserResult(body=b"<html>ok</html>", cookies={}, final_url="")
 
-        def walled(*_a: Any, **_kw: Any) -> bytes:
+        def walled(*_a: object, **_kw: object) -> bytes:
             # ``zendriver`` must never consult curl at all; ``curl-then-zendriver``
             # consults it first and escalates ONLY on a bot block, so a block is
             # what puts both transports in front of the browser.
             raise CloudflareChallengeError(url="https://example.com/", status=403)
 
         with (
-            patch.object(fetch_mod.zendriver_backend, "fetch_zendriver", browser),
+            patch.object(fetch_mod.zendriver, "fetch_zendriver", browser),
             patch.object(fetch_mod, "fetch_curl", walled),
         ):
             body, _ = fetch_mod.fetch(
