@@ -137,11 +137,18 @@ def duckduckgo(
                 timeout_sec=timeout_sec,
                 connect_timeout_sec=connect_timeout_sec,
             ),
-            # The challenge check runs INSIDE fetch, as Google's does. DDG
-            # serves its puzzle with HTTP 200, so checking the returned body
-            # here would raise past fetch's own `except BotDetectionError` --
-            # the hook that learns the domain and retries through Zendriver.
-            # Detected outside, an automatic-transport caller just fails.
+            # The challenge check runs INSIDE fetch. DDG serves its puzzle
+            # with HTTP 200, so a check made here turns that into a typed
+            # ``PuzzleChallengeError`` rather than the silent empty result a
+            # post-hoc check of the parsed body produces.
+            #
+            # It does NOT reach Zendriver, unlike Google's. ``raw_headers``
+            # resolves this request to plain ``curl`` (never
+            # ``curl-then-zendriver``), and the zendriver transport refuses a
+            # ``raw_headers`` request outright, so for this backend there is no
+            # domain learning, no browser retry and no fallback: the caller
+            # gets the typed error and nothing more. Restoring an escalation
+            # path is an open design question, not work in progress.
             observe=ObserveParams(body_validator=_duckduckgo_validate_body),
             policy=PolicyParams(transport=transport),
         ),
@@ -161,10 +168,20 @@ def _duckduckgo_validate_body(body: bytes) -> None:
     _duckduckgo_check_captcha(body.decode("utf-8", "replace"))
 
 
+def _duckduckgo_is_challenge(soup: bs4.BeautifulSoup) -> bool:
+    """Whether this page is DDG's bot challenge rather than a results page.
+
+    One predicate, shared by the validator that rejects the page and the
+    diagnostic that explains an empty parse. Written twice, a selector change
+    at DDG would make the diagnostic report "markup changed" for exactly the
+    challenge page it exists to tell apart.
+    """
+    return soup.select_one("form#challenge-form") is not None
+
+
 def _duckduckgo_check_captcha(page_html: str) -> None:
     """Raise when DDG returns its challenge page."""
-    soup = bs4.BeautifulSoup(page_html, "html.parser")
-    if soup.select_one("form#challenge-form") is not None:
+    if _duckduckgo_is_challenge(bs4.BeautifulSoup(page_html, "html.parser")):
         raise PuzzleChallengeError("DuckDuckGo returned a challenge form.")
 
 
@@ -221,7 +238,13 @@ def _duckduckgo_parse(
             break
 
     if not results:
-        logger.warning(
-            "No results parsed -- DDG may have changed markup.",
-        )
+        # Name which of three different causes this was. The single "markup
+        # changed" message used to be emitted for a bot-challenge page too,
+        # which sent an investigation after a parser that was working fine.
+        if _duckduckgo_is_challenge(soup):
+            logger.warning("No results parsed -- DDG served a bot challenge.")
+        elif soup.select_one("div#links") is not None:
+            logger.warning("No results parsed -- DDG returned an empty result list.")
+        else:
+            logger.warning("No results parsed -- DDG may have changed markup.")
     return results

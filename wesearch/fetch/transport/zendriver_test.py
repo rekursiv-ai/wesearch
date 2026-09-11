@@ -276,6 +276,9 @@ class _FakeBrowser:
         self.gets: list[str] = []
         self.stop_calls = 0
         self.last_tab: _FakeTab | None = None
+        # Mirrors zendriver's ``Popen`` handle on a launched browser; ``None``
+        # until a test supplies one, as it is on a browser we never launched.
+        self._process: _FakeProcess | None = None
 
     async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
         del new_tab
@@ -668,6 +671,52 @@ def test_a_failing_browser_stop_does_not_replace_the_error_it_cleans_up_after(
     with pytest.raises(RuntimeError, match="navigation refused"):
         asyncio.run(fz_mod._open_instance("https://gated.example/page", _PROFILE))
     assert browser.stop_calls == 1, "the browser was never asked to stop"
+
+
+class _FakeProcess:
+    """Stands in for zendriver's ``Popen`` handle on a launched browser."""
+
+    def __init__(self) -> None:
+        self.kills = 0
+
+    def kill(self) -> None:
+        self.kills += 1
+
+
+def test_a_wedged_browser_stop_kills_the_process() -> None:
+    """A stop that never returns must not leave the browser running.
+
+    Abandoning it leaks the whole Chrome tree, and the leaked root holds its
+    profile's ``SingletonLock``, so the next launch on that profile fails with
+    no usable diagnosis.
+    """
+    browser = _HangingStopBrowser()
+    process = _FakeProcess()
+    browser._process = process
+
+    asyncio.run(fz_mod._stopped(cast(zendriver.Browser, browser), budget_sec=0.01))
+
+    assert process.kills == 1, "a wedged browser was abandoned rather than killed"
+
+
+def test_a_failing_browser_stop_kills_the_process() -> None:
+    """A stop that raises leaks exactly as a wedged one does."""
+    browser = _RaisingStopBrowser()
+    process = _FakeProcess()
+    browser._process = process
+
+    asyncio.run(fz_mod._stopped(cast(zendriver.Browser, browser), budget_sec=1.0))
+
+    assert process.kills == 1, "a failed stop abandoned the browser"
+
+
+def test_killing_a_browser_that_was_never_launched_is_a_no_op() -> None:
+    """Cleanup must not raise when there is no process handle.
+
+    It runs with the caller's real error in flight, so anything raised here
+    would replace it.
+    """
+    fz_mod._kill_browser_process(cast(zendriver.Browser, _FakeBrowser()))
 
 
 class _RaisingCloseTab(_FakeTab):
@@ -2395,6 +2444,34 @@ def test_pool_shutdown_joins_thread_and_closes_loop() -> None:
 
     assert not pool._thread.is_alive()
     assert pool._loop.is_closed()
+
+
+def test_pool_shutdown_bounds_teardown_across_all_browsers() -> None:
+    """The teardown budget is TOTAL, not per browser.
+
+    Per browser, N wedged browsers would take N times the ceiling, and a
+    supervisor following SIGTERM with SIGKILL would cut teardown short and
+    leak exactly what this exists to close. Whatever the budget cannot close
+    politely is killed instead.
+    """
+    pool = _BrowserPool(serve_control=False)
+    wedged = [_HangingStopBrowser() for _ in range(3)]
+    processes = [_FakeProcess() for _ in wedged]
+    for index, browser in enumerate(wedged):
+        browser._process = processes[index]
+        pool._browsers[("egress", f"/profile/{index}")] = (
+            True,
+            cast(zendriver.Browser, browser),
+        )
+
+    started = time.monotonic()
+    pool.shutdown(budget_sec=0.05)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, "teardown scaled with browser count instead of being bounded"
+    assert [process.kills for process in processes] == [1, 1, 1], (
+        "a browser left open when the budget expired was not killed"
+    )
 
 
 def test_pool_keys_separate_egress(monkeypatch: pytest.MonkeyPatch) -> None:

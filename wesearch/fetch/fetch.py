@@ -341,10 +341,19 @@ class _Request:
             **(p.content.cookies or {}),
         }
         if p.content.raw_headers:
-            body = request.send(
-                headers=p.content.headers,
-                cookies=seeded_cookies or None,
-                raw_headers=True,
+            # Validated here too, not only on the identity path below. This
+            # branch bypasses ``_fetch_with_identity``, where every other
+            # return is wrapped, so unwrapped a caller's ``body_validator``
+            # never ran at all: DuckDuckGo's challenge page reached the parser
+            # as if it were results, yielding a silent empty list instead of
+            # the typed error the validator exists to raise.
+            body = _validated_body(
+                request,
+                body=request.send(
+                    headers=p.content.headers,
+                    cookies=seeded_cookies or None,
+                    raw_headers=True,
+                ),
             )
         else:
             body = _fetch_with_identity(

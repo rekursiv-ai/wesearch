@@ -1728,6 +1728,36 @@ class TestCurlThenZendriverBackend:
         assert via.call_count == 1
         remember.assert_called_once_with("walled.example")
 
+    def test_raw_headers_request_still_runs_the_body_validator(self) -> None:
+        """A raw-header caller's ``body_validator`` must run.
+
+        This branch bypasses ``_fetch_with_identity``, where every other return
+        is validated. Unwrapped, the validator never ran for any raw-header
+        caller, so a challenge page served with HTTP 200 reached the caller as
+        an ordinary body -- a silent wrong answer rather than a typed error.
+        """
+        seen: list[bytes] = []
+
+        def validate_body(body: bytes) -> None:
+            seen.append(body)
+            raise PuzzleChallengeError("challenge served")
+
+        with (
+            patch.object(fetch_mod, "_fetch_once", return_value=b"<form id=x>"),
+            pytest.raises(PuzzleChallengeError, match="challenge served"),
+        ):
+            fetch(
+                "https://raw.example/",
+                request=RequestParams(
+                    content=ContentParams(
+                        headers={"User-Agent": "x"}, raw_headers=True
+                    ),
+                    observe=ObserveParams(body_validator=validate_body),
+                ),
+            )
+
+        assert seen == [b"<form id=x>"], "the raw-header body was never validated"
+
     def test_success_body_challenge_falls_back_and_remembers_domain(self) -> None:
         result = BrowserResult(body=b"rendered", cookies={}, final_url="")
 
