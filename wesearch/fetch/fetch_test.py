@@ -797,7 +797,7 @@ class TestFetchSession:
         base = FetchSession(cookies={"https://x.com": {"a": "1"}})
         updated = base.with_cookies("https://x.com/p", {"b": "2"})
         assert updated.cookies_for("https://x.com/q") == {"a": "1", "b": "2"}
-        assert base.cookies_for("https://x.com/q") == {"a": "1"}  # original unchanged.
+        assert base.cookies_for("https://x.com/q") == {"a": "1"}  # Original unchanged.
 
     def test_cookies_are_scoped_to_the_setting_origin(self) -> None:
         # A flat name->value jar sent a cookie one host set to the NEXT host
@@ -862,7 +862,7 @@ class TestFetchSession:
         sent = req.call_args.kwargs["headers"]
         assert "sec-ch-ua-arch" in sent
         assert "sec-ch-ua-bitness" in sent
-        assert "sec-ch-ua-model" not in sent  # never opted in.
+        assert "sec-ch-ua-model" not in sent  # Never opted in.
 
     def test_cold_origin_sends_no_extended_hints(self) -> None:
         # A fresh session (no Accept-CH opt-in) sends none of the extended hints,
@@ -1228,7 +1228,7 @@ class TestIdentityLayer:
             )
         sent = req.call_args.kwargs["headers"]
         assert "User-Agent" not in sent
-        assert "Cookie" not in sent  # jar carries the stored cookie, not the header.
+        assert "Cookie" not in sent  # `jar` carries the stored cookie, not the header.
 
     def test_caller_ua_and_cookie_override_profile(self) -> None:
         self._store().save(
@@ -1351,7 +1351,7 @@ class TestIdentityLayer:
                 "https://x.com/p",
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
-        assert req.call_count == 1  # no retry with no known identity.
+        assert req.call_count == 1  # No retry with no known identity.
 
     def test_raw_headers_bypasses_identity(self) -> None:
         self._store().save(
@@ -1370,7 +1370,7 @@ class TestIdentityLayer:
                 ),
             )
         sent = req.call_args.kwargs["headers"]
-        assert sent == {"User-Agent": "raw"}  # no profile UA, no stored cookie.
+        assert sent == {"User-Agent": "raw"}  # No profile UA, no stored cookie.
 
     def test_send_as_keyless_when_egress_none(self, tmp_path: Path) -> None:
         # _send_as with egress=None draws a UA, sends, persists nothing.

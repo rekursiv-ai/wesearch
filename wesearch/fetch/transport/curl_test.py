@@ -524,7 +524,7 @@ class TestFetchCurlBackend:
                 request=RequestParams(retry=RetryParams(max_redirects=0)),
             )
         assert body == b"redirect body"
-        assert mock_req.call_count == 1  # never followed.
+        assert mock_req.call_count == 1  # Never followed.
 
     def test_curl_connection_error_is_retried(self) -> None:
         # A1: a curl transport error (connection refused/timeout) becomes
@@ -595,7 +595,7 @@ class TestFetchCurlBackend:
                 ),
             )
         assert body == b"ok"
-        assert seats == ["example.com"]  # seated once, reused on the same-origin hop.
+        assert seats == ["example.com"]  # Seated once, reused on the same-origin hop.
 
 
 class TestCurlSessionPoolLocking:
@@ -643,7 +643,7 @@ class TestCurlSessionPoolLocking:
 
         monkeypatch.setattr(curl, "_curl_lock", _Instrumented())
         monkeypatch.setattr(curl, "_curl_sessions", {})
-        curl.close_curl_session("1.2.3.4", "x.com", "chrome")  # absent: no-op.
+        curl.close_curl_session("1.2.3.4", "x.com", "chrome")  # Absent: no-op.
         assert acquired, "close_curl_session mutated the pool without _curl_lock"
 
     def test_close_sessions_except_preserves_current_egress(

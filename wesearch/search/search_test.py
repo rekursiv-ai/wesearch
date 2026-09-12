@@ -74,7 +74,7 @@ def _tuple_side_effect(side_effect: object) -> object:
             item if isinstance(item, BaseException) else (item, FetchSession())
             for item in items
         ]
-    return side_effect  # an exception class/instance: raised as-is.
+    return side_effect  # An exception class/instance: raised as-is.
 
 
 @contextmanager

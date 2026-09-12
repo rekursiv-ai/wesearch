@@ -27,7 +27,7 @@ def _offset_cursor(
 
     def do_fetch(offset: int, size: int) -> MutableJSON:
         del size
-        idx = offset  # pages are indexed by page number for simplicity.
+        idx = offset  # `pages` are indexed by page number for simplicity.
         rows = pages[idx] if idx < len(pages) else []
         body: MutableJSON = {"data": [*rows]}
         return body
@@ -50,14 +50,14 @@ class TestPaginate:
         cursor = _offset_cursor([[{"n": 1}, {"n": 2}]], page_size_max=10)
         page = paginate(cursor, limit=None)
         assert [r["n"] for r in page.entries] == [1, 2]
-        assert page.complete  # short page (2 < 10) -> exhausted.
+        assert page.complete  # Short page (2 < 10) -> exhausted.
 
     def test_limit_clamps_page_size_never_exceeds_max(self) -> None:
         sizes: list[int] = []
 
         def do_fetch(offset: int, size: int) -> MutableJSON:
             sizes.append(size)
-            rows: list[MutableJSONValue] = [{"n": offset}] * size  # always full.
+            rows: list[MutableJSONValue] = [{"n": offset}] * size  # Always full.
             body: MutableJSON = {"data": rows}
             return body
 
@@ -108,13 +108,13 @@ class TestPaginate:
         cursor = Cursor(
             fetch=MagicMock(side_effect=do_fetch),
             rows=_rows,
-            advance=lambda _b, pos, _s: pos + 1,  # always claims more.
+            advance=lambda _b, pos, _s: pos + 1,  # Always claims more.
             page_size_max=200,
             is_depth_ceiling=lambda e: e.status == 400,
         )
         page = paginate(cursor, limit=1000)
         assert len(page.entries) == 200
-        assert not page.complete  # ceiling hit -> more may exist.
+        assert not page.complete  # Ceiling hit -> more may exist.
 
     def test_depth_ceiling_without_results_reraises(self) -> None:
         def do_fetch(offset: int, size: int) -> MutableJSON:
@@ -146,7 +146,7 @@ class TestPaginate:
         cursor = Cursor(
             fetch=MagicMock(return_value={"data": [{"n": 0}] * 200}),
             rows=_rows,
-            advance=lambda _b, _pos, _s: 0,  # never advances.
+            advance=lambda _b, _pos, _s: 0,  # Never advances.
             page_size_max=200,
         )
         page = paginate(cursor, limit=1000)

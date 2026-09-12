@@ -154,7 +154,7 @@ def seed_session_jar(
     # export ships the bare iteration.
     present = {c.name for c in session.cookies.jar}
     for name, value in cookies.items():
-        if name not in present:  # never clobber a live jar cookie with a stale copy.
+        if name not in present:  # Never clobber a live jar cookie with a stale copy.
             _jar_set(session, domain, name, value)
 
 
@@ -303,7 +303,7 @@ def fetch_curl(
                     ]
                 }
         try:
-            verb = cast(HttpMethod, loop.method)  # curl types verb as a Literal.
+            verb = cast(HttpMethod, loop.method)  # Curl types verb as a Literal.
             resp = (
                 session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **Unpack[RequestParams] TypedDict is unstubbed
                     verb,

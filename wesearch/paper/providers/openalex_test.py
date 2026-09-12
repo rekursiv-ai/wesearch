@@ -421,8 +421,8 @@ class TestReferences:
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert len(records) == 1  # only 1 of 2 refs resolved.
-        assert not complete  # must NOT claim complete when refs went missing.
+        assert len(records) == 1  # Only 1 of 2 refs resolved.
+        assert not complete  # Must NOT claim complete when refs went missing.
 
     def test_duplicate_ref_id_still_complete(self) -> None:
         # SPEC-A: referenced_works may repeat an id. The ``openalex:`` OR-filter
@@ -436,7 +436,7 @@ class TestReferences:
                     "referenced_works": [
                         "https://openalex.org/W10",
                         "https://openalex.org/W11",
-                        "https://openalex.org/W10",  # duplicate of the first.
+                        "https://openalex.org/W10",  # Duplicate of the first.
                     ],
                 }
             ]
@@ -454,7 +454,7 @@ class TestReferences:
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert complete  # all distinct refs resolved -> complete despite dup.
+        assert complete  # All distinct refs resolved -> complete despite dup.
 
     def test_limit_truncates_and_marks_incomplete(self) -> None:
         resolve: MutableJSON = {
@@ -607,7 +607,7 @@ class TestCitations:
             records, total, complete = openalex.citations("doi", "10.1/x", limit=None)
         assert total == 200
         assert len(records) == 200
-        assert complete  # cursor exhausted: 200 of 200 returned.
+        assert complete  # Cursor exhausted: 200 of 200 returned.
 
     def test_multi_page_exact_total_is_complete(self) -> None:
         # Two full 200-pages reaching count=400 exactly: walking to limit=400
