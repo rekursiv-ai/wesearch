@@ -8,9 +8,12 @@ they arrive), so nothing here has to interpret Chrome's own bookkeeping.
 
 Requires a ``google-chrome`` / ``google-chrome-stable`` binary; callers gate on
 :func:`chrome_available` and skip when absent (Chrome is not a hard dependency).
+A snap-confined Chromium does not count: see :func:`_chrome_binary`.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import contextlib
 import ctypes
@@ -47,7 +50,7 @@ _libc = _load_libc()
 
 
 def chrome_available() -> bool:
-    """Whether a Chrome binary is on ``PATH``.
+    """Whether a Chrome binary that honors ``--user-data-dir`` is on ``PATH``.
 
     Returns:
       result: The bool.
@@ -158,7 +161,7 @@ def die_with_parent() -> None:
 
 
 def _chrome_binary() -> str | None:
-    """Return the first available Chrome binary name, or ``None``."""
+    """Return the first usable Chrome binary name, or ``None``."""
     for name in (
         "google-chrome-stable",
         "google-chrome",
@@ -166,9 +169,35 @@ def _chrome_binary() -> str | None:
         "chromium",
         "chrome",
     ):
-        if shutil.which(name) is not None:
-            return name
+        found = shutil.which(name)
+        # A snap-confined Chromium cannot read a ``--user-data-dir`` outside its
+        # sandbox (measured: "Failed To Create Data Directory" for a profile
+        # under ``TMPDIR``), so it silently falls back to its one persistent
+        # profile. That breaks both halves of :func:`drive_chrome`'s contract:
+        # the run is no longer incognito-and-discarded, and a second concurrent
+        # launch aborts on that profile's ``SingletonLock`` without ever
+        # requesting the page.
+        if found is None or _snap_confined(found):
+            continue
+        return name
     return None
+
+
+# Two shapes reach the snap. ``/snap/bin/chromium`` is a symlink to the ``snap``
+# binary itself. Ubuntu's transitional ``chromium-browser`` deb installs a shell
+# script under ``/usr/bin`` that execs the snap, so a ``/snap/`` prefix check
+# accepts it and the wrapper drops the temp profile just the same; its text
+# names the snap, which is what the byte scan looks for.
+def _snap_confined(launcher: str) -> bool:
+    """Whether ``launcher`` is the snap entry point or a wrapper that execs it."""
+    resolved = Path(launcher).resolve()
+    if resolved.name == "snap" or resolved.is_relative_to("/snap"):
+        return True
+    try:
+        head = resolved.read_bytes()[:4096]
+    except OSError:
+        return False
+    return b"snap run" in head or b"/snap/bin/" in head
 
 
 # :func:`die_with_parent` made it a group leader, so one ``killpg`` reaches the zygote

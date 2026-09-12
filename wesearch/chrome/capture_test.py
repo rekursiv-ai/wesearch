@@ -255,6 +255,46 @@ class TestChromeAvailable:
         with patch.object(shutil, "which", only_chromium_browser):
             assert chrome_available()
 
+    def test_a_snap_confined_chromium_does_not_count(self, tmp_path: Path) -> None:
+        # Ubuntu's ``chromium`` package is a snap wrapper, which cannot use the
+        # temp profile ``drive_chrome`` hands it; see ``_chrome_binary``.
+        snap = tmp_path / "snap"
+        snap.write_bytes(b"\x7fELF")
+        entry = tmp_path / "chromium"
+        entry.symlink_to(snap)
+
+        def only_snap_chromium(name: str) -> str | None:
+            return str(entry) if name == "chromium" else None
+
+        with patch.object(shutil, "which", only_snap_chromium):
+            assert not chrome_available()
+
+    def test_a_usr_bin_wrapper_around_the_snap_does_not_count(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The transitional deb puts a shell script under /usr/bin, so the
+        # launcher's own path says nothing; its body execs the snap.
+        wrapper = tmp_path / "chromium-browser"
+        wrapper.write_text('#!/bin/sh\nexec /snap/bin/chromium "$@"\n')
+
+        def only_wrapper(name: str) -> str | None:
+            return str(wrapper) if name == "chromium-browser" else None
+
+        with patch.object(shutil, "which", only_wrapper):
+            assert not chrome_available()
+
+    def test_a_native_binary_counts(self, tmp_path: Path) -> None:
+        # Positive control for the byte scan: an ordinary executable is kept.
+        binary = tmp_path / "google-chrome"
+        binary.write_bytes(b"\x7fELF" + bytes(64))
+
+        def only_native(name: str) -> str | None:
+            return str(binary) if name == "google-chrome" else None
+
+        with patch.object(shutil, "which", only_native):
+            assert chrome_available()
+
 
 if __name__ == "__main__":
     from wesearch.lib.testing.main import test_main
