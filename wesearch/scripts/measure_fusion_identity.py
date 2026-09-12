@@ -84,14 +84,14 @@ def main(
         print(
             f"{query!r:26s} doi={len(by_doi):3d} "
             f"doi+arxiv={len(by_arxiv):3d} mag_pairs={len(mag_pairs):3d} "
-            f"mag_beyond_doi={len(extra):2d}"
+            f"mag_beyond_doi={len(extra):2d}",
         )
         time.sleep(1.0)
     print(
         f"\nTOTAL queries={sampled}/{len(queries)} doi={totals['doi']} "
         f"doi+arxiv={totals['arxiv']} "
         f"(+{totals['arxiv'] - totals['doi']} from arXiv) "
-        f"mag_beyond_doi={totals['mag_extra']}"
+        f"mag_beyond_doi={totals['mag_extra']}",
     )
     return 0 if sampled else 1
 
@@ -168,7 +168,9 @@ def _arxiv_keys(rec: PaperRecord) -> list[str]:
 
 
 def _raw_records(
-    query: str, *, attempts: int = 4
+    query: str,
+    *,
+    attempts: int = 4,
 ) -> tuple[list[PaperRecord], list[PaperRecord]]:
     """Fetch one page from each backend, retrying S2's shared-gate throttle."""
     for _attempt in range(attempts):
@@ -180,7 +182,11 @@ def _raw_records(
     else:
         raise PaperError(f"Semantic Scholar unavailable for {query!r}")
     oa_hits, _oa_total, _oa_complete = openalex.search(
-        query, limit=40, year_from=None, year_to=None, open_access_only=False
+        query,
+        limit=40,
+        year_from=None,
+        year_to=None,
+        open_access_only=False,
     )
     return s2_hits, oa_hits
 

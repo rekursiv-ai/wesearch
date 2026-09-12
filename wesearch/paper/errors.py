@@ -84,7 +84,7 @@ def translate_http_error(
         return NotFoundError(f"{backend}: not found.")
     if e.status == 429:
         return RateLimitError(
-            rate_limit_message or f"{backend} rate limit hit; retry shortly."
+            rate_limit_message or f"{backend} rate limit hit; retry shortly.",
         )
     body = e.body[:200].decode(errors="replace")
     return BackendError(f"{backend} HTTP {e.status}: {body}", status=e.status)

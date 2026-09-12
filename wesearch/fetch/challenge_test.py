@@ -172,7 +172,10 @@ def test_provider_markers_are_not_shared_challenges() -> None:
 
 def test_http_error_uses_body_challenge() -> None:
     error = classify_http_error(
-        "https://x.com", 403, {}, b'<div class="g-recaptcha"></div>'
+        "https://x.com",
+        403,
+        {},
+        b'<div class="g-recaptcha"></div>',
     )
     assert isinstance(error, PuzzleChallengeError)
 
@@ -200,7 +203,8 @@ def test_http_error_uses_cloudflare_mitigation_header() -> None:
     ],
 )
 def test_cloudflare_fronted_origin_error_is_not_a_challenge(
-    status: int, body: bytes
+    status: int,
+    body: bytes,
 ) -> None:
     """A response Cloudflare PROXIES is the origin's, not Cloudflare's.
 

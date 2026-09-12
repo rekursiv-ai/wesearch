@@ -51,7 +51,8 @@ _API_KEY_ENV: Final = "JINA_AI_API_KEY"
 # Sentinel the proxy embeds in a 200 body when its own backend was bot-walled;
 # matched on the raw bytes because the failure rides a success status.
 _SOFT_FAIL_RE: Final = re.compile(
-    rb"Warning:\s*Target URL returned error \d{3}", re.IGNORECASE
+    rb"Warning:\s*Target URL returned error \d{3}",
+    re.IGNORECASE,
 )
 
 

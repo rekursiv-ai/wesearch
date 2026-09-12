@@ -62,14 +62,22 @@ class TestSearch:
     def test_default_fetch_when_limit_none(self) -> None:
         with patch(_TARGET, return_value=[]) as mock:
             searxng.search(
-                "q", limit=None, year_from=None, year_to=None, open_access_only=False
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert mock.call_args.kwargs["num_results"] == 20
 
     def test_limit_forwarded_as_num_results(self) -> None:
         with patch(_TARGET, return_value=[]) as mock:
             searxng.search(
-                "q", limit=5, year_from=None, year_to=None, open_access_only=False
+                "q",
+                limit=5,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert mock.call_args.kwargs["num_results"] == 5
 
@@ -114,7 +122,11 @@ class TestSearch:
         hits = [_result(title=f"h{i}") for i in range(5)]
         with patch(_TARGET, return_value=hits):
             records, total, complete = searxng.search(
-                "q", limit=2, year_from=None, year_to=None, open_access_only=False
+                "q",
+                limit=2,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert total == 2
         assert [r.title for r in records] == ["h0", "h1"]
@@ -126,7 +138,11 @@ class TestSearch:
             pytest.raises(BackendError, match="SearXNG"),
         ):
             searxng.search(
-                "q", limit=None, year_from=None, year_to=None, open_access_only=False
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
 
     def test_runtime_error_raises_backend_error(self) -> None:
@@ -135,7 +151,11 @@ class TestSearch:
             pytest.raises(BackendError, match="SearXNG"),
         ):
             searxng.search(
-                "q", limit=None, year_from=None, year_to=None, open_access_only=False
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
 
 
@@ -172,7 +192,7 @@ class TestToRecord:
                 snippet="abstract",
                 authors=("A", "B"),
                 citations=42,
-            )
+            ),
         )
         assert rec.venue == "Nature"
         assert rec.abstract == "abstract"

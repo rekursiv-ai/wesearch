@@ -100,7 +100,7 @@ def public_host(hostname: str) -> ValidatedHost:
         ):
             raise ValueError(
                 f"Refusing to fetch {host!r} (resolves to non-public address "
-                f"{address})."
+                f"{address}).",
             )
     if not ips:
         raise ValueError(f"DNS resolution returned no address for {host!r}.")
@@ -266,7 +266,10 @@ def redirect_target(current_url: str, status: int, headers: dict[str, str]) -> s
     location = headers.get("location")
     if not location:
         raise FetchError(
-            current_url, status, headers, b"Redirect with no Location header"
+            current_url,
+            status,
+            headers,
+            b"Redirect with no Location header",
         )
     # RFC 3986 relative resolution: handles absolute, scheme-relative, and
     # path-relative Locations without corrupting the host.
@@ -348,7 +351,7 @@ def apply_redirect(
     redirect_url: str,
     origin_bound: frozenset[str] = frozenset(
         {"cookie", "authorization"}
-        | {name.lower() for name in chrome_client_hints(major=1)}
+        | {name.lower() for name in chrome_client_hints(major=1)},
     ),
 ) -> tuple[dict[str, str], str, bytes | None]:
     """Compute the (headers, method, body) for the next hop of a redirect.

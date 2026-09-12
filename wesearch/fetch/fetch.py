@@ -161,11 +161,11 @@ class FetchSession:
     impersonate: str = "chrome"
 
     cookies: Mapping[str, Mapping[str, str]] = field(
-        default_factory=dict[str, Mapping[str, str]]
+        default_factory=dict[str, Mapping[str, str]],
     )
 
     accept_ch: Mapping[str, frozenset[str]] = field(
-        default_factory=dict[str, frozenset[str]]
+        default_factory=dict[str, frozenset[str]],
     )
 
     def cookies_for(self, url: str) -> dict[str, str]:
@@ -432,7 +432,7 @@ def last_known_egress_ip() -> str | None:
 # when no pool exists, so this subscription is free until a browser fetch runs.
 # Seeded here rather than registered at import so module scope stays declarative.
 _on_egress_rotation: list[Callable[[str | None], None]] = [
-    lambda _ip: zendriver.shutdown_browsers()
+    lambda _ip: zendriver.shutdown_browsers(),
 ]
 
 
@@ -819,7 +819,7 @@ class _ResponseLearner:
         set_cookie = resp_headers.get("set-cookie")
         if set_cookie:
             self._cookies.setdefault(origin(url), {}).update(
-                parse_set_cookie(set_cookie)
+                parse_set_cookie(set_cookie),
             )
         hints = _accept_ch_hints(resp_headers)
         if hints:
@@ -850,7 +850,10 @@ class _ResponseLearner:
 # here, exactly as the initial hop was -- a redirect target is attacker-controlled and
 # skipping its check is the classic SSRF bypass.
 def _reseat(
-    request: _Request, egress: str | None, impersonate: str, url: str
+    request: _Request,
+    egress: str | None,
+    impersonate: str,
+    url: str,
 ) -> cc_requests.Session[Response] | None:
     """Return the pooled Session for a cross-host redirect target."""
     if egress is None:
@@ -942,7 +945,11 @@ def _fetch_with_identity(
         return _validated_body(
             request,
             _send_as(
-                request, None, egress_ip(cache=False), caller_headers, caller_cookies
+                request,
+                None,
+                egress_ip(cache=False),
+                caller_headers,
+                caller_cookies,
             ),
         )
 
@@ -1098,7 +1105,9 @@ def _send_via_zendriver(
         # navigation response to this layer.
         synthesized = "\n".join(f"{k}={v}" for k, v in result.cookies.items())
         request.observer(
-            200, {"set-cookie": synthesized} if result.cookies else {}, landed_url
+            200,
+            {"set-cookie": synthesized} if result.cookies else {},
+            landed_url,
         )
     if egress is not None and landed_domain and result.cookies:
         store = ProfileStore.shared()
@@ -1108,7 +1117,7 @@ def _send_via_zendriver(
                 landed_domain,
                 Profile(
                     ua=draw_user_agent(
-                        kind_for_impersonate(request.session.impersonate)
+                        kind_for_impersonate(request.session.impersonate),
                     ),
                     cookies=dict(result.cookies),
                 ),

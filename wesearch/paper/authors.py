@@ -99,12 +99,16 @@ def author_papers(
     keep = functools.partial(_year_in_bounds, year_from=year_from, year_to=year_to)
     page = s2.author_papers(author_id, limit=limit, keep=keep)
     return Listing(
-        records=[s2.paper_record_from(e) for e in page.entries], complete=page.complete
+        records=[s2.paper_record_from(e) for e in page.entries],
+        complete=page.complete,
     )
 
 
 def _year_in_bounds(
-    entry: MutableJSON, *, year_from: int | None, year_to: int | None
+    entry: MutableJSON,
+    *,
+    year_from: int | None,
+    year_to: int | None,
 ) -> bool:
     """Whether ``entry["year"]`` falls within the optional bounds."""
     if year_from is None and year_to is None:

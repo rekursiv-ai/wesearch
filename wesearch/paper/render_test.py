@@ -84,7 +84,7 @@ def test_both_renderings_emit_sources() -> None:
 
 def test_format_author_line_is_one_greppable_line() -> None:
     line = format_author_line(
-        AuthorRecord(author_id="7", name="Ada", h_index=42, affiliations=("MIT",))
+        AuthorRecord(author_id="7", name="Ada", h_index=42, affiliations=("MIT",)),
     )
     assert "\n" not in line
     assert "[author:7]" in line

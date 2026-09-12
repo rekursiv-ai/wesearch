@@ -52,7 +52,11 @@ __all__ = [
 # and the port that pin applies to. The pin participates because
 # ``CurlOpt.RESOLVE`` is fixed when the Session is built.
 _SessionKey: TypeAlias = tuple[  # noqa: UP040 -- forward ref in a type alias
-    str, str, str, "ValidatedHost | None", int
+    str,
+    str,
+    str,
+    "ValidatedHost | None",
+    int,
 ]
 
 # Live curl_cffi Sessions keyed by identity, so a session reuses one connection
@@ -114,8 +118,8 @@ def curl_session(
             options = (
                 {
                     curl_cffi.CurlOpt.RESOLVE: [
-                        f"{pin.host}:{port}:{bracket_ipv6(pin.ip)}"
-                    ]
+                        f"{pin.host}:{port}:{bracket_ipv6(pin.ip)}",
+                    ],
                 }
                 if pin is not None
                 else {}
@@ -132,7 +136,9 @@ def curl_session(
 
 
 def seed_session_jar(
-    session: cc_requests.Session[Response], domain: str, cookies: dict[str, str]
+    session: cc_requests.Session[Response],
+    domain: str,
+    cookies: dict[str, str],
 ) -> None:
     """Load stored profile cookies into a curl session jar it does not yet hold.
 
@@ -159,7 +165,9 @@ def seed_session_jar(
 
 
 def set_session_cookies(
-    session: cc_requests.Session[Response], domain: str, cookies: dict[str, str]
+    session: cc_requests.Session[Response],
+    domain: str,
+    cookies: dict[str, str],
 ) -> None:
     """Set caller cookies into a curl session jar, OVERWRITING any prior value.
 
@@ -274,7 +282,11 @@ def fetch_curl(
     # Cookies are already in headers["Cookie"], so NO cookies= kwarg is passed
     # (curl would emit a second Cookie source -- verified both are sent).
     loop = _CurlLoop(
-        url=url, method=method, headers=headers, body=body, remaining=max_redirects
+        url=url,
+        method=method,
+        headers=headers,
+        body=body,
+        remaining=max_redirects,
     )
     impers = cast(BrowserTypeLiteral, impersonate)
     # curl_cffi reads a (connect, read) pair; a bare float budgets both together.
@@ -299,8 +311,8 @@ def fetch_curl(
                 pin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
                 one_shot_options = {
                     curl_cffi.CurlOpt.RESOLVE: [
-                        f"{pin.host}:{pin_port}:{bracket_ipv6(pin.ip)}"
-                    ]
+                        f"{pin.host}:{pin_port}:{bracket_ipv6(pin.ip)}",
+                    ],
                 }
         try:
             verb = cast(HttpMethod, loop.method)  # Curl types verb as a Literal.
@@ -343,7 +355,10 @@ def fetch_curl(
         content = bytes(resp.content or b"")
         current_url = loop.url
         if loop.follow(
-            status, resp_headers, on_response=on_response, on_redirect=on_redirect
+            status,
+            resp_headers,
+            on_response=on_response,
+            on_redirect=on_redirect,
         ):
             # A pin is fixed per Session, so a hop onto a different host must
             # move to that host's pool entry -- otherwise the new host would be
@@ -360,7 +375,10 @@ def fetch_curl(
 
 
 def _jar_set(
-    session: cc_requests.Session[Response], domain: str, name: str, value: str
+    session: cc_requests.Session[Response],
+    domain: str,
+    name: str,
+    value: str,
 ) -> None:
     """Set one cookie in a curl jar, honoring RFC 6265bis name-prefix rules."""
     # RFC 6265bis 4.1.3 cookie-name prefixes, which curl_cffi enforces (and warns

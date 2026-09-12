@@ -50,7 +50,7 @@ def test_extracts_article_prose() -> None:
     """An article-shaped page yields its body."""
     body = "This is a paragraph of article prose long enough to be scored as content."
     text = extract_trafilatura(
-        f"<html><body><article><p>{body}</p></article></body></html>"
+        f"<html><body><article><p>{body}</p></article></body></html>",
     )
     assert body in text
 

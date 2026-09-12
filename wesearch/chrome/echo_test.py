@@ -118,7 +118,10 @@ class TestEchoOracle:
         with EchoOracle() as oracle:
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
             conn = http.client.HTTPSConnection(
-                "localhost", oracle.port, timeout=5, context=context
+                "localhost",
+                oracle.port,
+                timeout=5,
+                context=context,
             )
             conn.request("GET", "/", headers={"User-Agent": "probe", "Accept": "*/*"})
             conn.getresponse().read()
@@ -131,7 +134,10 @@ class TestEchoOracle:
         with EchoOracle() as oracle:
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
             conn = http.client.HTTPSConnection(
-                "localhost", oracle.port, timeout=5, context=context
+                "localhost",
+                oracle.port,
+                timeout=5,
+                context=context,
             )
             conn.request("GET", "/favicon.ico")
             conn.getresponse().read()
@@ -159,14 +165,19 @@ class TestEchoOracleResilience:
             aborting = socket.socket()
             # SO_LINGER with a zero timeout makes close() send RST, not FIN.
             aborting.setsockopt(
-                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+                socket.SOL_SOCKET,
+                socket.SO_LINGER,
+                struct.pack("ii", 1, 0),
             )
             aborting.connect(("127.0.0.1", oracle.port))
             aborting.close()
 
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
             conn = http.client.HTTPSConnection(
-                "localhost", oracle.port, timeout=5, context=context
+                "localhost",
+                oracle.port,
+                timeout=5,
+                context=context,
             )
             conn.request("GET", "/", headers={"User-Agent": "probe"})
             conn.getresponse().read()
@@ -191,7 +202,10 @@ class TestEchoOracleResilience:
             stalled.sendall(b"GET / HTTP")  # A head that never terminates.
 
             served = http.client.HTTPSConnection(
-                "localhost", oracle.port, timeout=5, context=context
+                "localhost",
+                oracle.port,
+                timeout=5,
+                context=context,
             )
             served.request("GET", "/", headers={"User-Agent": "probe"})
             served.getresponse().read()

@@ -68,7 +68,7 @@ class TestFuse:
                 doi="10.1145/3596512",
                 arxiv_id="2210.11934",
                 sources=("s2",),
-            )
+            ),
         ]
         oa = [
             PaperRecord(
@@ -76,7 +76,7 @@ class TestFuse:
                 doi="10.48550/arxiv.2210.11934",
                 arxiv_id="2210.11934",
                 sources=("openalex",),
-            )
+            ),
         ]
         out = fuse(s2, oa)
         assert len(out) == 1
@@ -144,7 +144,8 @@ class TestAMissingTitleIsNotIdentity:
         # The refusal is scoped to an ABSENT title: a genuine one is still the
         # last-resort identity for id-less records.
         out = fuse(
-            [_rec("Deep Learning!")], [_rec("deep  learning", source="openalex")]
+            [_rec("Deep Learning!")],
+            [_rec("deep  learning", source="openalex")],
         )
         assert len(out) == 1
 

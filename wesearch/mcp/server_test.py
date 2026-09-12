@@ -43,7 +43,10 @@ def _fetch_web_returning(html: bytes, *, max_chars: int) -> Callable[..., FetchR
     """Return a ``fetch_web`` stub that renders ``html`` through the real extractor."""
 
     def _stub(
-        url: str, *, max_chars: int = max_chars, policy: object = None
+        url: str,
+        *,
+        max_chars: int = max_chars,
+        policy: object = None,
     ) -> FetchResult:
         del policy
         # Pinned, not defaulted: this stub feeds a few-line fixture, which the
@@ -95,7 +98,8 @@ def test_paper_details_normalizes_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_paper_pdf_writes_cache_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
         fetch,
@@ -150,7 +154,10 @@ def test_web_fetch_routes_through_the_shared_render_path(
     captured: dict[str, object] = {}
 
     def _fake(
-        url: str, *, max_chars: int | None = None, policy: object = None
+        url: str,
+        *,
+        max_chars: int | None = None,
+        policy: object = None,
     ) -> object:
         del max_chars
         captured["extractor"] = getattr(policy, "extractor", None)
@@ -174,7 +181,10 @@ def test_web_fetch_forwards_every_transport(monkeypatch: pytest.MonkeyPatch) -> 
     captured: dict[str, object] = {}
 
     def _fake(
-        url: str, *, max_chars: int | None = None, policy: object = None
+        url: str,
+        *,
+        max_chars: int | None = None,
+        policy: object = None,
     ) -> FetchResult:
         del max_chars
         captured["transport"] = getattr(policy, "transport", None)
@@ -221,7 +231,9 @@ _PARAM_SURFACES: list[tuple[type[Schema], str, frozenset[str]]] = [
 
 @pytest.mark.parametrize(("spec", "tool", "omitted"), _PARAM_SURFACES)
 def test_mcp_renders_every_declared_param(
-    spec: type[Schema], tool: str, omitted: frozenset[str]
+    spec: type[Schema],
+    tool: str,
+    omitted: frozenset[str],
 ) -> None:
     """Every declared param, on both surfaces, derived from the spec.
 
@@ -261,7 +273,10 @@ def test_web_fetch_treats_the_model_url_as_untrusted(
     captured: dict[str, object] = {}
 
     def _fake_fetch(
-        url: str, *, max_chars: int | None = None, policy: object = None
+        url: str,
+        *,
+        max_chars: int | None = None,
+        policy: object = None,
     ) -> FetchResult:
         del max_chars
         captured["trust"] = getattr(policy, "trust", None)
@@ -289,7 +304,8 @@ def test_paper_search_rejects_a_nonpositive_limit() -> None:
 
 
 def test_paper_pdf_gives_colliding_slugs_distinct_paths(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # ``id_slug`` maps every unsafe character to ``_``, so these two valid DOIs
     # slug identically and one paper's bytes overwrote the other's.
@@ -304,7 +320,8 @@ def test_paper_pdf_gives_colliding_slugs_distinct_paths(
 
 
 def test_paper_pdf_survives_a_long_doi_suffix(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # An unbounded slug exceeds the 255-byte filename limit and raises OSError.
     monkeypatch.setattr(server, "cache_dir", _returns(tmp_path))

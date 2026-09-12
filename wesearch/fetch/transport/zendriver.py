@@ -335,7 +335,9 @@ class _BrowserPool:
         self._lock = threading.Lock()
         # Started LAST, so every field _run_loop touches exists before it runs.
         self._thread = threading.Thread(
-            target=self._run_loop, name="loop-web-browser", daemon=True
+            target=self._run_loop,
+            name="loop-web-browser",
+            daemon=True,
         )
         self._thread.start()
 
@@ -398,7 +400,7 @@ class _BrowserPool:
             if existing is not None and not existing[1].stopped:
                 if existing[0] != headless:
                     raise RuntimeError(
-                        "Cannot change Zendriver launch mode for a live profile."
+                        "Cannot change Zendriver launch mode for a live profile.",
                     )
                 return existing[1]
             launched = await self._launch(profile_dir, headless=headless)
@@ -549,7 +551,7 @@ async def _launch_browser(
                 # default 10x1.0s=10s hang that stacked past live-test timeouts.
                 browser_connection_timeout=0.5,
                 browser_connection_max_tries=6,
-            )
+            ),
         )
     except Exception as error:
         # ``zendriver`` raises a bare ``Exception`` when Chrome cannot start or the
@@ -760,7 +762,7 @@ def main() -> int:
     print(
         f"Opening {args.url} in Chrome on "
         f"{data_dir() / 'rekursiv-ai' / 'wesearch' / 'fetch-zendriver'} -- "
-        "close the window when done."
+        "close the window when done.",
     )
     open_instance(args.url)
     print("Window closed.")
@@ -818,7 +820,8 @@ async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> N
         _kill_browser_process(browser)
     except Exception:
         logger.warning(
-            "browser stop failed; killing the browser process", exc_info=True
+            "browser stop failed; killing the browser process",
+            exc_info=True,
         )
         _kill_browser_process(browser)
 
@@ -857,8 +860,8 @@ async def _navigate_tab(
             await tab.send(zendriver.cdp.network.enable())
             await tab.send(
                 zendriver.cdp.network.set_extra_http_headers(
-                    zendriver.cdp.network.Headers(ambient)
-                )
+                    zendriver.cdp.network.Headers(ambient),
+                ),
             )
         await tab.get(url)
         await tab.wait_for_ready_state("complete")
@@ -973,7 +976,9 @@ async def _guard_requests(
                 # navigation error, which is the honest outcome for a hop the
                 # caller's budget does not cover.
                 logger.debug(
-                    "redirect budget of %d exhausted at %r", max_redirects, target
+                    "redirect budget of %d exhausted at %r",
+                    max_redirects,
+                    target,
                 )
                 _dispatch(loop, tab, _fail(event.request_id))
                 return
@@ -998,7 +1003,8 @@ async def _guard_requests(
 
     event_type = zendriver.cdp.fetch.RequestPaused
     register = cast(
-        Callable[[type[object], Callable[..., None]], None], tab.add_handler
+        Callable[[type[object], Callable[..., None]], None],
+        tab.add_handler,
     )
     register(event_type, on_paused)
     # DOCUMENT requests only. Intercepting everything pauses each subresource
@@ -1037,7 +1043,8 @@ def _wire_url(url: str) -> str:
 def _fail(request_id: object) -> object:
     """Return the CDP verb refusing one intercepted request."""
     return zendriver.cdp.fetch.fail_request(
-        cast(Any, request_id), zendriver.cdp.network.ErrorReason.ACCESS_DENIED
+        cast(Any, request_id),
+        zendriver.cdp.network.ErrorReason.ACCESS_DENIED,
     )
 
 
@@ -1060,7 +1067,8 @@ def _continue(request_id: object, headers: list[object] | None) -> object:
     if headers is None:
         return zendriver.cdp.fetch.continue_request(cast(Any, request_id))
     return zendriver.cdp.fetch.continue_request(
-        cast(Any, request_id), headers=cast(Any, headers)
+        cast(Any, request_id),
+        headers=cast(Any, headers),
     )
 
 
@@ -1140,7 +1148,9 @@ def _header_entries(headers: Mapping[str, str]) -> list[object]:
 # context, so the command is scheduled on the tab's own loop rather than awaited here. A
 # handler that blocked on the send would deadlock the connection it is trying to answer.
 def _dispatch(
-    loop: asyncio.AbstractEventLoop, tab: zendriver.Tab, command: object
+    loop: asyncio.AbstractEventLoop,
+    tab: zendriver.Tab,
+    command: object,
 ) -> None:
     """Send a CDP command from the synchronous event-handler thread."""
     coroutine = tab.send(cast(Any, command))
@@ -1194,7 +1204,8 @@ def _main_frame_navigations(tab: zendriver.Tab) -> asyncio.Event:
     # is the narrowest fix, and it keeps ``event.frame.parent_id`` checked above.
     event_type = zendriver.cdp.page.FrameNavigated
     register = cast(
-        Callable[[type[object], Callable[..., None]], None], tab.add_handler
+        Callable[[type[object], Callable[..., None]], None],
+        tab.add_handler,
     )
     register(event_type, on_navigated)
     return navigated
@@ -1301,7 +1312,7 @@ async def _navigate(
                         url=url,
                     )
                     for name, value in cookies.items()
-                ]
+                ],
             )
         tab = await _navigate_tab(
             browser,
@@ -1329,7 +1340,9 @@ async def _navigate(
         finally:
             await _closed(tab)
     return BrowserResult(
-        body=_unwrap_viewer(body).encode(), cookies=harvested, final_url=final_url
+        body=_unwrap_viewer(body).encode(),
+        cookies=harvested,
+        final_url=final_url,
     )
 
 

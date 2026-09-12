@@ -45,7 +45,7 @@ def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
     if path is not None:
         return _read_domains(path)
     return _read_domains(_bundled_domains_path()) | _read_domains(
-        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
+        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt",
     )
 
 
@@ -89,7 +89,8 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
             existing = _read_all(file_descriptor).decode()
         except UnicodeDecodeError:
             logger.warning(
-                "Discarding undecodable Zendriver domain list at %s.", target
+                "Discarding undecodable Zendriver domain list at %s.",
+                target,
             )
             existing = ""
         domains = {

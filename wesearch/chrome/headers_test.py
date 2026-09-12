@@ -40,7 +40,9 @@ class TestChromeClientHints:
 
     def test_full_version_flows_into_full_version_list(self) -> None:
         h = chrome_client_hints(
-            major=146, platform="macOS", full_version="146.0.7379.0"
+            major=146,
+            platform="macOS",
+            full_version="146.0.7379.0",
         )
         assert "146.0.7379.0" in h["sec-ch-ua-full-version-list"]
 

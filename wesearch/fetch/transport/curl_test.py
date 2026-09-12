@@ -110,7 +110,8 @@ class TestFetchCurlBackend:
     # in order, writing into the WRITEDATA / HEADERDATA buffers. The returned list
     # captures every ``(option, value)`` passed to setopt.
     def _fake_curl_class(
-        self, hops: list[Mock]
+        self,
+        hops: list[Mock],
     ) -> tuple[type, list[tuple[int, object]]]:
         """Build a fake ``Curl`` class replaying *hops* and recording setopts."""
         setopts: list[tuple[int, object]] = []
@@ -136,7 +137,9 @@ class TestFetchCurlBackend:
                 return 0
 
             def perform(
-                self, clear_headers: bool = True, clear_resolve: bool = True
+                self,
+                clear_headers: bool = True,
+                clear_resolve: bool = True,
             ) -> None:
                 del clear_headers, clear_resolve
                 hop = hops[state["i"]]
@@ -162,7 +165,11 @@ class TestFetchCurlBackend:
         return _FakeCurl, setopts
 
     def _hop(
-        self, *, status: int, body: bytes = b"", headers: dict[str, str] | None = None
+        self,
+        *,
+        status: int,
+        body: bytes = b"",
+        headers: dict[str, str] | None = None,
     ) -> Mock:
         raw = b"".join(f"{k}: {v}\r\n".encode() for k, v in (headers or {}).items())
         m = Mock()
@@ -203,7 +210,8 @@ class TestFetchCurlBackend:
             return StubSession()
 
         redirect = self._mock_response(
-            status=302, headers={"location": "https://other.com/final"}
+            status=302,
+            headers={"location": "https://other.com/final"},
         )
         final = self._mock_response(status=200, content=b"done")
         with (
@@ -310,11 +318,13 @@ class TestFetchCurlBackend:
         # REV2-001: a POST that redirects cross-origin must NOT leak the source
         # Origin. Header must be rewritten to the new origin on each hop.
         redirect = self._mock_response(
-            status=307, headers={"location": "https://b.com/land"}
+            status=307,
+            headers={"location": "https://b.com/land"},
         )
         final = self._mock_response(status=200, content=b"done")
         with patch(
-            "curl_cffi.requests.request", side_effect=[redirect, final]
+            "curl_cffi.requests.request",
+            side_effect=[redirect, final],
         ) as mock_req:
             fetch(
                 "https://a.com/submit",
@@ -329,7 +339,9 @@ class TestFetchCurlBackend:
     def test_simple_curl_rewrites_origin_on_cross_host_redirect(self) -> None:
         # REV2-001 (high-level path): same Origin-leak guard without pinning.
         redir = self._mock_response(
-            status=307, content=b"", headers={"location": "https://b.com/land"}
+            status=307,
+            content=b"",
+            headers={"location": "https://b.com/land"},
         )
         ok = self._mock_response(status=200, content=b"done")
         with (
@@ -338,7 +350,7 @@ class TestFetchCurlBackend:
             fetch(
                 "https://a.com/submit",
                 request=RequestParams(
-                    content=ContentParams(method="POST", data={"x": "1"})
+                    content=ContentParams(method="POST", data={"x": "1"}),
                 ),
             )
         second_headers = mock_req.call_args_list[1].kwargs["headers"]
@@ -357,7 +369,7 @@ class TestFetchCurlBackend:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=ContentParams(cookies={"CONSENT": "YES+"})
+                    content=ContentParams(cookies={"CONSENT": "YES+"}),
                 ),
             )
         kwargs = mock_req.call_args.kwargs
@@ -375,7 +387,9 @@ class TestFetchCurlBackend:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    content=ContentParams(headers={"cookie": "a=1"}, cookies={"b": "2"})
+                    content=ContentParams(
+                        headers={"cookie": "a=1"}, cookies={"b": "2"}
+                    ),
                 ),
             )
         sent = mock_req.call_args.kwargs["headers"]
@@ -391,7 +405,9 @@ class TestFetchCurlBackend:
             self._mock_response(status=302, headers={"location": "https://a.com/1"}),
             self._mock_response(status=302, headers={"location": "https://a.com/2"}),
             self._mock_response(
-                status=302, content=b"final 3xx", headers={"location": "/3"}
+                status=302,
+                content=b"final 3xx",
+                headers={"location": "/3"},
             ),
         ]
         with patch("curl_cffi.requests.request", side_effect=responses):
@@ -412,7 +428,9 @@ class TestFetchCurlBackend:
         # silently downgrade every Cloudflare wall to a generic HTTP error.
         html = b"<!DOCTYPE html><html>Just a moment...</html>"
         response = self._mock_response(
-            status=403, content=html, headers={"server": "cloudflare"}
+            status=403,
+            content=html,
+            headers={"server": "cloudflare"},
         )
         with (
             patch("curl_cffi.requests.request", return_value=response),
@@ -436,8 +454,9 @@ class TestFetchCurlBackend:
                 "https://example.com",
                 request=RequestParams(
                     content=ContentParams(
-                        headers={"User-Agent": "custom"}, raw_headers=True
-                    )
+                        headers={"User-Agent": "custom"},
+                        raw_headers=True,
+                    ),
                 ),
             )
         assert mock_req.call_args.kwargs["headers"] == {"User-Agent": "custom"}
@@ -459,7 +478,8 @@ class TestFetchCurlBackend:
     def test_303_converts_post_to_get_and_drops_body(self) -> None:
         # A 303 on the curl path switches the follow-up to GET with no body.
         resp_303 = self._mock_response(
-            status=303, headers={"location": "https://example.com/result"}
+            status=303,
+            headers={"location": "https://example.com/result"},
         )
         resp_ok = self._mock_response(content=b"got it")
         calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -487,7 +507,8 @@ class TestFetchCurlBackend:
         # REV2061-002: a 303 switches POST->GET; the POST-only Content-Type must
         # NOT survive onto the bodyless GET (a real browser drops it).
         resp_303 = self._mock_response(
-            status=303, headers={"location": "https://example.com/result"}
+            status=303,
+            headers={"location": "https://example.com/result"},
         )
         resp_ok = self._mock_response(content=b"ok")
         calls: list[dict[str, Any]] = []
@@ -502,7 +523,7 @@ class TestFetchCurlBackend:
             fetch(
                 "https://example.com/submit",
                 request=RequestParams(
-                    content=ContentParams(method="POST", json={"x": 1})
+                    content=ContentParams(method="POST", json={"x": 1}),
                 ),
             )
         assert "Content-Type" not in calls[1]["headers"]
@@ -580,7 +601,8 @@ class TestFetchCurlBackend:
             return StubSession()
 
         redirect = self._mock_response(
-            status=302, headers={"location": "https://example.com/next"}
+            status=302,
+            headers={"location": "https://example.com/next"},
         )
         final = self._mock_response(status=200, content=b"ok")
         with (
@@ -608,7 +630,8 @@ class TestCurlSessionPoolLocking:
         monkeypatch.setattr(fetch_mod, "curl_session", _REAL_CURL_SESSION)
 
     def test_curl_session_holds_pool_lock(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         acquired: list[str] = []
         real_lock = curl._curl_lock
@@ -628,7 +651,8 @@ class TestCurlSessionPoolLocking:
         assert acquired, "curl_session mutated the pool without _curl_lock"
 
     def test_close_curl_session_holds_pool_lock(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         acquired: list[str] = []
         real_lock = curl._curl_lock
@@ -647,7 +671,8 @@ class TestCurlSessionPoolLocking:
         assert acquired, "close_curl_session mutated the pool without _curl_lock"
 
     def test_close_sessions_except_preserves_current_egress(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         current = Mock()
         stale = Mock()
@@ -706,7 +731,7 @@ class TestCurlPathSendsUserAgent:
                 # exactly what "internal" declares. Leaving it untrusted would
                 # (correctly) refuse the fetch.
                 request=RequestParams(
-                    policy=PolicyParams(transport="curl", trust="internal")
+                    policy=PolicyParams(transport="curl", trust="internal"),
                 ),
             )
         finally:

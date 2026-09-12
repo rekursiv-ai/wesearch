@@ -21,7 +21,8 @@ def mock_limiter() -> Iterator[MagicMock]:
     """Inject a mock shared gate so the S2 client never waits on real time."""
     limiter = MagicMock()
     with patch(
-        "wesearch.paper.providers.s2.cross_process_limiter", return_value=limiter
+        "wesearch.paper.providers.s2.cross_process_limiter",
+        return_value=limiter,
     ):
         yield limiter
 
@@ -152,7 +153,10 @@ class TestPaginate:
             FetchSession(),
         )
         ceiling = FetchError("u", 400, {}, b"offset + limit < 10000")
-        with patch("wesearch.paper.providers.s2.fetch", side_effect=[first, ceiling]):
+        with patch(
+            "wesearch.paper.providers.s2.fetch",
+            side_effect=[first, ceiling],
+        ):
             page = s2.paginate("/paper/x/citations", {}, limit=100)
         assert len(page.entries) == 3
         assert not page.complete

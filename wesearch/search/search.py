@@ -67,7 +67,9 @@ class SearchParamsSchema(Schema):
     """
 
     query = Field[str](
-        annotation=str, required=True, description="Search query string."
+        annotation=str,
+        required=True,
+        description="Search query string.",
     )
     backend = Field[SearchBackends](
         annotation=SearchBackends,
@@ -233,7 +235,7 @@ def search(
         # ``backend="duckduckgo", categories="science"`` silently ran against
         # SearXNG -- a stated choice replaced without a word.
         raise ValueError(
-            f"'categories' is only supported by the 'searxng' backend, not {backend!r}."
+            f"'categories' is only supported by the 'searxng' backend, not {backend!r}.",
         )
     # Table dispatch, not an if-chain: a chain over a closed ``Literal``
     # exhausts it, so its last test and the unknown-backend guard both become
@@ -249,7 +251,10 @@ def search(
             transport=transport,
         ),
         "duckduckgo": lambda: duckduckgo(
-            query, num_results, headers, transport=transport
+            query,
+            num_results,
+            headers,
+            transport=transport,
         ),
     }
     run = backends.get(backend)

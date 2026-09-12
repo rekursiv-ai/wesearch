@@ -35,7 +35,7 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
     # package where a missing dependency is expected. A bare ModuleNotFoundError
     # names `mcp`, which tells a reader nothing about which extra supplies it.
     raise ImportError(
-        "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]"
+        "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]",
     ) from e
 
 from wesearch.fetch.custom_types import FetchParamsSchema

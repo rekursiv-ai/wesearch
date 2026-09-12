@@ -71,7 +71,8 @@ def metadata(kind: IdType, canonical: str) -> PaperRecord:
 
     """
     data = s2.get(
-        f"/paper/{s2_wire_id(kind, canonical)}", {"fields": s2.S2_PAPER_FIELDS_STR}
+        f"/paper/{s2_wire_id(kind, canonical)}",
+        {"fields": s2.S2_PAPER_FIELDS_STR},
     )
     return s2.paper_record_from(data)
 
@@ -91,7 +92,11 @@ def metadata_batch(wire_ids: list[str]) -> list[PaperRecord | None]:
 
 
 def references(
-    kind: IdType, canonical: str, *, limit: int | None, source: GraphSource = "s2"
+    kind: IdType,
+    canonical: str,
+    *,
+    limit: int | None,
+    source: GraphSource = "s2",
 ) -> Listing:
     """Fetch papers the given paper cites (backward citation edges).
 
@@ -114,7 +119,7 @@ def references(
         records, complete = openalex.references(kind, canonical, limit=limit)
         return Listing(records=records, complete=complete)
     fields = ",".join(
-        ("isInfluential", *(f"citedPaper.{f}" for f in s2.S2_PAPER_FIELDS))
+        ("isInfluential", *(f"citedPaper.{f}" for f in s2.S2_PAPER_FIELDS)),
     )
     page = s2.paginate(
         f"/paper/{s2_wire_id(kind, canonical)}/references",
@@ -156,21 +161,26 @@ def citations(
     if source == "openalex":
         if influential_only:
             raise PaperError(
-                "'influential_only' is S2-only; OpenAlex has no influence flag."
+                "'influential_only' is S2-only; OpenAlex has no influence flag.",
             )
         records, _total, complete = openalex.citations(
-            kind, canonical, limit=limit, year_from=year_from
+            kind,
+            canonical,
+            limit=limit,
+            year_from=year_from,
         )
         # The paginator's exhaustion signal alone: OpenAlex's ``meta.count`` is
         # an estimate and can underreport, so ``total <= len(records)`` turned a
         # known-short walk into a claim of completeness.
         return Listing(records=records, complete=complete)
     fields = ",".join(
-        ("isInfluential", *(f"citingPaper.{f}" for f in s2.S2_PAPER_FIELDS))
+        ("isInfluential", *(f"citingPaper.{f}" for f in s2.S2_PAPER_FIELDS)),
     )
 
     keep = functools.partial(
-        _citation_keep, influential_only=influential_only, year_from=year_from
+        _citation_keep,
+        influential_only=influential_only,
+        year_from=year_from,
     )
     page = s2.paginate(
         f"/paper/{s2_wire_id(kind, canonical)}/citations",
@@ -190,8 +200,9 @@ def _edge_listing(page: Page, *, inner_key: str) -> Listing:
             continue
         records.append(
             s2.paper_record_from(
-                inner, is_influential=cast(bool | None, e.get("isInfluential"))
-            )
+                inner,
+                is_influential=cast(bool | None, e.get("isInfluential")),
+            ),
         )
     return Listing(records=records, complete=page.complete)
 
@@ -207,7 +218,10 @@ def _check_graph_source(source: GraphSource) -> None:
 
 
 def _citation_keep(
-    entry: MutableJSON, *, influential_only: bool, year_from: int | None
+    entry: MutableJSON,
+    *,
+    influential_only: bool,
+    year_from: int | None,
 ) -> bool:
     """Whether a citation edge passes the influence and ``year_from`` filters."""
     if influential_only and not entry.get("isInfluential"):

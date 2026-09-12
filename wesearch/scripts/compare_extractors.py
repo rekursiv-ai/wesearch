@@ -257,7 +257,10 @@ def converters() -> dict[str, Callable[[str], str]]:
 
 
 def score_page(
-    page: Page, html: str, *, names: Sequence[str] = ()
+    page: Page,
+    html: str,
+    *,
+    names: Sequence[str] = (),
 ) -> tuple[int, list[Score]]:
     """Score every converter on one page.
 
@@ -296,7 +299,7 @@ def score_page(
                 distortion=_gram_distortion(grams, output),
                 missing_probes=tuple(p for p in page.probes if p not in output),
                 seconds=elapsed,
-            )
+            ),
         )
     return len(reference), scores
 
@@ -320,7 +323,8 @@ def cached_html(page: Page, *, cache_dir: Path, refresh: bool = False) -> str:
     if path.exists() and not refresh:
         return path.read_text(errors="replace")
     body, _ = fetch(
-        page.url, request=RequestParams(policy=PolicyParams(transport=page.transport))
+        page.url,
+        request=RequestParams(policy=PolicyParams(transport=page.transport)),
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     path.write_bytes(body)
@@ -356,7 +360,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     for page in pages:
         try:
             html = cached_html(
-                page, cache_dir=args.cache_dir, refresh=bool(args.refresh)
+                page,
+                cache_dir=args.cache_dir,
+                refresh=bool(args.refresh),
             )
         except Exception as error:  # noqa: BLE001 -- one unreachable page must not end the run.
             print(f"\n{page.slug}: UNAVAILABLE: {error}")
@@ -415,7 +421,10 @@ def _gram_distortion(reference: frozenset[tuple[str, ...]], output: str) -> floa
 # column is low in BOTH halves; either half alone ranks an extractor that returned
 # nothing first.
 def _print_table(
-    rows: list[tuple[Page, list[Score]]], *, names: Sequence[str], samples: Path
+    rows: list[tuple[Page, list[Score]]],
+    *,
+    names: Sequence[str],
+    samples: Path,
 ) -> None:
     """Print one markdown table: page rows, compression then distortion columns."""
     header = [
@@ -453,7 +462,7 @@ def _print_table(
         f"this table and died on first reading of those files: a converter whose\n"
         f"91% of output was one CSS rule scored near-perfect fidelity, and the\n"
         f"visible-text dump ranked first against a yardstick that was itself.\n"
-        f"An n-gram cannot tell a stylesheet from a paragraph. You can."
+        f"An n-gram cannot tell a stylesheet from a paragraph. You can.",
     )
 
 
@@ -464,7 +473,11 @@ def _page_label(page: Page) -> str:
 
 
 def _write_samples(
-    page: Page, *, html: str, out_dir: Path, names: Sequence[str]
+    page: Page,
+    *,
+    html: str,
+    out_dir: Path,
+    names: Sequence[str],
 ) -> None:
     """Write each converter's output so a reader can judge the content itself."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -483,10 +496,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Where fetched pages are replayed from (default: %(default)s).",
     )
     parser.add_argument(
-        "--refresh", action="store_true", help="Re-fetch pages, replacing the cache."
+        "--refresh",
+        action="store_true",
+        help="Re-fetch pages, replacing the cache.",
     )
     parser.add_argument(
-        "--url", action="append", default=[], help="Limit to this corpus URL (repeat)."
+        "--url",
+        action="append",
+        default=[],
+        help="Limit to this corpus URL (repeat).",
     )
     parser.add_argument(
         "--converter",

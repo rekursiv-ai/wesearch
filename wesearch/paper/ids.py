@@ -102,7 +102,7 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
     raise InvalidIdError(
         f"Unrecognized identifier shape: {raw!r}. "
         "Expected DOI (10.xxxx/yyy) or arXiv id (NNNN.NNNNN, "
-        "arXiv:NNNN.NNNNN, or hep-th/NNNNNNN)."
+        "arXiv:NNNN.NNNNN, or hep-th/NNNNNNN).",
     )
 
 

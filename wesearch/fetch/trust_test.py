@@ -63,7 +63,9 @@ def profiled_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setattr(ProfileStore, "shared", classmethod(shared))
     monkeypatch.setattr(fetch_mod, "egress_ip", fixed_egress)
     store.save(
-        "203.0.113.1", "example.com", Profile(ua="UA/1", cookies={"stored": "S"})
+        "203.0.113.1",
+        "example.com",
+        Profile(ua="UA/1", cookies={"stored": "S"}),
     )
     return "203.0.113.1"
 
@@ -81,7 +83,10 @@ class TestCookiesSurviveTrust:
     @pytest.mark.parametrize("transport", ["curl", "stdlib"])
     @pytest.mark.parametrize("trust", ["untrusted", "internal"])
     def test_stored_cookie_reaches_wire(
-        self, profiled: str, transport: Transport, trust: Trust
+        self,
+        profiled: str,
+        transport: Transport,
+        trust: Trust,
     ) -> None:
         del profiled
         sent: dict[str, str] = {}
@@ -101,7 +106,7 @@ class TestCookiesSurviveTrust:
             fetch_mod.fetch(
                 "https://example.com/",
                 request=RequestParams(
-                    policy=PolicyParams(transport=transport, trust=trust)
+                    policy=PolicyParams(transport=transport, trust=trust),
                 ),
             )
         assert "stored" in sent["cookies"], (
@@ -121,7 +126,9 @@ class TestBrowserUnderUntrusted:
 
     @pytest.mark.parametrize("transport", ["zendriver", "curl-then-zendriver"])
     def test_browser_transport_reaches_chrome(
-        self, profiled: str, transport: Transport
+        self,
+        profiled: str,
+        transport: Transport,
     ) -> None:
         del profiled
         reached: list[str] = []
@@ -163,7 +170,9 @@ class TestBrowserUnderUntrusted:
         assert resolved == ["curl-then-zendriver"]
 
     def test_learned_domain_routes_to_browser_under_untrusted(
-        self, profiled: str, monkeypatch: pytest.MonkeyPatch
+        self,
+        profiled: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         del profiled
         monkeypatch.setattr(
@@ -207,7 +216,7 @@ class TestTrustEnforcement:
             body, _ = fetch_mod.fetch(
                 f"http://127.0.0.1:{port}/",
                 request=RequestParams(
-                    policy=PolicyParams(transport="curl", trust="internal")
+                    policy=PolicyParams(transport="curl", trust="internal"),
                 ),
             )
         finally:

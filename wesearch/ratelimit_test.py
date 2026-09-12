@@ -337,10 +337,16 @@ def test_file_store_shares_budget_across_limiter_instances(tmp_path: Path) -> No
     path = tmp_path / "rl.bin"
     clock = FakeClock()
     a = TokenBucketRateLimiter(
-        max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
+        max_calls=1,
+        per_seconds=1.0,
+        clock=clock,
+        store=FileStore(path),
     )
     b = TokenBucketRateLimiter(
-        max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
+        max_calls=1,
+        per_seconds=1.0,
+        clock=clock,
+        store=FileStore(path),
     )
     a.acquire()  # Spends the one shared token at t=0.
     b.acquire()  # Must wait ~1s for the *shared* bucket to refill.
@@ -352,11 +358,17 @@ def test_file_store_persists_across_new_limiter(tmp_path: Path) -> None:
     path = tmp_path / "rl.bin"
     clock = FakeClock()
     first = TokenBucketRateLimiter(
-        max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
+        max_calls=1,
+        per_seconds=1.0,
+        clock=clock,
+        store=FileStore(path),
     )
     first.acquire()  # Drains the token, persists empty bucket.
     second = TokenBucketRateLimiter(
-        max_calls=1, per_seconds=1.0, clock=clock, store=FileStore(path)
+        max_calls=1,
+        per_seconds=1.0,
+        clock=clock,
+        store=FileStore(path),
     )
     second.acquire()  # Sees the drained bucket on disk, paces.
     assert clock.sleeps == [1.0]

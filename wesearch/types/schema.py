@@ -157,7 +157,7 @@ class Field[T]:
         if accepted and not _is_instance(value, accepted):
             expected = " or ".join(sorted(k.__name__ for k in accepted))
             raise ValueError(
-                f"Invalid {name}: expected {expected}, got {type(value).__name__}."
+                f"Invalid {name}: expected {expected}, got {type(value).__name__}.",
             )
         return value
 
@@ -177,7 +177,7 @@ def literal_values(
     annotation: object,
     *,
     union_origins: frozenset[object] = frozenset(
-        {types.UnionType, vars(typing)["Union"]}
+        {types.UnionType, vars(typing)["Union"]},
     ),
 ) -> tuple[object, ...]:
     """Return the ``Literal`` members of ``annotation``, or ``()`` for anything else.

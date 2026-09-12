@@ -23,7 +23,10 @@ def _fetch_raising_challenge() -> object:
     def _fake(url: str, *, request: object) -> tuple[bytes, None]:
         del url, request
         raise CloudflareChallengeError(
-            url="https://s.example/", status=403, headers={}, body=b"blocked"
+            url="https://s.example/",
+            status=403,
+            headers={},
+            body=b"blocked",
         )
 
     return _fake
@@ -37,7 +40,8 @@ class TestFallback:
 
         with patch.object(fallback, "fetch", ok):
             body, via = fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=PolicyParams()
+                "https://s.example/",
+                policy=PolicyParams(),
             )
         assert body == b"<html>ok</html>"
         assert via is False
@@ -52,7 +56,8 @@ class TestFallback:
             patch.object(fallback, "fetch_reader_proxy", proxy_ok),
         ):
             body, via = fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=PolicyParams()
+                "https://s.example/",
+                policy=PolicyParams(),
             )
         assert body == b"# md"
         assert via is True
@@ -69,7 +74,8 @@ class TestFallback:
             patch.object(fallback, "fetch_reader_proxy", proxy_ok),
         ):
             _body, via = fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=PolicyParams()
+                "https://s.example/",
+                policy=PolicyParams(),
             )
         assert via is True
 
@@ -96,7 +102,8 @@ class TestFallback:
             pytest.raises(FetchError) as exc,
         ):
             fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=PolicyParams()
+                "https://s.example/",
+                policy=PolicyParams(),
             )
         assert exc.value.status == status
         assert called == []
@@ -108,7 +115,8 @@ class TestFallback:
             pytest.raises(FetchError) as exc,
         ):
             fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=PolicyParams()
+                "https://s.example/",
+                policy=PolicyParams(),
             )
         assert exc.value.status == status
 
@@ -123,7 +131,8 @@ class TestFallback:
             pytest.raises(FetchError) as exc,
         ):
             fallback.fetch_with_reader_fallback(
-                "https://s.example/", policy=PolicyParams()
+                "https://s.example/",
+                policy=PolicyParams(),
             )
         # The primary (403) is surfaced, not the proxy's 401.
         assert exc.value.status == 403

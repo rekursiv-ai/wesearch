@@ -98,7 +98,8 @@ _UA_OS_TOKEN = {
 }
 
 _needs_chrome = pytest.mark.skipif(
-    not chrome_available(), reason="No unconfined Chrome binary on PATH."
+    not chrome_available(),
+    reason="No unconfined Chrome binary on PATH.",
 )
 
 
@@ -135,7 +136,8 @@ def oracle() -> Iterator[EchoOracle]:
     ],
 )
 def test_fetch_wire_request_matches_chrome(
-    backend: Transport, oracle: EchoOracle
+    backend: Transport,
+    oracle: EchoOracle,
 ) -> None:
     """Our wire request has the same headers, in the same order, as Chrome's.
 
@@ -185,7 +187,8 @@ def test_fetch_wire_request_matches_chrome(
     ],
 )
 def test_session_threads_across_requests(
-    backend: Transport, oracle: EchoOracle
+    backend: Transport,
+    oracle: EchoOracle,
 ) -> None:
     """A threaded session preserves the wire identity across requests.
 
@@ -251,7 +254,8 @@ def test_case_variant_cookie_header_not_duplicated_on_wire(oracle: EchoOracle) -
 @pytest.mark.browser_chrome
 @_needs_chrome
 def test_browser_backend_fetches_live_page(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The opt-in browser backend renders a live page headless and warms cookies.
 
@@ -313,7 +317,9 @@ def _drive(oracle: EchoOracle) -> bool:
     # disable_sandbox: hosted runners execute as root, where Chrome refuses to
     # start sandboxed. Scoped to this loopback oracle, never a real host.
     return not drive_chrome(
-        oracle.url, ignore_certificate_errors=True, disable_sandbox=True
+        oracle.url,
+        ignore_certificate_errors=True,
+        disable_sandbox=True,
     )
 
 

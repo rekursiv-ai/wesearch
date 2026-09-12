@@ -90,7 +90,11 @@ NO_BODY: Final = NoBody()
 # these with ``get_args`` into JSON Schema, which a lazily-evaluated ``type``
 # alias breaks.
 Transport: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
-    "auto", "curl", "curl-then-zendriver", "zendriver", "stdlib"
+    "auto",
+    "curl",
+    "curl-then-zendriver",
+    "zendriver",
+    "stdlib",
 ]
 
 # Where the URL came from, NOT what DNS to do about it. ``"untrusted"`` (the
@@ -132,7 +136,10 @@ Trust: TypeAlias = Literal["untrusted", "internal"]  # noqa: UP040 -- get_args()
 #
 # A ``Literal`` for the same reason as ``Transport`` above.
 Extractor: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
-    "html2text", "trafilatura", "raw", "markdownify"
+    "html2text",
+    "trafilatura",
+    "raw",
+    "markdownify",
 ]
 
 
@@ -213,14 +220,14 @@ class RetryParams:
         # exists to impose.
         if not math.isfinite(self.timeout_sec) or self.timeout_sec <= 0:
             raise ValueError(
-                f"'timeout_sec' must be a finite number > 0, got {self.timeout_sec}."
+                f"'timeout_sec' must be a finite number > 0, got {self.timeout_sec}.",
             )
         if self.connect_timeout_sec is not None and (
             not math.isfinite(self.connect_timeout_sec) or self.connect_timeout_sec <= 0
         ):
             raise ValueError(
                 "'connect_timeout_sec' must be a finite number > 0,"
-                f" got {self.connect_timeout_sec}."
+                f" got {self.connect_timeout_sec}.",
             )
         if self.max_redirects < 0:
             raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")
@@ -378,13 +385,13 @@ class RequestParams:
         # a request body or byte-exact raw-header mode.
         if self.content.method != "GET":
             raise ValueError(
-                f"The {self.policy.transport} backend supports only GET requests."
+                f"The {self.policy.transport} backend supports only GET requests.",
             )
         if self.content.has_body:
             raise ValueError(
-                f"The {self.policy.transport} backend cannot send a request body."
+                f"The {self.policy.transport} backend cannot send a request body.",
             )
         if self.content.raw_headers:
             raise ValueError(
-                f"The {self.policy.transport} transport cannot honor 'raw_headers'."
+                f"The {self.policy.transport} transport cannot honor 'raw_headers'.",
             )

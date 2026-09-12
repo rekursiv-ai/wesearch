@@ -26,7 +26,7 @@ def test_format_paper_result() -> None:
             doi="10.1/x",
             published=datetime(2017, 6, 1),  # noqa: DTZ001 -- naive ok in test
             citations=42,
-        )
+        ),
     )
     assert "[Attn](https://doi.org/10.1/x)" in out
     assert "abstract" in out
@@ -43,7 +43,7 @@ def test_format_image_result() -> None:
             snippet="",
             image_url="https://img",
             resolution="1x1",
-        )
+        ),
     )
     assert out.count("https://img") >= 1
     assert "1x1" in out
@@ -52,8 +52,12 @@ def test_format_image_result() -> None:
 def test_format_map_result() -> None:
     out = format_result(
         MapResult(
-            url="https://m", title="Tower", snippet="", latitude=48.8, longitude=2.3
-        )
+            url="https://m",
+            title="Tower",
+            snippet="",
+            latitude=48.8,
+            longitude=2.3,
+        ),
     )
     assert "48.8,2.3" in out
 
@@ -67,7 +71,7 @@ def test_format_torrent_result() -> None:
             magnet_url="magnet:?xt=1",
             seed=10,
             leech=2,
-        )
+        ),
     )
     assert "seed:10" in out
     assert "leech:2" in out
@@ -86,7 +90,7 @@ def test_video_detail_precedes_media_dispatch() -> None:
     its view count and channel.
     """
     out = format_result(
-        VideoResult(url="https://v", title="V", snippet="", views="1M", author="C")
+        VideoResult(url="https://v", title="V", snippet="", views="1M", author="C"),
     )
     assert "1M views" in out
     assert "C" in out
@@ -95,7 +99,7 @@ def test_video_detail_precedes_media_dispatch() -> None:
 def test_format_omits_empty_fields_rather_than_separators() -> None:
     """An unreported field must not render as a bare separator run."""
     out = format_result(
-        PaperResult(url="https://p", title="P", snippet="", doi="10.1/y")
+        PaperResult(url="https://p", title="P", snippet="", doi="10.1/y"),
     )
     assert "·  ·" not in out
     assert out.endswith("doi:10.1/y")
@@ -116,7 +120,7 @@ def test_lean_result_keeps_category_fields() -> None:
             doi="10.1/x",
             citations=42,
             authors=("A",),
-        )
+        ),
     )
     # RAW values, not the text surface's reading labels: a JSON client would
     # otherwise have to strip "doi:" to recover the identifier, and parse

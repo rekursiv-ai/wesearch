@@ -14,7 +14,7 @@ def test_keeps_text_an_article_scorer_would_discard() -> None:
     """
     text = extract_html2text(
         '<html><body><div class="prons"><a href="/audio">\u02c8\u0101-j\u0259nt</a>'
-        "</div></body></html>"
+        "</div></body></html>",
     )
     assert "\u02c8\u0101-j\u0259nt" in text
 
@@ -22,7 +22,7 @@ def test_keeps_text_an_article_scorer_would_discard() -> None:
 def test_renders_structure_as_markdown() -> None:
     """Headings and list items keep their structure."""
     text = extract_html2text(
-        "<html><body><h1>Title</h1><ul><li>one</li><li>two</li></ul></body></html>"
+        "<html><body><h1>Title</h1><ul><li>one</li><li>two</li></ul></body></html>",
     )
     assert "# Title" in text
     assert "* one" in text

@@ -69,12 +69,12 @@ def main(
         print(
             f"{query!r:26s} records={len(result.records):3d} "
             f"limit={limit} overrun={over:2d} "
-            f"duplicate-identities={residual:2d} total={result.total}"
+            f"duplicate-identities={residual:2d} total={result.total}",
         )
         time.sleep(1.0)
     print(
         f"\nTOTAL queries={sampled}/{len(queries)} records={total} "
-        f"residual-duplicates={duplicates} limit-overruns={overruns}"
+        f"residual-duplicates={duplicates} limit-overruns={overruns}",
     )
     return 0 if sampled else 1
 
