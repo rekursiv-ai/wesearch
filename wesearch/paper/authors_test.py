@@ -32,7 +32,9 @@ class TestAuthors:
 
     def test_author_metadata_batch(self) -> None:
         with patch.object(
-            s2, "batch", return_value=[{"authorId": "1", "name": "A"}, None]
+            s2,
+            "batch",
+            return_value=[{"authorId": "1", "name": "A"}, None],
         ):
             recs = author_metadata(["1", "2"])
         assert isinstance(recs[0], AuthorRecord)

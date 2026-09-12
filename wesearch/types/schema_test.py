@@ -172,7 +172,8 @@ def test_object_annotation_leaves_the_schema_type_open() -> None:
 
 def test_schema_extra_merges_shape_the_type_cannot_carry() -> None:
     field = Field[dict[str, str]](
-        annotation=dict, schema_extra={"additionalProperties": {"type": "string"}}
+        annotation=dict,
+        schema_extra={"additionalProperties": {"type": "string"}},
     )
     assert field.schema() == {
         "type": "object",

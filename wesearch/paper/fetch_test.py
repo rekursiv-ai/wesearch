@@ -86,7 +86,10 @@ class TestDownload:
             side_effect=[(_HTML, FetchSession()), (_PDF, FetchSession())],
         ):
             body, source = fetch.download(
-                "arxiv", "1706.03762", oa_url="http://oa/pdf", oa_looked_up=True
+                "arxiv",
+                "1706.03762",
+                oa_url="http://oa/pdf",
+                oa_looked_up=True,
             )
         assert body == _PDF
         assert source == "open_access"
@@ -114,7 +117,10 @@ class TestDownload:
             patch.object(fetch, "fetch", return_value=(_PDF, FetchSession())),
         ):
             body, source = fetch.download(
-                "doi", "10.1/x", oa_url="http://oa/pdf", oa_looked_up=True
+                "doi",
+                "10.1/x",
+                oa_url="http://oa/pdf",
+                oa_looked_up=True,
             )
         assert source == "open_access"
         assert body == _PDF
@@ -143,7 +149,10 @@ class TestDownload:
         fetch_fn = MagicMock(return_value=(_PDF, FetchSession()))
         with patch.object(fetch, "fetch", fetch_fn):
             body, source = fetch.download(
-                "doi", "10.1/x", oa_url="http://oa/pdf", oa_looked_up=True
+                "doi",
+                "10.1/x",
+                oa_url="http://oa/pdf",
+                oa_looked_up=True,
             )
         assert source == "open_access"
         assert body == _PDF

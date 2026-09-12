@@ -88,7 +88,9 @@ def search(
 
     """
     base = _filter(
-        year_from=year_from, year_to=year_to, open_access_only=open_access_only
+        year_from=year_from,
+        year_to=year_to,
+        open_access_only=open_access_only,
     )
     # The value must stay UNQUOTED (unquoted terms are an AND-of-terms match;
     # quoting silently switches to an exact-phrase match, collapsing recall). A
@@ -290,7 +292,10 @@ def _headers() -> dict[str, str]:
 
 
 def _filter(
-    *, year_from: int | None, year_to: int | None, open_access_only: bool
+    *,
+    year_from: int | None,
+    year_to: int | None,
+    open_access_only: bool,
 ) -> str | None:
     """Build an OpenAlex filter string from year bounds and OA flag."""
     parts: list[str] = []
@@ -397,7 +402,8 @@ def _get(
         ) from e
     except (TimeoutError, OSError) as e:
         raise BackendError(
-            f"OpenAlex request failed (timeout or connection error): {e}", status=0
+            f"OpenAlex request failed (timeout or connection error): {e}",
+            status=0,
         ) from e
     try:
         body = json.loads(raw)
@@ -408,7 +414,7 @@ def _get(
     # discards the other backend's good result instead of degrading to it.
     if not isinstance(body, dict):
         raise BackendError(
-            f"OpenAlex returned {type(body).__name__}, expected a JSON object."
+            f"OpenAlex returned {type(body).__name__}, expected a JSON object.",
         )
     return cast(MutableJSON, body)
 
@@ -453,7 +459,8 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
     arxiv_raw = ids.get("arxiv")
     if isinstance(arxiv_raw, str) and arxiv_raw:
         m = re.search(
-            r"(?:arxiv\.org/abs/|arxiv:)?([\w.-]+/\d+|\d{4}\.\d{4,5})", arxiv_raw
+            r"(?:arxiv\.org/abs/|arxiv:)?([\w.-]+/\d+|\d{4}\.\d{4,5})",
+            arxiv_raw,
         )
         if m:
             arxiv_raw = m.group(1)

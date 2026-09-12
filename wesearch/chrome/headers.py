@@ -306,7 +306,8 @@ def chrome_headers_for_google(
         "x-browser-channel": "stable",
         "x-browser-year": "2026",
         "x-browser-validation": _validation(
-            chrome_user_agent(major, platform), platform
+            chrome_user_agent(major, platform),
+            platform,
         ),
         "x-client-data": x_client_data,
     }

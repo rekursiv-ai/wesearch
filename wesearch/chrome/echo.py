@@ -80,7 +80,7 @@ class EchoOracle:
         self._stack = ExitStack()
         try:
             directory = Path(
-                self._stack.enter_context(tempfile.TemporaryDirectory(prefix="echo-"))
+                self._stack.enter_context(tempfile.TemporaryDirectory(prefix="echo-")),
             )
             self.ca_path = directory / "cert.pem"
             key_path = directory / "key.pem"
@@ -99,7 +99,9 @@ class EchoOracle:
             self.port = int(self._sock.getsockname()[1])
             self.url = f"https://localhost:{self.port}/"
             self._thread = threading.Thread(
-                target=self._serve, name="echo-oracle-accept", daemon=True
+                target=self._serve,
+                name="echo-oracle-accept",
+                daemon=True,
             )
             self._stack.callback(self._thread.join, timeout=5.0)
             self._thread.start()
@@ -206,11 +208,11 @@ class EchoOracle:
             if _requests_root(request):
                 with self._lock:
                     self._captures.append(
-                        (_header_names(request), _header_lines(request))
+                        (_header_names(request), _header_lines(request)),
                     )
             conn.sendall(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                b"Content-Length: 15\r\nConnection: close\r\n\r\n<html>ok</html>"
+                b"Content-Length: 15\r\nConnection: close\r\n\r\n<html>ok</html>",
             )
         except OSError:
             pass  # A client hangup mid-exchange is not an oracle failure.
@@ -238,7 +240,8 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
         .not_valid_before(now - timedelta(days=1))
         .not_valid_after(now + timedelta(days=3650))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False
+            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+            critical=False,
         )
         .sign(key, hashes.SHA256())
     )
@@ -248,7 +251,7 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
-        )
+        ),
     )
 
 

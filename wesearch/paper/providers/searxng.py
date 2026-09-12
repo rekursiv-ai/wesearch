@@ -68,7 +68,7 @@ def search(
                 num_results=limit if limit is not None else default_fetch,
                 categories="science",
                 transport=transport,
-            )
+            ),
         )
     except (SearchError, RuntimeError) as e:
         raise BackendError(f"SearXNG science search failed: {e}") from e

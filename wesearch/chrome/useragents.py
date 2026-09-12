@@ -142,7 +142,9 @@ def refresh_all() -> None:
                 _replace_pool(kind, selected)
                 replaced.append(kind)
                 logger.info(
-                    "wrote %d user agents to %s", len(selected), _pool_path(kind)
+                    "wrote %d user agents to %s",
+                    len(selected),
+                    _pool_path(kind),
                 )
         except BaseException:
             for kind in reversed(replaced):
@@ -169,7 +171,8 @@ def _download_records() -> list[object]:
     for attempt in range(3):
         try:
             with urllib.request.urlopen(  # noqa: S310 -- fixed HTTPS dataset URL.
-                request, timeout=30
+                request,
+                timeout=30,
             ) as response:
                 body = response.read()
             break
@@ -206,7 +209,7 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
     selected = sorted(selected_set)
     if len(selected) < 2:
         raise RuntimeError(
-            f"refresh produced fewer than 2 distinct user agents for {kind}."
+            f"refresh produced fewer than 2 distinct user agents for {kind}.",
         )
     return selected
 

@@ -246,7 +246,7 @@ def searxng(
         return list[SearxngResult]()  # No results wanted; skip the round-trip.
     base_url = _searxng_url()
     params = urlencode(
-        {"q": query, "format": "json", "pageno": "1", "categories": categories}
+        {"q": query, "format": "json", "pageno": "1", "categories": categories},
     )
     body, _ = fetch(
         f"{base_url}/search?{params}",
@@ -464,7 +464,7 @@ def _searxng_file(item: dict[str, object]) -> FileResult:
         title=clean_text(StrCodec.coerce(item.get("title"))),
         snippet=clean_text(
             StrCodec.coerce(item.get("abstract"))
-            or StrCodec.coerce(item.get("content"))
+            or StrCodec.coerce(item.get("content")),
         ),
         filename=StrCodec.coerce(item.get("filename")),
         size=StrCodec.coerce(item.get("size")),
@@ -498,27 +498,33 @@ def _coordinate(value: object) -> float | None:
 CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
     "general": CategoryInfo(gloss="web results"),
     "images": CategoryInfo(
-        gloss="image URL, resolution, format, source", parser=_searxng_image
+        gloss="image URL, resolution, format, source",
+        parser=_searxng_image,
     ),
     "videos": CategoryInfo(
-        gloss="duration, view count, channel, embed URL", parser=_searxng_video
+        gloss="duration, view count, channel, embed URL",
+        parser=_searxng_video,
     ),
     "news": CategoryInfo(gloss="web results with publish date", parser=_searxng_media),
     "map": CategoryInfo(
-        gloss="places with coordinates and structured address", parser=_searxng_map
+        gloss="places with coordinates and structured address",
+        parser=_searxng_map,
     ),
     "music": CategoryInfo(
-        gloss="tracks with audio/embed URL and duration", parser=_searxng_media
+        gloss="tracks with audio/embed URL and duration",
+        parser=_searxng_media,
     ),
     "it": CategoryInfo(
         gloss="packages (name/version/license/homepage), repos, code",
         parser=_searxng_it,
     ),
     "science": CategoryInfo(
-        gloss="papers with authors/DOI/citations", parser=_searxng_paper
+        gloss="papers with authors/DOI/citations",
+        parser=_searxng_paper,
     ),
     "files": CategoryInfo(
-        gloss="files (filename/size/type) and torrents", parser=_searxng_files
+        gloss="files (filename/size/type) and torrents",
+        parser=_searxng_files,
     ),
     "social media": CategoryInfo(gloss="posts from Mastodon/Lemmy (web results)"),
 }

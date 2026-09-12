@@ -146,7 +146,8 @@ def test_fetch_web_reddit_rss_renders_feed() -> None:
         b"</feed>"
     )
     with patch(
-        "wesearch.web.reddit.fetch_reddit", return_value=(feed, "rss")
+        "wesearch.web.reddit.fetch_reddit",
+        return_value=(feed, "rss"),
     ) as mock_reddit:
         result = fetch_web("https://reddit.com/r/foo/comments/abc")
     mock_reddit.assert_called_once()
@@ -208,7 +209,10 @@ def test_fetch_web_x_routes_to_markdown() -> None:
 
 def test_fetch_web_post_uses_direct_fetch() -> None:
     """POST bypasses providers and the ladder, going straight to fetch."""
-    with patch("wesearch.web.fetch", return_value=(b'{"ok": 1}', None)) as mock_fetch:
+    with patch(
+        "wesearch.web.fetch",
+        return_value=(b'{"ok": 1}', None),
+    ) as mock_fetch:
         result = fetch_web("https://api.example/x", method="POST", json_body={"a": 1})
     mock_fetch.assert_called_once()
     assert result.kind == _KIND_HTML
@@ -265,7 +269,10 @@ def test_fetch_web_returns_full_text_when_max_chars_unset() -> None:
     """
     big = "y" * 500_000
     with (
-        patch("wesearch.web.fetch_with_reader_fallback", return_value=(b"h", False)),
+        patch(
+            "wesearch.web.fetch_with_reader_fallback",
+            return_value=(b"h", False),
+        ),
         patch("wesearch.web._extract_text", return_value=big),
     ):
         result = fetch_web("https://e.example/")

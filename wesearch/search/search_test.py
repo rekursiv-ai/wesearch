@@ -136,7 +136,10 @@ class TestSearchDispatch:
         assert "captcha" in exc.value.guidance.lower()
 
     def test_transport_forwarded_to_backend(self) -> None:
-        with patch("wesearch.search.search.duckduckgo", return_value=[]) as provider:
+        with patch(
+            "wesearch.search.search.duckduckgo",
+            return_value=[],
+        ) as provider:
             search("cats", backend="duckduckgo", transport="stdlib")
         assert provider.call_args.kwargs["transport"] == "stdlib"
 
@@ -260,7 +263,8 @@ class TestSearchSearxng:
             _ = searxng("test")
 
     def test_missing_env_raises_search_error(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("SEARXNG_URL", raising=False)
         with pytest.raises(SearchError, match="SEARXNG_URL"):
@@ -338,7 +342,7 @@ class TestSearchSearxng:
 
     def test_fractional_seed_is_not_silently_truncated(self) -> None:
         payload = {
-            "results": [{"template": "torrent.html", "url": "https://t", "seed": 1.9}]
+            "results": [{"template": "torrent.html", "url": "https://t", "seed": 1.9}],
         }
         with _patch_searxng_fetch(payload):
             (result,) = searxng("q", categories="files")
@@ -354,8 +358,8 @@ class TestSearchSearxng:
                     "template": "paper.html",
                     "url": "https://p",
                     "comments": "9" * 5000 + " citations",
-                }
-            ]
+                },
+            ],
         }
         with _patch_searxng_fetch(payload):
             (result,) = searxng("q", categories="science")
@@ -407,8 +411,8 @@ class TestSearchSearxngScience:
                 "publishedDate": "2017-06-12T00:00:00",
                 "tags": ["Computer Science"],
                 "comments": "100,000 citations from the year 2017 to 2024",
-            }
-        ]
+            },
+        ],
     }
 
     def test_science_returns_paper_results(self) -> None:
@@ -428,7 +432,7 @@ class TestSearchSearxngScience:
                 published=datetime(2017, 6, 12),  # noqa: DTZ001
                 tags=("Computer Science",),
                 citations=100_000,
-            )
+            ),
         ]
 
     def test_paper_result_is_a_search_result(self) -> None:
@@ -491,8 +495,8 @@ class TestSearchSearxngStructuredCategories:
                     "img_format": "png",
                     "source": "example.com",
                     "filesize": "1MB",
-                }
-            ]
+                },
+            ],
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("cat", categories="images")
@@ -521,8 +525,8 @@ class TestSearchSearxngStructuredCategories:
                     "iframe_src": "https://embed",
                     "thumbnail": "https://t",
                     "publishedDate": "2020-01-02T00:00:00",
-                }
-            ]
+                },
+            ],
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("clip", categories="videos")
@@ -542,8 +546,8 @@ class TestSearchSearxngStructuredCategories:
                     "content": "story",
                     "publishedDate": "2026-06-22T00:00:00",
                     "thumbnail": "https://t",
-                }
-            ]
+                },
+            ],
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("news", categories="news")
@@ -568,8 +572,8 @@ class TestSearchSearxngStructuredCategories:
                     "latitude": 48.8584,
                     "longitude": 2.2945,
                     "address": {"road": "Champ de Mars", "country": "France", "x": 9},
-                }
-            ]
+                },
+            ],
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("eiffel", categories="map")
@@ -610,7 +614,7 @@ class TestSearchSearxngStructuredCategories:
                     "code_language": "python",
                 },
                 {"template": "default.html", "url": "https://w", "title": "wiki"},
-            ]
+            ],
         }
         with _patch_searxng_fetch(payload):
             pkg, code, web = searxng("numpy", categories="it")
@@ -645,7 +649,7 @@ class TestSearchSearxngStructuredCategories:
                     "size": "1MB",
                     "mimetype": "application/pdf",
                 },
-            ]
+            ],
         }
         with _patch_searxng_fetch(payload):
             torrent, file = searxng("iso", categories="files")
@@ -864,7 +868,8 @@ class TestParseDdg:
         assert _duckduckgo_parse(html, 10) == []
 
     def test_a_challenge_page_is_not_reported_as_changed_markup(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """An empty parse must name which of three causes it was.
 
@@ -878,7 +883,8 @@ class TestParseDdg:
         assert "changed markup" not in caplog.text
 
     def test_an_empty_result_list_is_not_reported_as_changed_markup(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A genuinely empty result page is not a parser failure either."""
         html = '<html><body><div id="links"></div></body></html>'
@@ -888,7 +894,8 @@ class TestParseDdg:
         assert "changed markup" not in caplog.text
 
     def test_unrecognised_markup_still_reports_changed_markup(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """The original diagnosis survives for the case it actually fits."""
         with caplog.at_level(logging.WARNING):
@@ -929,7 +936,8 @@ class TestSearchDuckduckgo:
                 return_value=("ddg-test-ua",),
             ),
             _patch_fetch(
-                module="duckduckgo", return_value=_NO_RESULTS_DDG.encode()
+                module="duckduckgo",
+                return_value=_NO_RESULTS_DDG.encode(),
             ) as mock,
         ):
             duckduckgo("test")
@@ -963,7 +971,8 @@ class TestSearchDuckduckgo:
         # between requests is read as a bot. Unlike the per-query Google UA, the
         # DDG UA must be the SAME for every query in the process.
         with _patch_fetch(
-            module="duckduckgo", return_value=_NO_RESULTS_DDG.encode()
+            module="duckduckgo",
+            return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("alpha")
             duckduckgo("beta")
@@ -1013,7 +1022,11 @@ class TestLiveQueryAvailabilitySkips:
 
     @classmethod
     def _run(
-        cls, fetch: Callable[[float], list[str]], *, backend: str, timeout_sec: float
+        cls,
+        fetch: Callable[[float], list[str]],
+        *,
+        backend: str,
+        timeout_sec: float,
     ) -> list[str]:
         """Call the live helper, imported at use so collection stays cheap."""
         from wesearch.search.search_integration_test import (  # noqa: PLC0415 -- see class docstring

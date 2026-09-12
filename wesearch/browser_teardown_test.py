@@ -148,7 +148,8 @@ def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
         for path in sorted(_CWD.rglob("*_test.py"))
         if path != _THIS
         and _calls(
-            ast.parse(path.read_text(encoding="utf-8"), str(path)), "shutdown_browsers"
+            ast.parse(path.read_text(encoding="utf-8"), str(path)),
+            "shutdown_browsers",
         )
     ]
 

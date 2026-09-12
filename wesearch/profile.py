@@ -102,7 +102,7 @@ def _encode(profile: Profile) -> bytes:
             "ua": profile.ua,
             "cookies": profile.cookies,
             "created": profile.created,
-        }
+        },
     ).encode()
 
 
@@ -114,7 +114,9 @@ def _try_decode(raw: bytes) -> Profile | None:
     try:
         obj = json.loads(raw)
         return Profile(
-            ua=obj["ua"], cookies=dict(obj["cookies"]), created=obj["created"]
+            ua=obj["ua"],
+            cookies=dict(obj["cookies"]),
+            created=obj["created"],
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -210,7 +212,10 @@ class ProfileStore:
             path.unlink(missing_ok=True)
 
     def update_cookies(
-        self, egress_ip: str, domain: str, cookies: dict[str, str]
+        self,
+        egress_ip: str,
+        domain: str,
+        cookies: dict[str, str],
     ) -> None:
         """Merge ``cookies`` into an existing key's jar (locked read-modify-write).
 
@@ -239,7 +244,7 @@ class ProfileStore:
             self._write(
                 path,
                 _encode(
-                    Profile(ua=profile.ua, cookies=merged, created=profile.created)
+                    Profile(ua=profile.ua, cookies=merged, created=profile.created),
                 ),
             )
 

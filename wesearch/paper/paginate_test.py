@@ -62,7 +62,9 @@ class TestPaginate:
             return body
 
         cursor = _offset_cursor(
-            [], page_size_max=200, fetch=MagicMock(side_effect=do_fetch)
+            [],
+            page_size_max=200,
+            fetch=MagicMock(side_effect=do_fetch),
         )
         paginate(cursor, limit=450)
         assert all(s <= 200 for s in sizes)
@@ -93,7 +95,9 @@ class TestPaginate:
         pages: list[list[MutableJSON]] = [[{"n": i} for i in range(200)], [{"n": 200}]]
         cursor = _offset_cursor(pages, page_size_max=200)
         page = paginate(
-            cursor, limit=None, keep=lambda r: IntCodec.coerce(r["n"], 0) % 2 == 0
+            cursor,
+            limit=None,
+            keep=lambda r: IntCodec.coerce(r["n"], 0) % 2 == 0,
         )
         # Only one page fetched (limit=None), all-even kept, but complete
         # reflects the cursor (full page -> more), not the filtered count.

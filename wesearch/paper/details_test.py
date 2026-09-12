@@ -140,7 +140,9 @@ class TestOpenAlexGraphSource:
     def test_citations_dispatches_to_openalex(self) -> None:
         recs = [PaperRecord(title="citer", sources=("openalex",))]
         with patch.object(
-            openalex, "citations", return_value=(recs, 500, False)
+            openalex,
+            "citations",
+            return_value=(recs, 500, False),
         ) as oa_cites:
             listing = citations("doi", "10.1/x", limit=1, source="openalex")
         assert [r.title for r in listing.records] == ["citer"]
@@ -178,7 +180,11 @@ class TestOpenAlexGraphSource:
     def test_influential_only_rejected_for_openalex(self) -> None:
         with pytest.raises(PaperError, match="S2-only"):
             citations(
-                "doi", "10.1/x", limit=None, source="openalex", influential_only=True
+                "doi",
+                "10.1/x",
+                limit=None,
+                source="openalex",
+                influential_only=True,
             )
 
 

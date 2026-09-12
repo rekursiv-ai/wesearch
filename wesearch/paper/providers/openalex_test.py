@@ -57,7 +57,8 @@ class TestSearch:
         work: MutableJSON = {"title": "Attention", "publication_year": 2017}
         payload = {"meta": {"count": 42}, "results": [work, {"title": "B"}]}
         with patch(
-            "wesearch.paper.providers.openalex.fetch", _fetch_returning(payload)
+            "wesearch.paper.providers.openalex.fetch",
+            _fetch_returning(payload),
         ):
             records, total, complete = openalex.search(
                 "attention",
@@ -102,14 +103,16 @@ class TestSearch:
         assert "open_access.is_oa:true" in flt
 
     def test_api_key_present_when_env_set(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("OPENALEX_API_KEY", "secret")
         fetch = _search()
         assert fetch.call_args.kwargs["request"].content.params["api_key"] == "secret"
 
     def test_api_key_absent_when_env_unset(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
         fetch = _search()
@@ -118,7 +121,8 @@ class TestSearch:
 
 class TestHeaders:
     def test_mailto_in_user_agent_when_email_set(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("OPENALEX_EMAIL", "me@example.com")
         headers = openalex._headers()
@@ -126,7 +130,8 @@ class TestHeaders:
         assert headers["Accept"] == "application/json"
 
     def test_plain_user_agent_when_email_unset(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("OPENALEX_EMAIL", raising=False)
         assert openalex._headers()["User-Agent"] == "loop-paper"
@@ -140,7 +145,11 @@ class TestRequestErrors:
             pytest.raises(RateLimitError) as ei,
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert "daily credit budget" in str(ei.value)
 
@@ -151,7 +160,11 @@ class TestRequestErrors:
             pytest.raises(BackendError) as ei,
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert ei.value.status == 500
 
@@ -164,7 +177,11 @@ class TestRequestErrors:
             pytest.raises(BackendError) as ei,
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert ei.value.status == 0
 
@@ -177,7 +194,11 @@ class TestRequestErrors:
             pytest.raises(BackendError) as ei,
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert ei.value.status == 0
 
@@ -190,7 +211,11 @@ class TestRequestErrors:
             pytest.raises(BackendError) as ei,
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
         assert "invalid JSON" in str(ei.value)
 
@@ -207,7 +232,11 @@ class TestRequestErrors:
             pytest.raises(BackendError, match="expected a JSON object"),
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
 
     def test_undecodable_bytes_raise_backend_error(self) -> None:
@@ -221,7 +250,11 @@ class TestRequestErrors:
             pytest.raises(BackendError, match="invalid JSON"),
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
 
     def test_limiter_failure_raises_backend_error(self) -> None:
@@ -237,7 +270,11 @@ class TestRequestErrors:
             pytest.raises(BackendError, match="rate-limit gate"),
         ):
             openalex.search(
-                "x", limit=None, year_from=None, year_to=None, open_access_only=False
+                "x",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
             )
 
 
@@ -371,8 +408,8 @@ class TestReferences:
                         "https://openalex.org/W10",
                         "https://openalex.org/W11",
                     ],
-                }
-            ]
+                },
+            ],
         }
         batch: MutableJSON = {
             "meta": {"count": 2},
@@ -382,7 +419,7 @@ class TestReferences:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(batch).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -408,8 +445,8 @@ class TestReferences:
                         "https://openalex.org/W10",
                         "https://openalex.org/W11",
                     ],
-                }
-            ]
+                },
+            ],
         }
         # count=1: OpenAlex resolved only W10, dropped W11.
         batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
@@ -417,7 +454,7 @@ class TestReferences:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(batch).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -438,8 +475,8 @@ class TestReferences:
                         "https://openalex.org/W11",
                         "https://openalex.org/W10",  # Duplicate of the first.
                     ],
-                }
-            ]
+                },
+            ],
         }
         # Both DISTINCT ids resolved (W10, W11); OpenAlex returns 2, not 3.
         batch: MutableJSON = {
@@ -450,7 +487,7 @@ class TestReferences:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(batch).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -466,15 +503,15 @@ class TestReferences:
                         "https://openalex.org/W11",
                         "https://openalex.org/W12",
                     ],
-                }
-            ]
+                },
+            ],
         }
         batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
         fetch = MagicMock(
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(batch).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=1)
@@ -510,7 +547,7 @@ class TestCitations:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(citing).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=1)
@@ -526,7 +563,7 @@ class TestCitations:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(citing).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             openalex.citations("doi", "10.1/x", limit=None, year_from=2020)
@@ -556,7 +593,7 @@ class TestCitations:
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(page1).encode(), FetchSession()),
                 (json.dumps(page2).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=250)
@@ -581,7 +618,7 @@ class TestCitations:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(citing).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, total, complete = openalex.citations("doi", "10.1/x", limit=None)
@@ -601,7 +638,7 @@ class TestCitations:
             side_effect=[
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(citing).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=None)
@@ -626,7 +663,7 @@ class TestCitations:
                 (json.dumps(resolve).encode(), FetchSession()),
                 (json.dumps(page1).encode(), FetchSession()),
                 (json.dumps(page2).encode(), FetchSession()),
-            ]
+            ],
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=400)

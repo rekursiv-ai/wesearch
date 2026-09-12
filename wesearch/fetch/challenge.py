@@ -155,7 +155,8 @@ def _tags(
     # Cloudflare's own ``trk_jschal_js`` marker is an attribute ON the script
     # element.
     script_body: re.Pattern[str] = re.compile(
-        r"(<(script|style)\b[^>]*>).*?(</\2>)", re.DOTALL | re.IGNORECASE
+        r"(<(script|style)\b[^>]*>).*?(</\2>)",
+        re.DOTALL | re.IGNORECASE,
     ),
 ) -> list[str]:
     """Return the rendered tags of ``text``, with script/style bodies removed."""

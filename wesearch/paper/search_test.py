@@ -25,7 +25,9 @@ def _rec(title: str, source: str) -> PaperRecord:
 class TestSearchDispatch:
     def test_single_backend_openalex(self) -> None:
         with patch.object(
-            openalex, "search", return_value=([_rec("a", "openalex")], 1, True)
+            openalex,
+            "search",
+            return_value=([_rec("a", "openalex")], 1, True),
         ):
             result = search("q", source="openalex")
         assert [r.title for r in result.records] == ["a"]
@@ -37,7 +39,9 @@ class TestSearchDispatch:
         # hardcoded True, so every truncated single-backend result claimed to
         # be exhaustive.
         with patch.object(
-            openalex, "search", return_value=([_rec("a", "openalex")], 500, False)
+            openalex,
+            "search",
+            return_value=([_rec("a", "openalex")], 500, False),
         ):
             result = search("q", source="openalex", limit=1)
         assert not result.complete
@@ -61,7 +65,9 @@ class TestFusedSearch:
         with (
             patch.object(s2, "get", return_value=s2_payload),
             patch.object(
-                openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
+                openalex,
+                "search",
+                return_value=([_rec("o", "openalex")], 1, True),
             ),
         ):
             result = search("q")  # Fused default.
@@ -79,7 +85,9 @@ class TestFusedSearch:
                 return_value=([_rec("s", "s2")], 1, True),
             ),
             patch.object(
-                openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
+                openalex,
+                "search",
+                return_value=([_rec("o", "openalex")], 1, True),
             ),
         ):
             result = search("q")
@@ -94,7 +102,9 @@ class TestFusedSearch:
                 side_effect=PaperError("s2 down"),
             ),
             patch.object(
-                openalex, "search", return_value=([_rec("o", "openalex")], 3, True)
+                openalex,
+                "search",
+                return_value=([_rec("o", "openalex")], 3, True),
             ),
         ):
             result = search("q")
@@ -177,7 +187,9 @@ class TestFusedSearch:
                 return_value=([_rec("s", "s2")], 7, False),
             ),
             patch.object(
-                openalex, "search", return_value=([_rec("o", "openalex")], 3, False)
+                openalex,
+                "search",
+                return_value=([_rec("o", "openalex")], 3, False),
             ),
         ):
             result = search("q", limit=1)

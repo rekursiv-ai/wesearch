@@ -178,7 +178,10 @@ def truncation_notice(shown: int, total: int) -> str:
 
 
 def lean_record(
-    rec: PaperRecord, *, abstract_chars: int = 500, author_limit: int = 5
+    rec: PaperRecord,
+    *,
+    abstract_chars: int = 500,
+    author_limit: int = 5,
 ) -> dict[str, object]:
     """Return one paper as a compact dict: empty fields dropped, abstract clipped.
 

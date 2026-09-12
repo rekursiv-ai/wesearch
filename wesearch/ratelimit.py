@@ -68,7 +68,7 @@ class CooldownActiveError(Exception):
     def __init__(self, remaining_sec: float) -> None:
         super().__init__(
             f"cooldown active for {remaining_sec:.0f}s more; "
-            "not waiting -- retry later or change identity (IP / key)"
+            "not waiting -- retry later or change identity (IP / key)",
         )
         self.remaining_sec = remaining_sec
 
@@ -181,7 +181,8 @@ class Store(Protocol):
     """
 
     def transact(
-        self, update: Callable[[tuple[float, float] | None], tuple[float, float]]
+        self,
+        update: Callable[[tuple[float, float] | None], tuple[float, float]],
     ) -> None:
         """Apply ``update`` to the stored state under the store's lock.
 
@@ -205,7 +206,8 @@ class InProcessStore:
         self._state: tuple[float, float] | None = None
 
     def transact(
-        self, update: Callable[[tuple[float, float] | None], tuple[float, float]]
+        self,
+        update: Callable[[tuple[float, float] | None], tuple[float, float]],
     ) -> None:
         """Run ``update`` on the in-memory state under the thread lock.
 
@@ -235,7 +237,8 @@ class FileStore:
         self._path = path
 
     def transact(
-        self, update: Callable[[tuple[float, float] | None], tuple[float, float]]
+        self,
+        update: Callable[[tuple[float, float] | None], tuple[float, float]],
     ) -> None:
         """Run ``update`` on the on-disk state under an exclusive ``flock``.
 
@@ -499,7 +502,8 @@ class TokenBucketRateLimiter:
             nonlocal wait
             tokens, updated = state if state is not None else (self._capacity, now)
             tokens = min(
-                self._capacity, tokens + (now - updated) * self._refill_per_sec
+                self._capacity,
+                tokens + (now - updated) * self._refill_per_sec,
             )
             wait = max(0.0, (1.0 - tokens) / self._refill_per_sec)
             # ``now + wait`` is monotonic non-decreasing even when ``now`` is a
@@ -538,7 +542,10 @@ class CooldownGate:
     """
 
     def __init__(
-        self, *, store: Store | None = None, clock: Clock | None = None
+        self,
+        *,
+        store: Store | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._store: Store = store if store is not None else InProcessStore()
         self._clock: Clock = clock if clock is not None else SystemClock()
@@ -686,7 +693,7 @@ class CooldownRateLimiter:
 
         """
         self._cooldown.trigger(
-            self._cooldown_sec if backoff_sec is None else backoff_sec
+            self._cooldown_sec if backoff_sec is None else backoff_sec,
         )
 
 

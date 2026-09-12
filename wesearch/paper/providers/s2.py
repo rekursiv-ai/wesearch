@@ -319,7 +319,9 @@ def search_paginate(
         is_depth_ceiling=lambda e: e.status == 400,
     )
     return wesearch.paper.paginate.paginate(
-        cursor, limit=limit, keep=lambda _e: True
+        cursor,
+        limit=limit,
+        keep=lambda _e: True,
     ), total
 
 
@@ -494,7 +496,7 @@ def _attempt(
                 status=0,
             ) from e
     raise AssertionError(  # pragma: no cover -- loop either returns or raises
-        "_attempt retry loop exited without returning"
+        "_attempt retry loop exited without returning",
     )
 
 
@@ -560,5 +562,5 @@ def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
         return cast(MutableJSON | list[object], json.loads(raw))
     except json.JSONDecodeError as e:
         raise BackendError(
-            f"Semantic Scholar returned invalid JSON for {what}: {e}"
+            f"Semantic Scholar returned invalid JSON for {what}: {e}",
         ) from e

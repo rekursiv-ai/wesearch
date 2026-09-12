@@ -25,14 +25,18 @@ class TestThirdPartyConsent:
 
     @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
     def test_allows_on_truthy(
-        self, value: str, monkeypatch: pytest.MonkeyPatch
+        self,
+        value: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("WESEARCH_ALLOW_THIRD_PARTY_RENDER", value)
         assert reader_proxy.third_party_render_allowed()
 
     @pytest.mark.parametrize("value", ["0", "false", "", "no"])
     def test_refuses_on_falsy(
-        self, value: str, monkeypatch: pytest.MonkeyPatch
+        self,
+        value: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("WESEARCH_ALLOW_THIRD_PARTY_RENDER", value)
         assert not reader_proxy.third_party_render_allowed()
@@ -60,7 +64,8 @@ class TestFetch:
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
             body = reader_proxy.fetch_reader_proxy(
-                "https://x.com/user", policy=PolicyParams()
+                "https://x.com/user",
+                policy=PolicyParams(),
             )
         assert body == b"# rendered"
         assert seen["url"] == "https://r.jina.ai/https://x.com/user"

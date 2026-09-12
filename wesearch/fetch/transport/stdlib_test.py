@@ -64,7 +64,8 @@ class TestFetchStdlibPath:
     def test_gzipdecompression(self) -> None:
         compressed = gzip.compress(b"hello")
         resp = self._mock_http_response(
-            body=compressed, headers=[("content-encoding", "gzip")]
+            body=compressed,
+            headers=[("content-encoding", "gzip")],
         )
         mock_conn = self._mock_conn(resp)
         with patch(
@@ -550,7 +551,9 @@ class TestFetchStdlibBackend:
         # Location "next" (no leading slash) from /base/start must resolve to
         # /base/next on the same host, not corrupt the host to "example.comnext".
         redir_resp = self._mock_http_response(
-            status=302, body=b"", headers=[("location", "next")]
+            status=302,
+            body=b"",
+            headers=[("location", "next")],
         )
         ok_resp = self._mock_http_response(body=b"landed")
         mock_conn = Mock()
@@ -578,7 +581,9 @@ class TestFetchStdlibBackend:
         # A POST to a.com that redirects to b.com must NOT leak Origin: a.com;
         # the header is rewritten to the new origin (never the source).
         redir_resp = self._mock_http_response(
-            status=307, body=b"", headers=[("location", "https://b.com/land")]
+            status=307,
+            body=b"",
+            headers=[("location", "https://b.com/land")],
         )
         ok_resp = self._mock_http_response(body=b"ok")
         conn_a = Mock(request=Mock(), close=Mock())
@@ -606,7 +611,9 @@ class TestFetchStdlibBackend:
         # cross-host redirect (HTTP field names are case-insensitive); leaking
         # the source host to the new origin is a routing/information-leak bug.
         redir_resp = self._mock_http_response(
-            status=301, body=b"", headers=[("location", "https://other.com/page")]
+            status=301,
+            body=b"",
+            headers=[("location", "https://other.com/page")],
         )
         ok_resp = self._mock_http_response(body=b"ok")
         conn_a = Mock(request=Mock(), close=Mock())
@@ -760,7 +767,9 @@ class TestFetchStdlibBackend:
         seen: list[str] = []
 
         def spy(
-            host: str | None, port: str | int | None, *args: int
+            host: str | None,
+            port: str | int | None,
+            *args: int,
         ) -> list[
             tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[str, int]]
         ]:
@@ -826,7 +835,9 @@ class TestFetchStdlibBackend:
         # ported URL must rebuild Host WITH the port, not just the initial hop.
         # (The initial-hop and rebuild Host logic must share one rule.)
         redir = self._mock_http_response(
-            status=301, body=b"", headers=[("location", "https://other.com:8443/p")]
+            status=301,
+            body=b"",
+            headers=[("location", "https://other.com:8443/p")],
         )
         ok = self._mock_http_response(body=b"ok")
         conn_a = Mock(request=Mock(), close=Mock())
@@ -862,7 +873,8 @@ class TestOpenConnection:
                 captured.append(host)
 
         with patch(
-            "wesearch.fetch.transport.stdlib.http.client.HTTPSConnection", _Stub
+            "wesearch.fetch.transport.stdlib.http.client.HTTPSConnection",
+            _Stub,
         ):
             _open_connection("https", "example.com", timeout_sec=10)
         assert captured == ["example.com"]

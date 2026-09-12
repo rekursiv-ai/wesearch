@@ -43,7 +43,9 @@ def offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def fake(
-        host: str | None, *_args: object, **_kwargs: object
+        host: str | None,
+        *_args: object,
+        **_kwargs: object,
     ) -> list[
         tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[str, int]]
     ]:

@@ -124,7 +124,9 @@ def fetch_stdlib(
                 remaining -= 1
                 response.read()  # Drain the socket before advancing the hop.
                 redirect_url = redirect_target(
-                    current_url, response.status, resp_headers
+                    current_url,
+                    response.status,
+                    resp_headers,
                 )
                 redir = urlparse(redirect_url)
                 redir_scheme = redir.scheme or scheme

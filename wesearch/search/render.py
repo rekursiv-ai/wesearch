@@ -188,7 +188,7 @@ def _labelled(
     value: object,
     *,
     prefixes: Mapping[str, str] = MappingProxyType(
-        {"doi": "doi:", "citations": "cites:", "seed": "seed:", "leech": "leech:"}
+        {"doi": "doi:", "citations": "cites:", "seed": "seed:", "leech": "leech:"},
     ),
     suffixes: Mapping[str, str] = MappingProxyType({"views": " views"}),
 ) -> str:

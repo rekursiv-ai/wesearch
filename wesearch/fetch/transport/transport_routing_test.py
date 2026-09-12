@@ -116,7 +116,8 @@ def test_remember_preserves_domains_past_the_read_chunk(tmp_path: Path) -> None:
 
 
 def test_read_failure_after_open_degrades_to_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An I/O error mid-read yields no routing, not an aborted fetch.
 

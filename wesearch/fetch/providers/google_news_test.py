@@ -41,7 +41,10 @@ class TestFetch:
         ],
     )
     def test_rewrites_and_tags(
-        self, url: str, want_target: str, want_payload: str
+        self,
+        url: str,
+        want_target: str,
+        want_payload: str,
     ) -> None:
         seen: dict[str, str] = {}
 

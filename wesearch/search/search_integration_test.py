@@ -144,7 +144,10 @@ def _admitted(*, timeout_sec: float) -> Generator[None]:
 # ``integration`` and is deselected by default, so a test of the helper placed here
 # would not run.
 def _query_once[T](
-    fetch: Callable[[float], list[T]], *, backend: str, timeout_sec: float = 8.0
+    fetch: Callable[[float], list[T]],
+    *,
+    backend: str,
+    timeout_sec: float = 8.0,
 ) -> list[T]:
     """Run one live query under the search lock and return its results."""
     unreachable_dir = state_dir() / "rekursiv-ai" / "wesearch" / "unreachable"
@@ -155,7 +158,7 @@ def _query_once[T](
         and time.time() - unreachable_marker.stat().st_mtime < _UNREACHABLE_TTL_SEC
     ):
         raise pytest.skip.Exception(
-            f"{backend} already proved unreachable from this egress"
+            f"{backend} already proved unreachable from this egress",
         )
     try:
         with _admitted(timeout_sec=timeout_sec):
@@ -164,13 +167,13 @@ def _query_once[T](
         # BEFORE the TimeoutError clause below: ``filelock.Timeout`` subclasses
         # it, so the order is what keeps a busy lane reporting as a busy lane.
         raise pytest.skip.Exception(
-            f"{backend}: every live-search lane busy"
+            f"{backend}: every live-search lane busy",
         ) from error
     except BrowserUnavailableError as error:
         # No usable Chrome on this host (CI, headless box): a capability gap,
         # not a parser fault, and retrying cannot conjure a browser.
         raise pytest.skip.Exception(
-            f"browser subsystem unavailable: {error}"
+            f"browser subsystem unavailable: {error}",
         ) from error
     except SearchError as error:
         # An edge throttling this egress is availability, exactly like the
@@ -180,13 +183,13 @@ def _query_once[T](
         if "rate-limit" not in str(error):
             raise
         raise pytest.skip.Exception(
-            f"{backend} is rate-limited from this egress: {error}"
+            f"{backend} is rate-limited from this egress: {error}",
         ) from error
     except BotDetectionError as error:
         # An egress-IP CAPTCHA/challenge block is persistent (verified), so this
         # is availability too. Ordered BEFORE FetchError, which it subclasses.
         raise pytest.skip.Exception(
-            f"{backend} served an automated-access block: {error}"
+            f"{backend} served an automated-access block: {error}",
         ) from error
     except TimeoutError as error:
         # A backend that never answered within the ceiling is availability, not
@@ -200,7 +203,7 @@ def _query_once[T](
         # says nothing about whether the NEXT one lands, and suppressing later
         # cases on it would retire the test for a condition already over.
         raise pytest.skip.Exception(
-            f"{backend} did not answer within the ceiling: {error!r}"
+            f"{backend} did not answer within the ceiling: {error!r}",
         ) from error
     except FetchError as error:
         if error.status == 429:
@@ -209,13 +212,13 @@ def _query_once[T](
             # own timescale, so suppressing later cases would retire the test
             # for a condition that has already passed.
             raise pytest.skip.Exception(
-                f"{backend} rate-limited this egress: {error}"
+                f"{backend} rate-limited this egress: {error}",
             ) from error
         if error.status != 0:
             raise
         unreachable_marker.touch()
         raise pytest.skip.Exception(
-            f"{backend} unreachable from this egress: {error}"
+            f"{backend} unreachable from this egress: {error}",
         ) from error
 
 
@@ -258,7 +261,10 @@ class TestDuckDuckGoLive:
     def test_returns_web_results(self, query: str) -> None:
         results = _query_once(
             lambda timeout_sec: duckduckgo(
-                query, num_results=5, timeout_sec=timeout_sec, retries=0
+                query,
+                num_results=5,
+                timeout_sec=timeout_sec,
+                retries=0,
             ),
             backend="duckduckgo",
         )
@@ -273,8 +279,11 @@ class TestSearxngLive:
         results = _query_once(
             lambda timeout_sec: list(
                 searxng(
-                    query, num_results=5, categories="general", timeout_sec=timeout_sec
-                )
+                    query,
+                    num_results=5,
+                    categories="general",
+                    timeout_sec=timeout_sec,
+                ),
             ),
             backend="searxng",
         )
@@ -306,8 +315,10 @@ def _category_results(category: SearxngCategory) -> list[SearchResult]:
     return _query_once(
         lambda timeout_sec: list(
             searxng(
-                _CATEGORY_QUERY[category], categories=category, timeout_sec=timeout_sec
-            )
+                _CATEGORY_QUERY[category],
+                categories=category,
+                timeout_sec=timeout_sec,
+            ),
         ),
         backend="searxng",
     )

@@ -55,7 +55,7 @@ class TestPools:
 
     def test_pools_are_distinct(self) -> None:
         assert set(user_agent_pool("chrome_desktop")).isdisjoint(
-            user_agent_pool("chrome_android")
+            user_agent_pool("chrome_android"),
         )
 
 
@@ -153,7 +153,8 @@ class TestRefresh:
         return pool_file.read_text().splitlines()
 
     def test_desktop_filter_keeps_only_desktop_plain_chrome(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         lines = self._refresh("chrome_desktop", tmp_path)
         assert len(lines) == 2
@@ -175,7 +176,8 @@ class TestRefresh:
             useragents.refresh("chrome_desktop")
 
     def test_refresh_all_downloads_once_and_rewrites_both_pools(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         pool_paths = {
             kind: tmp_path / f"{kind}.txt"
@@ -183,7 +185,9 @@ class TestRefresh:
         }
         with (
             patch.object(
-                useragents, "_download_records", return_value=self._DATASET
+                useragents,
+                "_download_records",
+                return_value=self._DATASET,
             ) as download_mock,
             patch.object(useragents, "_pool_path", side_effect=pool_paths.__getitem__),
         ):
@@ -194,7 +198,8 @@ class TestRefresh:
         assert len(pool_paths["chrome_android"].read_text().splitlines()) == 2
 
     def test_refresh_rejects_fewer_than_two_distinct_identities(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         pool_file = tmp_path / "chrome_desktop.txt"
         duplicate_only = [self._DATASET[0], self._DATASET[0].copy()]
@@ -208,7 +213,8 @@ class TestRefresh:
         assert not pool_file.exists()
 
     def test_refresh_all_validates_both_before_replacing_either_pool(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         pool_paths = {
             kind: tmp_path / f"{kind}.txt"
@@ -229,7 +235,8 @@ class TestRefresh:
         assert pool_paths["chrome_android"].read_text() == "original\n"
 
     def test_refresh_all_rolls_back_when_second_replacement_fails(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         pool_paths = {
             kind: tmp_path / f"{kind}.txt"
@@ -272,7 +279,8 @@ class TestRefresh:
         assert set(tmp_path.iterdir()) == set(pool_paths.values())
 
     def test_pool_replacement_does_not_leave_temporary_file(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         pool_file = tmp_path / "chrome_desktop.txt"
         with (
@@ -332,7 +340,8 @@ class TestDownload:
 
     @pytest.mark.parametrize("status", [429, 503])
     def test_download_stops_after_three_transient_http_errors(
-        self, status: int
+        self,
+        status: int,
     ) -> None:
         error = HTTPError(
             "https://example.test/user-agents.json.gz",
@@ -353,7 +362,9 @@ class TestDownload:
     def test_download_stops_after_three_transient_failures(self) -> None:
         with (
             patch.object(
-                urllib.request, "urlopen", side_effect=URLError("temporary")
+                urllib.request,
+                "urlopen",
+                side_effect=URLError("temporary"),
             ) as urlopen_mock,
             pytest.raises(URLError),
         ):

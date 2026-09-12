@@ -16,7 +16,7 @@ def test_drops_stylesheet_and_script_text() -> None:
     text = extract_markdownify(
         "<html><head><style>.a{color:#375c71;font-size:1.3em}</style>"
         "<script>var tracking=1;</script></head>"
-        "<body><p>real content</p></body></html>"
+        "<body><p>real content</p></body></html>",
     )
     assert "real content" in text
     assert "color" not in text
@@ -27,7 +27,7 @@ def test_keeps_nested_structure() -> None:
     """Nested lists and tables survive, which is this extractor's reason to exist."""
     text = extract_markdownify(
         "<html><body><ul><li>outer<ul><li>inner</li></ul></li></ul>"
-        "<table><tr><th>h</th></tr><tr><td>cell</td></tr></table></body></html>"
+        "<table><tr><th>h</th></tr><tr><td>cell</td></tr></table></body></html>",
     )
     assert "outer" in text
     assert "inner" in text
@@ -38,7 +38,7 @@ def test_keeps_text_an_article_scorer_would_discard() -> None:
     """Text inside a link-only container survives, as with html2text."""
     text = extract_markdownify(
         '<html><body><div class="prons"><a href="/audio">\u02c8\u0101-j\u0259nt</a>'
-        "</div></body></html>"
+        "</div></body></html>",
     )
     assert "\u02c8\u0101-j\u0259nt" in text
 

@@ -91,7 +91,7 @@ def duckduckgo(
         return []  # Nothing to return, so do not pay for a round-trip.
     if len(query) > max_query_chars:
         raise SearchError(
-            f"DuckDuckGo query exceeds {max_query_chars} characters (got {len(query)})."
+            f"DuckDuckGo query exceeds {max_query_chars} characters (got {len(query)}).",
         )
     request_headers = {
         "User-Agent": _duckduckgo_user_agent(),
