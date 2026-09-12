@@ -41,6 +41,8 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ValidatedHost:
+    """A validated hostname and its IP address."""
+
     host: str
     ip: str
 

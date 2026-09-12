@@ -153,6 +153,7 @@ class EchoOracle:
         self._stack.close()
 
     def __enter__(self) -> Self:
+        """Enter the context manager."""
         return self
 
     def __exit__(
@@ -161,6 +162,7 @@ class EchoOracle:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Exit the context manager, closing the server."""
         self.close()
 
     def _serve(self) -> None:
