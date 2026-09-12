@@ -40,12 +40,12 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
 
 from wesearch.fetch.custom_types import FetchParamsSchema
 from wesearch.lib.userdirs import cache_dir
-from wesearch.paper import authors, details, fetch, search
+from wesearch.paper import authors, details, fetch
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
 from wesearch.search.custom_types import SearchBackends, SearxngCategory
 from wesearch.search.render import lean_result
-from wesearch.search.search import SearchParamsSchema
+from wesearch.search.search import SearchParamsSchema, search
 from wesearch.types.params import (
     Extractor,
     PolicyParams,
@@ -53,7 +53,7 @@ from wesearch.types.params import (
 )
 from wesearch.web import fetch_web
 
-import wesearch.search.search
+import wesearch.paper.search
 
 
 mcp = MCPServer(
@@ -112,7 +112,7 @@ def paper_search(
     """
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
-    result = search.search(
+    result = wesearch.paper.search.search(
         query,
         source=source,
         limit=limit,
@@ -341,7 +341,7 @@ def web_search(
     # Deliberately not env-sniffing here: nothing in the dispatch path inspects
     # SEARXNG_URL, so a docstring promising "SearXNG when configured" described
     # a behavior no build had.
-    results = wesearch.search.search.search(
+    results = search(
         query,
         backend=backend,
         num_results=num_results,

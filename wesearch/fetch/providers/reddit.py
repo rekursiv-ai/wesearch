@@ -37,7 +37,15 @@ _THREAD_RE: Final = re.compile(r"/r/[^/?#]+/comments/\w+")
 
 
 def matches(url: str) -> bool:
-    """Whether ``url`` is a Reddit URL (``reddit.com`` or any subdomain)."""
+    """Whether ``url`` is a Reddit URL (``reddit.com`` or any subdomain).
+
+    Args:
+      url: Url.
+
+    Returns:
+      result: The bool.
+
+    """
     hostname = urlparse(url).hostname or ""
     return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 

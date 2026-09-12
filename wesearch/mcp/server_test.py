@@ -14,7 +14,7 @@ import pytest
 # The MCP server needs the optional [mcp] extra. Skip the whole module when it is
 # absent (e.g. a plain `uv run pytest` without --all-extras) instead of erroring
 # on collection; CI installs the extra and exercises these tests.
-pytest.importorskip("server")
+pytest.importorskip("mcp.server")
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
 from wesearch.mcp import server
@@ -122,7 +122,7 @@ def test_author_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_web_search_returns_lean_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [custom_types.SearchResult(url="https://e.co", title="E", snippet="s")]
-    monkeypatch.setattr(server, "web_search_fn", _returns(rows))
+    monkeypatch.setattr(server, "search", _returns(rows))
     out = server.web_search("q")
     assert out == [{"url": "https://e.co", "title": "E", "snippet": "s"}]
 
@@ -201,7 +201,7 @@ def test_web_search_forwards_categories_and_transport(
         captured.update(kwargs)
         return [custom_types.SearchResult(url="https://e.co", title="E", snippet="s")]
 
-    monkeypatch.setattr(server, "web_search_fn", _fake)
+    monkeypatch.setattr(server, "search", _fake)
     server.web_search("q", categories="science", transport="curl")
     assert captured["categories"] == "science"
     assert captured["transport"] == "curl"

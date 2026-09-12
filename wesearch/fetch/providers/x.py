@@ -25,7 +25,15 @@ __all__ = [
 
 
 def matches(url: str) -> bool:
-    """Whether ``url`` is an X/Twitter URL (``x.com``/``twitter.com`` + subs)."""
+    """Whether ``url`` is an X/Twitter URL (``x.com``/``twitter.com`` + subs).
+
+    Args:
+      url: Url.
+
+    Returns:
+      result: The bool.
+
+    """
     hostname = urlparse(url).hostname or ""
     if hostname in ("x.com", "twitter.com"):
         return True

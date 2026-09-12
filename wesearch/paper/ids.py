@@ -115,6 +115,9 @@ def looks_like_paper_id(token: str) -> bool:
     Returns:
       valid: True if token is a valid DOI or arXiv identifier.
 
+    Returns:
+      result: The bool.
+
     """
     try:
         _ = normalize_id(token)

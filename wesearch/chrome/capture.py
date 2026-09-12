@@ -47,7 +47,12 @@ _libc = _load_libc()
 
 
 def chrome_available() -> bool:
-    """Whether a Chrome binary is on ``PATH``."""
+    """Whether a Chrome binary is on ``PATH``.
+
+    Returns:
+      result: The bool.
+
+    """
     return _chrome_binary() is not None
 
 

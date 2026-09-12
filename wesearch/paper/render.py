@@ -162,7 +162,16 @@ def format_author_block(rec: AuthorRecord) -> str:
 
 
 def truncation_notice(shown: int, total: int) -> str:
-    """Build a ``... showing N of M`` suffix for paginated output."""
+    """Build a ``... showing N of M`` suffix for paginated output.
+
+    Args:
+      shown: Shown.
+      total: Total.
+
+    Returns:
+      result: The str.
+
+    """
     if total > shown and total > 0:
         return f"\n... (showing {shown} of {total}; tighten filters for more)"
     return ""

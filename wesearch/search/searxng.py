@@ -413,6 +413,7 @@ class CategoryInfo:
     """
 
     gloss: str
+
     parser: Callable[[dict[str, object]], SearxngResult] | None = None
 
 
@@ -532,12 +533,25 @@ assert set(CATEGORIES) == set(get_args(SearxngCategory.__value__)), (
 def category_parser(
     category: SearxngCategory,
 ) -> Callable[[dict[str, object]], SearxngResult]:
-    """Return the reader for ``category``, or the generic web reader."""
+    """Return the reader for ``category``, or the generic web reader.
+
+    Args:
+      category: Category.
+
+    Returns:
+      result: The Callable[[dict[str, object]], SearxngResult].
+
+    """
     return CATEGORIES[category].parser or _searxng_web
 
 
 def category_gloss() -> str:
-    """Render every tab as one description line; no hand-copied list."""
+    """Render every tab as one description line; no hand-copied list.
+
+    Returns:
+      result: The str.
+
+    """
     return "\n".join(
         f"  - `{name}` -- {CATEGORIES[name].gloss}."
         for name in get_args(SearxngCategory.__value__)
