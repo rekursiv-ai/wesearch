@@ -12,6 +12,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from wesearch.fetch.transport.curl import close_curl_sessions_except
 from wesearch.fetch.transport.zendriver import shutdown_browsers
 from wesearch.lib.testing.resource_markers import pytest_collection_modifyitems
 from wesearch.lib.testing.userdirs_fixture import (
@@ -25,6 +26,7 @@ from wesearch.lib.testing.userdirs_fixture import (
 # to the whole package.
 __all__ = [
     "close_pooled_browsers",
+    "close_pooled_curl_sessions",
     "isolate_user_dirs",
     "pytest_collection_modifyitems",
     "pytest_configure",
@@ -42,3 +44,16 @@ def close_pooled_browsers() -> Iterator[None]:
     """
     yield
     shutdown_browsers()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def close_pooled_curl_sessions() -> Iterator[None]:
+    """Close every pooled curl session when its test module finishes.
+
+    curl_cffi stores native handles in thread-local state. Leaving those
+    handles alive after a module lets a later PGlite subprocess fork inherit
+    them; Python 3.14 can then finalize another thread's handle in the child
+    before exec and crash inside ``curl_easy_cleanup``.
+    """
+    yield
+    close_curl_sessions_except(None)
