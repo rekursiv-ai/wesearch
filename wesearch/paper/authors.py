@@ -35,6 +35,7 @@ class AuthorSearchResult:
     """
 
     records: list[AuthorRecord]
+
     total: int
 
 
@@ -47,6 +48,9 @@ def search_authors(query: str, *, limit: int | None) -> AuthorSearchResult:
 
     Returns:
       result: AuthorSearchResult with matching records and total count.
+
+    Returns:
+      result: The AuthorSearchResult.
 
     """
     data = s2.get("/author/search", {"query": query, "fields": s2.AUTHOR_FIELDS_STR})

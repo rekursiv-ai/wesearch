@@ -72,7 +72,15 @@ class BotDetectionError(FetchError):
 
     @classmethod
     def recovery(cls, url: str) -> str:
-        """Return the interactive-browser recovery instruction for ``url``."""
+        """Return the interactive-browser recovery instruction for ``url``.
+
+        Args:
+          url: Url.
+
+        Returns:
+          result: The str.
+
+        """
         return (
             f"Run `fetch-zendriver {shlex.quote(url)}`, solve the challenge, "
             "then close Chrome to clear this domain's cooldown."

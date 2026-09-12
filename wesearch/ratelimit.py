@@ -96,15 +96,30 @@ class Clock(Protocol):
     """Time source: a monotonic reader plus sync and async sleeps."""
 
     def time(self) -> float:
-        """Return the current time in seconds."""
+        """Return the current time in seconds.
+
+        Returns:
+          result: The float.
+
+        """
         ...
 
     def sleep(self, seconds: float) -> None:
-        """Block the thread for ``seconds`` seconds."""
+        """Block the thread for ``seconds`` seconds.
+
+        Args:
+          seconds: Seconds.
+
+        """
         ...
 
     async def sleep_async(self, seconds: float) -> None:
-        """Block the coroutine for ``seconds`` seconds."""
+        """Block the coroutine for ``seconds`` seconds.
+
+        Args:
+          seconds: Seconds.
+
+        """
         ...
 
 
@@ -125,15 +140,30 @@ class SystemClock:
         self._source = source
 
     def time(self) -> float:
-        """Return the current time in seconds from the configured source."""
+        """Return the current time in seconds from the configured source.
+
+        Returns:
+          result: The float.
+
+        """
         return self._source()
 
     def sleep(self, seconds: float) -> None:
-        """Sleep via ``time.sleep``."""
+        """Sleep via ``time.sleep``.
+
+        Args:
+          seconds: Seconds.
+
+        """
         time.sleep(seconds)
 
     async def sleep_async(self, seconds: float) -> None:
-        """Sleep via ``asyncio.sleep``."""
+        """Sleep via ``asyncio.sleep``.
+
+        Args:
+          seconds: Seconds.
+
+        """
         await asyncio.sleep(seconds)
 
 
@@ -177,7 +207,12 @@ class InProcessStore:
     def transact(
         self, update: Callable[[tuple[float, float] | None], tuple[float, float]]
     ) -> None:
-        """Run ``update`` on the in-memory state under the thread lock."""
+        """Run ``update`` on the in-memory state under the thread lock.
+
+        Args:
+          update: Update.
+
+        """
         with self._lock:
             self._state = update(self._state)
 

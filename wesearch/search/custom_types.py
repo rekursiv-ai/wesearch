@@ -53,7 +53,9 @@ class SearchResult:
     """A single web search result."""
 
     url: str
+
     title: str
+
     snippet: str
 
 
@@ -76,11 +78,17 @@ class PaperResult(SearchResult):
     """
 
     authors: tuple[str, ...] = ()
+
     journal: str = ""
+
     doi: str = ""
+
     pdf_url: str = ""
+
     published: datetime | None = None
+
     tags: tuple[str, ...] = ()
+
     citations: int | None = None
 
 
@@ -93,10 +101,15 @@ class ImageResult(SearchResult):
     """
 
     image_url: str = ""
+
     thumbnail_url: str = ""
+
     resolution: str = ""
+
     img_format: str = ""
+
     source: str = ""
+
     filesize: str = ""
 
 
@@ -113,9 +126,13 @@ class MediaResult(SearchResult):
     """
 
     published: datetime | None = None
+
     audio_url: str = ""
+
     iframe_url: str = ""
+
     length: str = ""
+
     thumbnail_url: str = ""
 
 
@@ -131,6 +148,7 @@ class VideoResult(MediaResult):
     """
 
     views: str = ""
+
     author: str = ""
 
 
@@ -150,7 +168,9 @@ class MapResult(SearchResult):
     """
 
     latitude: float | None = None
+
     longitude: float | None = None
+
     address: Mapping[str, str] = MappingProxyType({})
 
 
@@ -163,12 +183,19 @@ class PackageResult(SearchResult):
     """
 
     package_name: str = ""
+
     version: str = ""
+
     maintainer: str = ""
+
     license_name: str = ""
+
     homepage: str = ""
+
     source_code_url: str = ""
+
     popularity: str = ""
+
     tags: tuple[str, ...] = ()
 
 
@@ -181,7 +208,9 @@ class CodeResult(SearchResult):
     """
 
     repository: str = ""
+
     filename: str = ""
+
     code_language: str = ""
 
 
@@ -194,8 +223,11 @@ class FileResult(SearchResult):
     """
 
     filename: str = ""
+
     size: str = ""
+
     mimetype: str = ""
+
     author: str = ""
 
 
@@ -207,9 +239,13 @@ class TorrentResult(SearchResult):
     """
 
     magnet_url: str = ""
+
     torrent_url: str = ""
+
     seed: int | None = None
+
     leech: int | None = None
+
     filesize: str = ""
 
 
@@ -221,7 +257,12 @@ _CLEAN_SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?])")
 
 
 def strip_scripts(tag: bs4.Tag | bs4.BeautifulSoup) -> None:
-    """Remove all ``<script>`` elements from the tree in place."""
+    """Remove all ``<script>`` elements from the tree in place.
+
+    Args:
+      tag: Tag.
+
+    """
     for script in tag.find_all("script"):
         script.decompose()
 

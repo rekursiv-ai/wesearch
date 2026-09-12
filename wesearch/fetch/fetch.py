@@ -106,7 +106,18 @@ def resolve_transport(
     raw_headers: bool = False,
     has_body: bool = False,
 ) -> Transport:
-    """Resolve ``auto`` to a concrete transport for this request."""
+    """Resolve ``auto`` to a concrete transport for this request.
+
+    Args:
+      transport: Transport.
+      method: Method.
+      raw_headers: Raw headers.
+      has_body: Has body.
+
+    Returns:
+      transport: The Transport.
+
+    """
     if transport != "auto":
         return transport
     if method != "GET" or raw_headers or has_body:
@@ -148,19 +159,38 @@ class FetchSession:
     """
 
     impersonate: str = "chrome"
+
     cookies: Mapping[str, Mapping[str, str]] = field(
         default_factory=dict[str, Mapping[str, str]]
     )
+
     accept_ch: Mapping[str, frozenset[str]] = field(
         default_factory=dict[str, frozenset[str]]
     )
 
     def cookies_for(self, url: str) -> dict[str, str]:
-        """Return the cookies this session may send to ``url``'s origin."""
+        """Return the cookies this session may send to ``url``'s origin.
+
+        Args:
+          url: Url.
+
+        Returns:
+          result: The dict[str, str].
+
+        """
         return dict(self.cookies.get(origin(url), {}))
 
     def with_cookies(self, url: str, updates: Mapping[str, str]) -> FetchSession:
-        """Return a copy whose jar for ``url``'s origin is merged with ``updates``."""
+        """Return a copy whose jar for ``url``'s origin is merged with ``updates``.
+
+        Args:
+          url: Url.
+          updates: Updates.
+
+        Returns:
+          self: The FetchSession.
+
+        """
         if not updates:
             return self
         key = origin(url)
@@ -168,7 +198,16 @@ class FetchSession:
         return replace(self, cookies={**self.cookies, key: merged})
 
     def with_accept_ch(self, origin: str, hints: frozenset[str]) -> FetchSession:
-        """Return a copy recording ``origin``'s ``hints`` (unchanged if same)."""
+        """Return a copy recording ``origin``'s ``hints`` (unchanged if same).
+
+        Args:
+          origin: Origin.
+          hints: Hints.
+
+        Returns:
+          self: The FetchSession.
+
+        """
         if not hints or self.accept_ch.get(origin) == hints:
             return self
         return replace(self, accept_ch={**self.accept_ch, origin: hints})
@@ -252,8 +291,11 @@ class _Request:
     """
 
     url: str
+
     session: FetchSession
+
     params: RequestParams
+
     observer: Observer | None = None
 
     @property

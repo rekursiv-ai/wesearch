@@ -51,6 +51,7 @@ class Listing:
     """
 
     records: list[PaperRecord]
+
     complete: bool
 
 
@@ -64,6 +65,9 @@ def metadata(kind: IdType, canonical: str) -> PaperRecord:
     Returns:
       record: PaperRecord with full metadata (title, authors, abstract,
         publication date, citations, PDFs, etc.).
+
+    Returns:
+      result: The PaperRecord.
 
     """
     data = s2.get(

@@ -33,7 +33,15 @@ _TOP_PATHS: Final = frozenset({"", "/home", "/topstories", "/foryou"})
 
 
 def matches(url: str) -> bool:
-    """Whether ``url`` is the ``news.google.com`` host (no subdomains)."""
+    """Whether ``url`` is the ``news.google.com`` host (no subdomains).
+
+    Args:
+      url: Url.
+
+    Returns:
+      result: The bool.
+
+    """
     return urlparse(url).hostname == "news.google.com"
 
 

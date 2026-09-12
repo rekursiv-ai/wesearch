@@ -89,7 +89,9 @@ class Profile:
     """
 
     ua: str
+
     cookies: dict[str, str] = field(default_factory=dict)
+
     created: float = field(default_factory=time.time)
 
 
@@ -183,13 +185,26 @@ class ProfileStore:
             return profile
 
     def save(self, egress_ip: str, domain: str, profile: Profile) -> None:
-        """Persist ``profile`` for the key, replacing any prior one."""
+        """Persist ``profile`` for the key, replacing any prior one.
+
+        Args:
+          egress_ip: Egress ip.
+          domain: Domain.
+          profile: Profile.
+
+        """
         path = self._path(egress_ip, domain)
         with self._lock:
             self._write(path, _encode(profile))
 
     def discard(self, egress_ip: str, domain: str) -> None:
-        """Delete the profile for the key (a burn); absent keys are a no-op."""
+        """Delete the profile for the key (a burn); absent keys are a no-op.
+
+        Args:
+          egress_ip: Egress ip.
+          domain: Domain.
+
+        """
         path = self._path(egress_ip, domain)
         with self._lock:
             path.unlink(missing_ok=True)

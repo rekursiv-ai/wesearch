@@ -44,6 +44,7 @@ class ValidatedHost:
     """A validated hostname and its IP address."""
 
     host: str
+
     ip: str
 
 
@@ -200,7 +201,16 @@ def decompress(body: bytes, encoding: str) -> bytes:
 
 
 def decompress_error_body(body: bytes, headers: dict[str, str]) -> bytes:
-    """Decompress an ERROR response body best-effort, never raising."""
+    """Decompress an ERROR response body best-effort, never raising.
+
+    Args:
+      body: Body.
+      headers: Headers.
+
+    Returns:
+      body: The bytes.
+
+    """
     # Error pages are compressed like any success body (Cloudflare serves its
     # challenge pages zstd/br), so a raw FetchError.body is undecodable garbage
     # and a caller cannot tell a challenge from a genuine 404. This must NOT
@@ -264,7 +274,15 @@ def redirect_target(current_url: str, status: int, headers: dict[str, str]) -> s
 
 
 def default_port(scheme: str) -> int:
-    """Return the default TCP port for an HTTP scheme."""
+    """Return the default TCP port for an HTTP scheme.
+
+    Args:
+      scheme: Scheme.
+
+    Returns:
+      result: The int.
+
+    """
     return 443 if scheme == "https" else 80
 
 
@@ -279,7 +297,15 @@ def host_header(host: str, port: int | None, scheme: str) -> str:
 
 
 def bracket_ipv6(host: str) -> str:
-    """Wrap an IPv6 literal in brackets; pass hostnames and IPv4 through."""
+    """Wrap an IPv6 literal in brackets; pass hostnames and IPv4 through.
+
+    Args:
+      host: Host.
+
+    Returns:
+      host: The str.
+
+    """
     # http.client splits host on the last ':' for a port, misparsing a bare
     # "2606:4700::6810:7c60" as host+port. Bracketing avoids that heuristic.
     if ":" in host and not host.startswith("["):
