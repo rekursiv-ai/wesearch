@@ -98,7 +98,7 @@ _UA_OS_TOKEN = {
 }
 
 _needs_chrome = pytest.mark.skipif(
-    not chrome_available(), reason="No Chrome binary on PATH."
+    not chrome_available(), reason="No unconfined Chrome binary on PATH."
 )
 
 
