@@ -402,7 +402,7 @@ class _Request:
         )
 
 
-_egress_lock = threading.Lock()  # guards egress state, not a tunable.
+_egress_lock = threading.Lock()  # Guards egress state, not a tunable.
 
 # Memoized from the most recent successful probe by any :func:`egress_ip` call,
 # so the whole process shares one observed egress. ``None`` until the first

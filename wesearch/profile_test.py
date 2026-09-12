@@ -65,7 +65,7 @@ class TestProfileDiscard:
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_discard_absent_is_noop(self, tmp_path: Path) -> None:
-        _store(tmp_path).discard("1.2.3.4", "absent.com")  # must not raise.
+        _store(tmp_path).discard("1.2.3.4", "absent.com")  # Must not raise.
 
 
 class TestPathKeyCollision:
@@ -127,7 +127,7 @@ class TestCorruptFileResilience:
         store = _store(tmp_path)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"{}")  # valid JSON, missing keys.
+        path.write_bytes(b"{}")  # Valid JSON, missing keys.
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_corrupt_file_self_heals_on_next_save(self, tmp_path: Path) -> None:
@@ -144,8 +144,8 @@ class TestCorruptFileResilience:
         store = _store(tmp_path)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b'{"ua": "x"')  # truncated.
-        store.update_cookies("1.2.3.4", "x.com", {"b": "2"})  # must not raise.
+        path.write_bytes(b'{"ua": "x"')  # Truncated.
+        store.update_cookies("1.2.3.4", "x.com", {"b": "2"})  # Must not raise.
 
     def test_no_partial_file_left_when_write_interrupted(self, tmp_path: Path) -> None:
         # An interrupted write must never expose a partial file at the key path:
@@ -176,7 +176,7 @@ class TestTtlEviction:
         path = store._path("1.2.3.4", "x.com")
         assert path.exists()
         assert store.load("1.2.3.4", "x.com") is None
-        assert not path.exists()  # expired file is evicted, not left to accumulate.
+        assert not path.exists()  # Expired file is evicted, not left to accumulate.
 
 
 class TestParseSetCookie:

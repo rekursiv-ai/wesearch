@@ -66,7 +66,7 @@ _EXTRACTORS: Final[dict[Extractor, Extract]] = {
 }
 
 # Response kinds classified by the fetch path; select the extraction branch.
-_KIND_HTML: Final = "html"  # raw HTML, needs an extractor.
+_KIND_HTML: Final = "html"  # `raw` HTML, needs an extractor.
 _KIND_MARKDOWN: Final = "markdown"  # already-extracted markdown (reader proxy)
 _KIND_RSS: Final = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter.
 # Maps a reddit.RedditPayload to its extraction kind. The public export serves

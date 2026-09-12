@@ -64,7 +64,7 @@ class TestFusedSearch:
                 openalex, "search", return_value=([_rec("o", "openalex")], 1, True)
             ),
         ):
-            result = search("q")  # fused default.
+            result = search("q")  # Fused default.
         assert {r.title for r in result.records} == {"s", "o"}
         assert result.total == 2
         assert result.complete
@@ -99,7 +99,7 @@ class TestFusedSearch:
         ):
             result = search("q")
         assert [r.title for r in result.records] == ["o"]
-        assert not result.complete  # partial -> caller may decline to cache.
+        assert not result.complete  # Partial -> caller may decline to cache.
 
     def test_a_malformed_backend_payload_still_degrades(self) -> None:
         # The whole point of fusing: one backend returning garbage must not
@@ -250,7 +250,7 @@ class TestS2SearchParams:
 
         with patch.object(s2, "get", side_effect=fake_get):
             search("q", source="s2", limit=200)
-        assert seen  # a limit was sent.
+        assert seen  # A limit was sent.
         assert all(lim <= 100 for lim in seen)
 
     def test_limit_over_ceiling_paginates(self) -> None:

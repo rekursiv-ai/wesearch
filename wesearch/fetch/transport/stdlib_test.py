@@ -516,7 +516,7 @@ class TestFetchStdlibBackend:
             result, _ = fetch(
                 "https://example.com",
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
-            )  # default max_redirects=10.
+            )  # Default max_redirects=10.
         assert result == b"cap body"
 
     def test_cross_host_redirect(self) -> None:

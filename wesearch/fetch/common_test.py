@@ -327,7 +327,7 @@ class TestDecompress:
         # REV2A-002: some servers emit raw DEFLATE (no zlib wrapper); a browser
         # falls back to wbits=-MAX_WBITS. We must decode it, not raise.
         data = b"hello world"
-        raw = zlib.compress(data)[2:-4]  # strip zlib header + adler checksum.
+        raw = zlib.compress(data)[2:-4]  # Strip zlib header + adler checksum.
         assert decompress(raw, "deflate") == data
 
     def test_chained_content_encoding(self) -> None:

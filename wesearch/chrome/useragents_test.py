@@ -44,7 +44,7 @@ class TestPools:
         assert pool
         ua = pool[0]
         assert "Chrome" in ua
-        assert "Mobile" not in ua  # desktop.
+        assert "Mobile" not in ua  # Desktop.
 
     def test_android_pool_is_nonempty_mobile_chrome(self) -> None:
         pool = user_agent_pool("chrome_android")
@@ -95,29 +95,29 @@ class TestRefresh:
     """Refresh pool files from one validated intoli dataset snapshot."""
 
     _DATASET: ClassVar[list[dict[str, str]]] = [
-        {  # desktop Chrome -- kept by desktop, dropped by android.
+        {  # Desktop Chrome -- kept by desktop, dropped by android.
             "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
             "deviceCategory": "desktop",
         },
-        {  # android Chrome -- kept by android, dropped by desktop.
+        {  # Android Chrome -- kept by android, dropped by desktop.
             "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 "
             "Mobile Safari/537.36",
             "deviceCategory": "mobile",
         },
-        {  # second desktop identity -- pools must support random selection.
+        {  # Second desktop identity -- pools must support random selection.
             "userAgent": "Mozilla/5.0 (X11; Linux x86_64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
             "deviceCategory": "desktop",
         },
-        {  # second Android identity -- pools must support random selection.
+        {  # Second Android identity -- pools must support random selection.
             "userAgent": "Mozilla/5.0 (Linux; Android 15; Pixel 9) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 "
             "Mobile Safari/537.36",
             "deviceCategory": "mobile",
         },
-        {  # desktop Edge -- dropped by both (not plain Chrome)
+        {  # Desktop Edge -- dropped by both (not plain Chrome)
             "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 "
             "Safari/537.36 Edg/149.0.0.0",
@@ -136,7 +136,7 @@ class TestRefresh:
             "[FB_IAB/FB4A;FBAV/573.0.0.37.74;IABMV/1;]",
             "deviceCategory": "mobile",
         },
-        {  # embedded newline -- unsafe to serialize as one UA per line.
+        {  # Embedded newline -- unsafe to serialize as one UA per line.
             "userAgent": "Mozilla/5.0 (Linux; Android 14) Chrome/149.0.0.0\n"
             "Injected/1.0 Mobile Safari/537.36",
             "deviceCategory": "mobile",

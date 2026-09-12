@@ -2417,7 +2417,7 @@ def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> Non
 
         async def go() -> None:
             first = await pool.browser("e", _PROFILE, headless=True)
-            cast(Any, first).stopped = True  # simulate Chrome exit.
+            cast(Any, first).stopped = True  # Simulate Chrome exit.
             second = await pool.browser("e", _PROFILE, headless=True)
             assert second is not first
 
@@ -2594,7 +2594,7 @@ def test_pool_keys_separate_egress(monkeypatch: pytest.MonkeyPatch) -> None:
             await pool.browser("egress-b", _PROFILE, headless=True)
 
         pool.run(go())
-        assert len(launched) == 2  # distinct egress -> distinct browser.
+        assert len(launched) == 2  # Distinct egress -> distinct browser.
     finally:
         pool.shutdown()
 

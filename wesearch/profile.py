@@ -178,7 +178,7 @@ class ProfileStore:
                 return None
             profile = _try_decode(raw)
             if profile is None:
-                return None  # corrupt: absent, self-heals on next save.
+                return None  # Corrupt: absent, self-heals on next save.
             if time.time() - profile.created > self._ttl_sec:
                 path.unlink(missing_ok=True)
                 return None
@@ -234,7 +234,7 @@ class ProfileStore:
                 return
             profile = _try_decode(raw)
             if profile is None:
-                return  # corrupt: nothing to merge into; heals on next save.
+                return  # Corrupt: nothing to merge into; heals on next save.
             merged = {**profile.cookies, **cookies}
             self._write(
                 path,
