@@ -10,7 +10,6 @@ import http.client
 import socket
 
 import pytest
-import zstandard
 
 from wesearch.fetch import (
     ContentParams,
@@ -20,6 +19,7 @@ from wesearch.fetch import (
     RetryParams,
     fetch,
 )
+from wesearch.fetch.testing import zstd_compress
 from wesearch.fetch.transport.stdlib import _open_connection
 from wesearch.types.errors import (
     FetchError,
@@ -709,7 +709,7 @@ class TestFetchStdlibBackend:
         html = b"<!DOCTYPE html><html>Just a moment...</html>"
         resp = self._mock_http_response(
             status=403,
-            body=zstandard.ZstdCompressor().compress(html),
+            body=zstd_compress(html),
             headers=[("content-encoding", "zstd"), ("server", "cloudflare")],
         )
         mock_conn = Mock()

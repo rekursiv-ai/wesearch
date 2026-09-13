@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 import gzip
@@ -13,11 +14,27 @@ import socket
 import zlib
 
 import brotli
-import zstandard
 
 from wesearch.chrome.headers import chrome_client_hints
 from wesearch.types.errors import FetchError
 from wesearch.types.params import Trust
+
+
+# Zstandard entered the stdlib in 3.14 (PEP 784); the public floor is 3.12,
+# so the ``zstandard`` wheel is the fallback there. It is lazy because the
+# monorepo is 3.14-only and does not install it. Brotli has no stdlib port.
+# A try/except rather than a ``sys.version_info`` gate: the checkers pin 3.12
+# and would prune the stdlib branch as unreachable.
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
+if TYPE_CHECKING:
+    import zstandard
+else:
+    from wrapt import lazy_import
+
+    zstandard = lazy_import("zstandard")
 
 
 __all__ = [
@@ -422,13 +439,26 @@ def _decompress_one(body: bytes, enc: str) -> bytes:
         if enc == "br":
             return brotli.decompress(body)
         if enc == "zstd":
-            # stream_reader handles frames without an embedded size,
-            # which `.decompress()` rejects. Servers (e.g. Cloudflare)
-            # commonly emit such frames.
-            return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
-    except (OSError, zlib.error, brotli.error, zstandard.ZstdError) as e:
+            return _zstd_decompress(body)
+    except (OSError, ValueError, zlib.error, brotli.error) as e:
         raise ValueError(f"Decompression failed ({enc}): {e}") from None
     raise ValueError(f"Unknown Content-Encoding: {enc!r}")
+
+
+def _zstd_decompress(body: bytes) -> bytes:
+    """Decompress a zstd body; raise ValueError on a bad frame."""
+    # Servers (e.g. Cloudflare) emit streaming frames with no embedded content
+    # size. The stdlib one-shot handles them; the wheel's
+    # ``ZstdDecompressor.decompress()`` rejects them, so that path must stream.
+    if zstd is not None:
+        try:
+            return zstd.decompress(body)
+        except zstd.ZstdError as e:
+            raise ValueError(str(e)) from None
+    try:
+        return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
+    except zstandard.ZstdError as e:
+        raise ValueError(str(e)) from None
 
 
 def _netloc(hostname: str, port: int | None) -> str:

@@ -3,9 +3,48 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+import io
 
 from curl_cffi import requests as cc_requests
+
+
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
+if TYPE_CHECKING:
+    import zstandard
+else:
+    from wrapt import lazy_import
+
+    zstandard = lazy_import("zstandard")
+
+
+def zstd_compress(data: bytes, *, streaming: bool = False) -> bytes:
+    """Compress ``data`` as one zstd frame, via stdlib on 3.14+, else the wheel.
+
+    Args:
+      data: Bytes to compress.
+      streaming: Emit a streaming frame, which omits the content size from the
+        frame header -- the shape Cloudflare serves.
+
+    Returns:
+      frame: The compressed frame.
+
+    """
+    if zstd is not None:
+        if not streaming:
+            return zstd.compress(data)
+        compressor = zstd.ZstdCompressor()
+        return compressor.compress(data) + compressor.flush()
+    if not streaming:
+        return zstandard.ZstdCompressor().compress(data)
+    buf = io.BytesIO()
+    with zstandard.ZstdCompressor().stream_writer(buf, closefd=False) as w:
+        _ = w.write(data)
+    return buf.getvalue()
 
 
 def lower_headers(kw: dict[str, Any]) -> dict[str, str]:
