@@ -242,7 +242,8 @@ def _resolve_works(
 ) -> list[PaperRecord]:
     """Batch-resolve OpenAlex work ids to records (references are unranked)."""
     records: list[PaperRecord] = []
-    for chunk in _chunked(work_ids, per_page_max):
+    for start in range(0, len(work_ids), per_page_max):
+        chunk = work_ids[start : start + per_page_max]
         page, _ = _paginate_works(
             {"filter": f"openalex:{'|'.join(chunk)}"},
             limit=per_page_max,
@@ -256,11 +257,6 @@ def _resolve_works(
 def _work_id_tail(url_or_id: str) -> str:
     """Return the bare ``W...`` id from an OpenAlex work URL or id."""
     return url_or_id.rsplit("/", 1)[-1]
-
-
-def _chunked(items: list[str], size: int) -> list[list[str]]:
-    """Split ``items`` into consecutive chunks of at most ``size``."""
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def _select(extra: str = "") -> str:

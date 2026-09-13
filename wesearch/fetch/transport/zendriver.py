@@ -274,11 +274,6 @@ async def _close_browser_on_port(port: int) -> None:
 # must pass ``--no-sandbox``. A normal desktop user keeps the sandbox -- disabling it
 # there needlessly weakens security AND makes Chrome show a persistent "unsupported
 # command-line flag: --no-sandbox" banner.
-def _sandbox() -> bool:
-    """Whether to run Chrome sandboxed (yes, unless we are root)."""
-    return os.geteuid() != 0
-
-
 def _command_flag(command: str, marker: str) -> str | None:
     """Extract a Chrome flag value from NUL- or space-flattened proc args."""
     _, found, suffix = command.partition(marker)
@@ -540,7 +535,8 @@ async def _launch_browser(
             zendriver.Config(
                 headless=headless,
                 user_data_dir=str(profile_dir),
-                sandbox=_sandbox(),
+                # Sandboxed unless we are root.
+                sandbox=os.geteuid() != 0,
                 browser_executable_path=executable,
                 browser_args=_fetch_browser_args(executable),
                 # ``zendriver`` retries the DevTools connection ``max_tries`` times,
@@ -967,7 +963,7 @@ async def _guard_requests(
         # Interception is scoped to documents (see the pattern below), so every
         # event here is a navigation; only one that LEAVES the current document
         # is a redirect the caller should hear about.
-        is_hop = not _same_document(target, position[0])
+        is_hop = _wire_url(target) != _wire_url(position[0])
         position[0] = target
         if is_hop:
             followed[0] += 1
@@ -1029,11 +1025,6 @@ async def _guard_requests(
 #
 # Both were measured reporting a spurious first hop, and ``on_redirect`` is raise-to-
 # abort -- Google's raises on ``/sorry`` -- so a false hop aborts an ordinary fetch.
-def _same_document(target: str, current: str) -> bool:
-    """Whether ``target`` is the document already at ``current``, not a hop."""
-    return _wire_url(target) == _wire_url(current)
-
-
 def _wire_url(url: str) -> str:
     """Return ``url`` as it goes on the wire: no fragment, path never empty."""
     parts = urlsplit(url)
@@ -1114,7 +1105,10 @@ def _carried_headers(
         for name, value in request_headers.items()
         if name.lower() not in replaced
     }
-    return _header_entries(kept | entitled)
+    return [
+        cast(object, zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
+        for name, value in (kept | entitled).items()
+    ]
 
 
 # Read off :func:`~wesearch.fetch.common.apply_redirect`'s own default rather than
@@ -1134,14 +1128,6 @@ def _origin_bound() -> frozenset[str]:
     default = inspect.signature(apply_redirect).parameters["origin_bound"].default
     assert isinstance(default, frozenset)
     return cast(frozenset[str], default)
-
-
-def _header_entries(headers: Mapping[str, str]) -> list[object]:
-    """Render a header mapping as the CDP ``HeaderEntry`` list."""
-    return [
-        cast(object, zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
-        for name, value in headers.items()
-    ]
 
 
 # The handler is invoked by zendriver's callback machinery, which is not a coroutine

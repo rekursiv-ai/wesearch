@@ -44,7 +44,7 @@ def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
     """
     if path is not None:
         return _read_domains(path)
-    return _read_domains(_bundled_domains_path()) | _read_domains(
+    return _read_domains(_CWD / "zendriver-domains.txt") | _read_domains(
         state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt",
     )
 
@@ -130,11 +130,6 @@ def _write_all(file_descriptor: int, data: bytes) -> None:
 
 # Optional: ``_read_domains`` returns an empty set when the file is absent, so a
 # checkout without it simply starts with no bundled defaults.
-def _bundled_domains_path() -> Path:
-    """Return the read-only domain defaults shipped alongside this module."""
-    return _CWD / "zendriver-domains.txt"
-
-
 # The list is an optional, rebuildable cache on the per-fetch hot path, so a missing,
 # permission-denied, or corrupt (non-UTF-8) file degrades to no learned routing rather
 # than aborting every automatic fetch.

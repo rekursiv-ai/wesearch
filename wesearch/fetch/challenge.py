@@ -74,13 +74,18 @@ def classify_challenge(
     title = _page_title(text)
     if title in cloudflare_titles:
         return CloudflareChallengeError
-    if _has_markup_marker(text, cloudflare):
+    if any(marker in tag for tag in _tags(text) for marker in cloudflare):
         return CloudflareChallengeError
     if on_success_body:
         return None
     if any(marker in text for marker in (*cloudflare, *cloudflare_ambient)):
         return CloudflareChallengeError
-    if _has_widget_marker(text, puzzle_widget):
+    if any(
+        _is_widget_occurrence(tag, marker, index)
+        for tag in _tags(text)
+        for marker in puzzle_widget
+        for index in _occurrences(tag, marker)
+    ):
         return PuzzleChallengeError
     return None
 
@@ -165,10 +170,6 @@ def _tags(
     return [match.group(0) for match in tag.finditer(script_body.sub(r"\1\3", text))]
 
 
-def _has_markup_marker(text: str, markers: tuple[str, ...]) -> bool:
-    return any(marker in tag for tag in _tags(text) for marker in markers)
-
-
 # Restricts each marker to a class/id attribute value or a bare attribute name (``data-
 # sitekey``) inside an HTML tag, excluding URLs and JSON strings that merely name a
 # captcha provider.
@@ -176,16 +177,6 @@ def _has_markup_marker(text: str, markers: tuple[str, ...]) -> bool:
 # EVERY occurrence in a tag is examined, not the first: an earlier mention in an
 # unrelated attribute (``data-provider="hcaptcha" class="hcaptcha"``) is not the widget,
 # and stopping there masked the real class beside it.
-def _has_widget_marker(text: str, markers: tuple[str, ...]) -> bool:
-    """Whether a puzzle-widget marker appears as an element class/id/attribute."""
-    return any(
-        _is_widget_occurrence(tag, marker, index)
-        for tag in _tags(text)
-        for marker in markers
-        for index in _occurrences(tag, marker)
-    )
-
-
 def _occurrences(tag: str, marker: str) -> list[int]:
     """Every start index of ``marker`` within ``tag``."""
     found: list[int] = []

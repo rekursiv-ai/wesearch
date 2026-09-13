@@ -192,7 +192,6 @@ def _download_records() -> list[object]:
 
 def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[str]:
     """Select safe, plain Chrome identities for one pool."""
-    keep = _is_android_chrome if kind == "chrome_android" else _is_desktop_chrome
     selected_set: set[str] = set()
     for record in records:
         if not isinstance(record, dict):
@@ -200,11 +199,30 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
         record = cast(dict[str, object], record)
         ua = record.get("userAgent")
         device = record.get("deviceCategory")
-        if (
-            isinstance(ua, str)
-            and _is_safe_user_agent(ua)
-            and keep(ua, device if isinstance(device, str) else "")
-        ):
+        if not isinstance(ua, str):
+            continue
+        if not isinstance(device, str):
+            device = ""
+        # A UA must occupy exactly one pool-file line.
+        if not ua or ua != ua.strip() or not ua.isprintable():
+            continue
+        if kind == "chrome_android":
+            keep = (
+                device in ("mobile", "tablet")
+                and "Android" in ua
+                and "Mobile" in ua
+                and _is_plain_chrome(ua)
+                and "Android 10; K" not in ua
+            )
+        else:
+            # Not mobile, not an Edge/Opera/Samsung variant.
+            keep = (
+                device == "desktop"
+                and _is_plain_chrome(ua)
+                and "Mobile" not in ua
+                and "Android" not in ua
+            )
+        if keep:
             selected_set.add(ua)
     selected = sorted(selected_set)
     if len(selected) < 2:
@@ -268,11 +286,6 @@ def _restore_pool(kind: UserAgentKind, backup_path: Path | None) -> None:
         backup_path.replace(pool_path)
 
 
-def _is_safe_user_agent(ua: str) -> bool:
-    """Return whether a User-Agent can occupy exactly one pool-file line."""
-    return bool(ua) and ua == ua.strip() and ua.isprintable()
-
-
 def _is_plain_chrome(ua: str) -> bool:
     """Return whether a User-Agent is Chrome without a vendor wrapper."""
     return "Chrome/" in ua and not any(
@@ -294,28 +307,6 @@ def _is_plain_chrome(ua: str) -> bool:
             "Vivaldi/",
             "YaBrowser/",
         )
-    )
-
-
-# Not mobile, not an Edge/Opera/Samsung variant.
-def _is_desktop_chrome(ua: str, device: str) -> bool:
-    """Return a plain desktop Chrome UA."""
-    return (
-        device == "desktop"
-        and _is_plain_chrome(ua)
-        and "Mobile" not in ua
-        and "Android" not in ua
-    )
-
-
-def _is_android_chrome(ua: str, device: str) -> bool:
-    """Return a plain mobile Android Chrome UA."""
-    return (
-        device in ("mobile", "tablet")
-        and "Android" in ua
-        and "Mobile" in ua
-        and _is_plain_chrome(ua)
-        and "Android 10; K" not in ua
     )
 
 
