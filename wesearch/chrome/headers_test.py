@@ -48,7 +48,7 @@ class TestChromeClientHints:
 
     def test_unsupported_platform_rejected(self) -> None:
         with pytest.raises(ValueError, match="platform"):
-            chrome_client_hints(major=146, platform="BeOS")  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: the invalid platform IS the input under test
+            chrome_client_hints(major=146, platform="BeOS")  # ty: ignore[invalid-argument-type] -- The test passes an invalid platform to verify validation.  # pyright: ignore[reportArgumentType] -- The test passes an invalid platform to verify validation.
 
 
 class TestGoogleChromeHeaders:
@@ -74,7 +74,7 @@ class TestGoogleChromeHeaders:
             "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
         )
         key = "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM"
-        want = base64.b64encode(hashlib.sha1((key + ua).encode()).digest()).decode()  # noqa: S324
+        want = base64.b64encode(hashlib.sha1((key + ua).encode()).digest()).decode()  # noqa: S324 -- The fixture uses the protocol's legacy digest representation.
         assert h["x-browser-validation"] == want
 
     def test_validation_differs_by_platform(self) -> None:

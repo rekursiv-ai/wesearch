@@ -89,7 +89,7 @@ class StubSession:
           response: The response ``curl_cffi`` produced.
 
         """
-        return cc_requests.request(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **RequestParams TypedDict is unstubbed
+        return cc_requests.request(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request signature is incomplete in its installed stubs.
 
     def close(self) -> None:
         """Release held resources."""

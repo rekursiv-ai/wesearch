@@ -268,7 +268,7 @@ def is_google_property(host: str) -> bool:
 # The Google-owned property suffixes a real Chrome sends x-browser-*/x-client-data
 # to. Not an exhaustive Google-domain list -- the properties this library fetches
 # (Search, Scholar, and their static/api hosts).
-# config-globals: ignore -- derived constant, not a tunable.
+# house-ignore[globals] -- Derived constant, not a tunable.
 _GOOGLE_HOST_SUFFIXES: Final = (
     "google.com",
     "gstatic.com",
@@ -316,4 +316,4 @@ def chrome_headers_for_google(
 def _validation(user_agent: str, platform: ChromePlatform) -> str:
     """Compute ``x-browser-validation``: ``base64(sha1(api_key + UA))``."""
     data = (_PLATFORM_API_KEY[platform] + user_agent).encode()
-    return base64.b64encode(hashlib.sha1(data).digest()).decode()  # noqa: S324
+    return base64.b64encode(hashlib.sha1(data).digest()).decode()  # noqa: S324 -- Chrome compatibility requires this exact SHA-1 validation formula.

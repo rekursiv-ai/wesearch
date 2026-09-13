@@ -174,7 +174,7 @@ class TestOpenAlexGraphSource:
                     "doi",
                     "10.1/x",
                     limit=1,
-                    source="bogus",  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: the invalid source IS the input under test
+                    source="bogus",  # ty: ignore[invalid-argument-type] -- The negative test passes an invalid source to verify validation.  # pyright: ignore[reportArgumentType] -- The negative test passes an invalid source to verify validation.
                 )
 
     def test_influential_only_rejected_for_openalex(self) -> None:

@@ -31,7 +31,7 @@ else:
 # Internal builds keep extra backends; public exports keep only DuckDuckGo.
 _BACKEND_NAMES = Literal["duckduckgo", "searxng"]
 DEFAULT_SEARCH_BACKEND: Final[SearchBackends] = "duckduckgo"
-SearchBackends: TypeAlias = _BACKEND_NAMES  # noqa: UP040 -- type keyword breaks get_args() at runtime
+SearchBackends: TypeAlias = _BACKEND_NAMES  # noqa: UP040 -- The runtime get_args() consumer requires a typing TypeAlias here.
 
 
 type SearxngCategory = Literal[
@@ -253,9 +253,6 @@ class SearchError(RuntimeError):
     """Raised when a search backend fails before returning results."""
 
 
-_CLEAN_SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?])")
-
-
 def strip_scripts(tag: bs4.Tag | bs4.BeautifulSoup) -> None:
     """Remove all ``<script>`` elements from the tree in place.
 
@@ -278,7 +275,7 @@ def clean_text(text: str) -> str:
         spaces removed.
 
     """
-    return _CLEAN_SPACE_BEFORE_PUNCT.sub(r"\1", " ".join(text.split()))
+    return re.sub(r"\s+([,.;:!?])", r"\1", " ".join(text.split()))
 
 
 def gsa_headers_for_query(query: str) -> dict[str, str]:

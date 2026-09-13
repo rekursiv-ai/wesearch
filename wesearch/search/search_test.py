@@ -429,7 +429,7 @@ class TestSearchSearxngScience:
                 pdf_url="https://arxiv.org/pdf/1706.03762",
                 # SearXNG emits naive ISO timestamps; fromisoformat keeps them
                 # naive, so the expected value is naive too.
-                published=datetime(2017, 6, 12),  # noqa: DTZ001
+                published=datetime(2017, 6, 12),  # noqa: DTZ001 -- The fixture uses a naive timestamp to exercise legacy search data.
                 tags=("Computer Science",),
                 citations=100_000,
             ),
@@ -535,7 +535,7 @@ class TestSearchSearxngStructuredCategories:
         assert r.views == "1.2M"
         assert r.author == "Channel"
         assert r.iframe_url == "https://embed"
-        assert r.published == datetime(2020, 1, 2)  # noqa: DTZ001 -- naive ISO
+        assert r.published == datetime(2020, 1, 2)  # noqa: DTZ001 -- The fixture uses a naive timestamp to exercise legacy search data.
 
     def test_news_is_media_result(self) -> None:
         payload = {
@@ -553,7 +553,7 @@ class TestSearchSearxngStructuredCategories:
             (r,) = searxng("news", categories="news")
         assert isinstance(r, MediaResult)
         assert not isinstance(r, VideoResult)
-        assert r.published == datetime(2026, 6, 22)  # noqa: DTZ001 -- naive ISO
+        assert r.published == datetime(2026, 6, 22)  # noqa: DTZ001 -- The fixture uses a naive timestamp to exercise legacy search data.
 
     def test_music_is_media_result(self) -> None:
         payload = {"results": [{"url": "https://s", "audio_src": "https://a"}]}
@@ -1029,7 +1029,7 @@ class TestLiveQueryAvailabilitySkips:
         timeout_sec: float,
     ) -> list[str]:
         """Call the live helper, imported at use so collection stays cheap."""
-        from wesearch.search.search_integration_test import (  # noqa: PLC0415 -- see class docstring
+        from wesearch.search.search_integration_test import (  # noqa: PLC0415 -- The integration helper is imported lazily to keep test collection cheap.
             _query_once,
         )
 

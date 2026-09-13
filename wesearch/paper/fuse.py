@@ -22,9 +22,6 @@ from wesearch.paper.custom_types import PaperRecord
 
 __all__ = ["fuse", "normalize_title"]
 
-_WORD_PUNCT_RE = re.compile(r"[^\w\s]+")
-_WS_RE = re.compile(r"\s+")
-
 
 def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRecord]:
     """Reciprocal-rank-fuse S2 and OpenAlex hits into one ranked list.
@@ -92,7 +89,7 @@ def normalize_title(title: str) -> str:
       normalized: The comparison form used as a last-resort identity key.
 
     """
-    return _WS_RE.sub(" ", _WORD_PUNCT_RE.sub(" ", title.lower())).strip()
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", " ", title.lower())).strip()
 
 
 # A DOI and an arXiv id are separate namespaces for the SAME paper, so both are emitted:

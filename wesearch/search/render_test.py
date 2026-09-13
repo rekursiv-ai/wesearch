@@ -24,7 +24,7 @@ def test_format_paper_result() -> None:
             authors=("A", "B"),
             journal="NeurIPS",
             doi="10.1/x",
-            published=datetime(2017, 6, 1),  # noqa: DTZ001 -- naive ok in test
+            published=datetime(2017, 6, 1),  # noqa: DTZ001 -- Naive ok in test.
             citations=42,
         ),
     )

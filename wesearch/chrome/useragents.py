@@ -186,7 +186,7 @@ def _download_records() -> list[object]:
                 raise
     parsed: object = json.loads(gzip.decompress(body))
     if not isinstance(parsed, list):
-        raise RuntimeError(f"expected JSON array from {url}; upstream shape changed?")  # noqa: TRY004
+        raise RuntimeError(f"expected JSON array from {url}; upstream shape changed?")  # noqa: TRY004 -- The refresh boundary converts vendor download failures to one domain error.
     return cast(list[object], parsed)
 
 

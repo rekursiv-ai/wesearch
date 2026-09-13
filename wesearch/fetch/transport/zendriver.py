@@ -387,7 +387,7 @@ class _BrowserPool:
         """
         # Resolved, matching ``_control_address``: two spellings of one profile
         # are one user-data dir, and Chrome allows it a single owner.
-        key = (egress, str(profile_dir.resolve()))  # noqa: ASYNC240 -- one stat
+        key = (egress, str(profile_dir.resolve()))  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
         async with self._launch_lock:
             control_key = _control_address(profile_dir)
             with self._lock:
@@ -529,7 +529,7 @@ async def _launch_browser(
     headless: bool,
 ) -> zendriver.Browser:
     """Launch vanilla Chrome on the persistent profile."""
-    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
+    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
     _tolerate_late_cdp_replies()
     # Headed too, not just headless: an instance answering for
     # ``com.google.Chrome`` takes the operator's links either way, and one
@@ -650,7 +650,7 @@ def _fetch_browser_candidates() -> Iterator[Path]:
     roots = (
         # Puppeteer hardcodes ~/.cache on every platform, so this one does
         # NOT follow the macOS convention that ``cache_dir()`` implements.
-        Path.home() / ".cache" / "puppeteer" / "chrome",  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-lint: ignore[xdg-literal] -- vendor CLI's fixed home path, not ours (AGENTS.md rule 3)
+        Path.home() / ".cache" / "puppeteer" / "chrome",  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-ignore[xdg-literal] -- Vendor CLI's fixed home path, not ours (AGENTS.md rule 3).
         cache_dir() / "ms-playwright",
     )
     for root in roots:
@@ -721,9 +721,9 @@ def _request_pool_release(profile_dir: Path) -> None:
 # The single pooled browser manager, built once on first browser fetch. A
 # deliberate module singleton: it owns a live loop thread and open Chrome
 # processes -- shared runtime resources, not a tunable.
-# config-globals: ignore -- live pool of open browsers + its loop thread.
+# house-ignore[globals] -- Live pool of open browsers + its loop thread.
 _pool_singleton: _BrowserPool | None = None
-_pool_lock = threading.Lock()  # config-globals: ignore -- guards the singleton.
+_pool_lock = threading.Lock()  # house-ignore[globals] -- Guards the singleton.
 
 
 def main() -> int:

@@ -1949,7 +1949,7 @@ def test_navigate_uses_one_overall_timeout(
 
     async def record_budget(
         awaitable: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
-        timeout: float | None = None,  # noqa: ASYNC109 -- mirrors asyncio.wait_for
+        timeout: float | None = None,  # noqa: ASYNC109 -- The browser test timeout bounds polling across an awaited operation.
     ) -> object:
         # A per-step timeout that RESET the budget would hand out a constant;
         # one overall deadline yields a strictly shrinking remainder.

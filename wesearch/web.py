@@ -45,7 +45,7 @@ from wesearch.types.params import NO_BODY, NoBody
 
 if TYPE_CHECKING:
     import defusedxml.common as _defused_common
-    import defusedxml.ElementTree as _defused_etree  # noqa: N813 -- match lazy_import name
+    import defusedxml.ElementTree as _defused_etree  # noqa: N813 -- The public web adapter preserves the external provider's API name.
 else:
     from wrapt import lazy_import
 
