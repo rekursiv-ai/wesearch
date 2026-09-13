@@ -15,7 +15,7 @@ thread with ``asyncio.to_thread``. Functions return parsed records or raise a
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 import functools
 import json
@@ -79,28 +79,25 @@ __all__ = [
 #     the key.
 
 
-def _default_paper_fields() -> tuple[str, ...]:
-    """S2 paper fields every query requests, consumed by ``paper_record_from``."""
-    # Refs/cites endpoints prefix each field with the edge inner-key.
-    return (
-        "paperId",
-        "externalIds",
-        "title",
-        "abstract",
-        "authors",
-        "year",
-        "venue",
-        "citationCount",
-        "referenceCount",
-        "openAccessPdf",
-    )
-
-
-def _default_author_fields() -> tuple[str, ...]:
-    """S2 author fields every author query requests."""
-    # S2 removed aliases in May 2024 to prevent deadnaming.
-    # https://github.com/allenai/s2-folks/blob/main/API_RELEASE_NOTES.md#may-2024
-    return (
+# API field selectors -- fixed contracts, not tunables. Refs/cites endpoints
+# prefix each paper field with the edge inner-key.
+S2_PAPER_FIELDS: Final = (
+    "paperId",
+    "externalIds",
+    "title",
+    "abstract",
+    "authors",
+    "year",
+    "venue",
+    "citationCount",
+    "referenceCount",
+    "openAccessPdf",
+)
+S2_PAPER_FIELDS_STR: Final = ",".join(S2_PAPER_FIELDS)
+# S2 removed ``aliases`` in May 2024 to prevent deadnaming.
+# https://github.com/allenai/s2-folks/blob/main/API_RELEASE_NOTES.md#may-2024
+AUTHOR_FIELDS_STR: Final = ",".join(
+    (
         "authorId",
         "name",
         "affiliations",
@@ -108,15 +105,8 @@ def _default_author_fields() -> tuple[str, ...]:
         "hIndex",
         "citationCount",
         "paperCount",
-    )
-
-
-# Backwards-friendly module names the rest of the package imports. Derived from
-# the field-list helpers (a call result, not a loose literal) so the API field
-# selectors -- fixed contracts, not tunables -- live in one place.
-S2_PAPER_FIELDS = _default_paper_fields()
-S2_PAPER_FIELDS_STR = ",".join(S2_PAPER_FIELDS)
-AUTHOR_FIELDS_STR = ",".join(_default_author_fields())
+    ),
+)
 
 
 def get(

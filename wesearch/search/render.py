@@ -16,7 +16,6 @@ Pure functions over records: no tool framework, no MCP, no I/O.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from types import MappingProxyType
 
 from wesearch.search.custom_types import (
     CodeResult,
@@ -52,7 +51,7 @@ def format_result(result: SearchResult) -> str:
     # ``is not None`` and not ``if v``: a reported ZERO is a fact ("cites:0",
     # "seed:0"), and truthiness deleted it while keeping an empty string.
     kept = [
-        _labelled(k, v)
+        f"{ {'doi': 'doi:', 'citations': 'cites:', 'seed': 'seed:', 'leech': 'leech:'}.get(k, '') }{v}{ {'views': ' views'}.get(k, '') }"
         for k, v in detail_fields(result).items()
         if v is not None and v != ""
     ]
@@ -176,21 +175,3 @@ def detail_fields(result: SearchResult) -> Mapping[str, object]:
             "magnet_url": result.magnet_url,
         }
     return {}
-
-
-# The labels live on this function rather than beside the data, because only the text
-# rendering wants them: ``lean_result`` feeds a JSON protocol, where ``"doi":
-# "doi:10.1/x"`` forces every client to strip a prefix to recover the identifier -- the
-# mistake ``paper/render.py`` avoids by emitting ``rec.doi`` raw. Passed as defaults,
-# not module state, so a caller can respell them without reaching through a global.
-def _labelled(
-    name: str,
-    value: object,
-    *,
-    prefixes: Mapping[str, str] = MappingProxyType(
-        {"doi": "doi:", "citations": "cites:", "seed": "seed:", "leech": "leech:"},
-    ),
-    suffixes: Mapping[str, str] = MappingProxyType({"views": " views"}),
-) -> str:
-    """Render one detail field for the TEXT surface, with its reading label."""
-    return f"{prefixes.get(name, '')}{value}{suffixes.get(name, '')}"
