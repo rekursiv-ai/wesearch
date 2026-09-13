@@ -83,9 +83,9 @@ class TestSearch:
 
     def test_year_filter_keeps_in_range(self) -> None:
         hits = [
-            _result(title="old", published=datetime(2000, 1, 1)),  # noqa: DTZ001 -- year-only fixture
-            _result(title="mid", published=datetime(2015, 1, 1)),  # noqa: DTZ001 -- year-only fixture
-            _result(title="new", published=datetime(2025, 1, 1)),  # noqa: DTZ001 -- year-only fixture
+            _result(title="old", published=datetime(2000, 1, 1)),  # noqa: DTZ001 -- The fixture intentionally models a year-only publication date.
+            _result(title="mid", published=datetime(2015, 1, 1)),  # noqa: DTZ001 -- The fixture intentionally models a year-only publication date.
+            _result(title="new", published=datetime(2025, 1, 1)),  # noqa: DTZ001 -- The fixture intentionally models a year-only publication date.
         ]
         with patch(_TARGET, return_value=hits):
             records, total, complete = searxng.search(
@@ -177,7 +177,7 @@ class TestToRecord:
         assert rec.doi is None
 
     def test_year_from_published(self) -> None:
-        rec = searxng._to_record(_result(published=datetime(2019, 6, 1)))  # noqa: DTZ001 -- year-only fixture
+        rec = searxng._to_record(_result(published=datetime(2019, 6, 1)))  # noqa: DTZ001 -- The fixture intentionally uses a naive datetime.
         assert rec.year == 2019
 
     def test_year_none_when_no_published(self) -> None:

@@ -89,7 +89,7 @@ NO_BODY: Final = NoBody()
 # A ``Literal`` rather than a ``type`` alias: the sagent tool schemas enumerate
 # these with ``get_args`` into JSON Schema, which a lazily-evaluated ``type``
 # alias breaks.
-Transport: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
+Transport: TypeAlias = Literal[  # noqa: UP040 -- The type keyword preserves the runtime alias shape required by get_args().
     "auto",
     "curl",
     "curl-then-zendriver",
@@ -106,7 +106,7 @@ Transport: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
 # Safe by default, and deliberately: the previous contract defaulted to
 # unvalidated, so every caller had to opt in and the one that did lost the
 # browser transports for it.
-Trust: TypeAlias = Literal["untrusted", "internal"]  # noqa: UP040 -- get_args()
+Trust: TypeAlias = Literal["untrusted", "internal"]  # noqa: UP040 -- The alias shape is preserved because callers inspect it with get_args().
 
 # How a fetched HTML page becomes text. ``"html2text"`` renders every text node
 # as Markdown; ``"trafilatura"`` scores blocks and returns only what it judges to
@@ -135,7 +135,7 @@ Trust: TypeAlias = Literal["untrusted", "internal"]  # noqa: UP040 -- get_args()
 # enum, so this order is what a caller reads first.
 #
 # A ``Literal`` for the same reason as ``Transport`` above.
-Extractor: TypeAlias = Literal[  # noqa: UP040 -- type keyword breaks get_args()
+Extractor: TypeAlias = Literal[  # noqa: UP040 -- The type keyword preserves the runtime alias shape required by get_args().
     "html2text",
     "trafilatura",
     "raw",
@@ -264,7 +264,7 @@ class RetryParams:
             if when is not None:
                 return min(max((when - datetime.now(UTC)).total_seconds(), 0.0), 30)
         delay_sec = min(float(1 << attempt), 30)
-        return delay_sec + random.uniform(0, delay_sec * 0.5)  # noqa: S311 -- jitter
+        return delay_sec + random.uniform(0, delay_sec * 0.5)  # noqa: S311 -- This non-security jitter controls retry timing only.
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

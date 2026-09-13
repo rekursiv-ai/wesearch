@@ -364,25 +364,24 @@ def _searxng_files(
     return _searxng_web(item)
 
 
-# Leading integer of SearXNG's humanized citation ``comments`` (e.g. "42
-# citations from the year 2019 to 2024" -> 42). No engine reports the count as a
-# structured integer, so this is the only recovery path; an unparseable comment
-# yields ``None`` rather than a fabricated zero.
-# At least one DIGIT, not just comma-ish characters: the looser `[\d,]+`
-# matched a bare "," on hostile JSON, and the int() below then raised
-# ValueError out of a parse that must degrade to "unknown citations".
-# BOUNDED, because format is not magnitude: the unbounded run still matched, and
-# CPython refuses int() on a string past 4300 digits -- the same ValueError, out
-# of the same parse, on the same hostile-comments input the DIGIT fix addressed.
-# A trailing guard so a longer run does not match its own prefix: past ~24
-# digits the field is not a count at all, and reading its first 24 would
-# fabricate one.
-_CITATIONS_RE = re.compile(r"^\s*(\d[\d,]{0,23})(?![\d,])")
-
-
 def _searxng_paper(item: dict[str, object]) -> PaperResult:
     """Parse a SearXNG ``paper.html`` item into a :class:`PaperResult`."""
-    cites = _CITATIONS_RE.match(StrCodec.coerce(item.get("comments")))
+    # Leading integer of SearXNG's humanized citation ``comments`` (e.g. "42
+    # citations from the year 2019 to 2024" -> 42). No engine reports the count as a
+    # structured integer, so this is the only recovery path; an unparseable comment
+    # yields ``None`` rather than a fabricated zero.
+    # At least one DIGIT, not just comma-ish characters: the looser `[\d,]+`
+    # matched a bare "," on hostile JSON, and the int() below then raised
+    # ValueError out of a parse that must degrade to "unknown citations".
+    # BOUNDED, because format is not magnitude: the unbounded run still matched, and
+    # CPython refuses int() on a string past 4300 digits -- the same ValueError, out
+    # of the same parse, on the same hostile-comments input the DIGIT fix addressed.
+    # A trailing guard so a longer run does not match its own prefix: past ~24
+    # digits the field is not a count at all, and reading its first 24 would
+    # fabricate one.
+    cites = re.match(
+        r"^\s*(\d[\d,]{0,23})(?![\d,])", StrCodec.coerce(item.get("comments"))
+    )
     return PaperResult(
         url=StrCodec.coerce(item.get("url")),
         title=clean_text(StrCodec.coerce(item.get("title"))),

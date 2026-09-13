@@ -21,20 +21,9 @@ __all__ = [
     "s2_wire_id",
 ]
 
-# DOI shape: 10.<registrant>/<suffix>. Registrant is 4+ digits (ISO 26324).
-# Suffix is opaque; may contain slashes, dots, colons, etc.
-_DOI_RE = re.compile(r"^(10\.\d{4,})/(\S+)$")
-
-# arXiv new-style id: NNNN.NNNNN with optional version (v1, v2, ...).
-_ARXIV_NEW_RE = re.compile(r"^(\d{4}\.\d{4,5})(v\d+)?$")
-
-# arXiv old-style id: <subject>/NNNNNNN (e.g. hep-th/9901001). Rare but
-# S2 and arXiv both still honor these for papers pre-April-2007.
-_ARXIV_OLD_RE = re.compile(r"^([a-z-]+(?:\.[A-Z]{2})?)/(\d{7})(v\d+)?$")
-
 # arXiv id embedded in an abs/pdf URL, for backends (SearXNG, Google Scholar)
 # that surface no structured arXiv id but link to arxiv.org. Distinct from the
-# anchored id regexes above, which match a bare id, not a URL.
+# anchored bare-id shapes in ``normalize_id``, which never match a URL.
 ARXIV_URL_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w.-]+/\d+|\d{4}\.\d{4,5})")
 
 
@@ -95,9 +84,17 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
                 forced = "arxiv"
                 break
 
-    if forced != "arxiv" and _DOI_RE.match(s):
+    # DOI: 10.<registrant>/<suffix>; registrant is 4+ digits (ISO 26324) and the
+    # suffix is opaque (slashes, dots, colons all legal).
+    if forced != "arxiv" and re.match(r"^(10\.\d{4,})/(\S+)$", s):
         return "doi", s
-    if forced != "doi" and (_ARXIV_NEW_RE.match(s) or _ARXIV_OLD_RE.match(s)):
+    # arXiv new style NNNN.NNNNN[vN]; old style <subject>/NNNNNNN[vN]
+    # (``hep-th/9901001``), still honored by S2 and arXiv for pre-April-2007
+    # papers.
+    if forced != "doi" and (
+        re.match(r"^(\d{4}\.\d{4,5})(v\d+)?$", s)
+        or re.match(r"^([a-z-]+(?:\.[A-Z]{2})?)/(\d{7})(v\d+)?$", s)
+    ):
         return "arxiv", s
     raise InvalidIdError(
         f"Unrecognized identifier shape: {raw!r}. "

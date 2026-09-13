@@ -51,7 +51,7 @@ __all__ = [
 # Pool identity: egress, registrable domain, impersonation target, SSRF pin,
 # and the port that pin applies to. The pin participates because
 # ``CurlOpt.RESOLVE`` is fixed when the Session is built.
-_SessionKey: TypeAlias = tuple[  # noqa: UP040 -- forward ref in a type alias
+_SessionKey: TypeAlias = tuple[  # noqa: UP040 -- The forward reference keeps the type alias compatible with the runtime parser.
     str,
     str,
     str,
@@ -317,7 +317,7 @@ def fetch_curl(
         try:
             verb = cast(HttpMethod, loop.method)  # Curl types verb as a Literal.
             resp = (
-                session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **Unpack[RequestParams] TypedDict is unstubbed
+                session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request TypedDict has no complete checker stubs.
                     verb,
                     loop.url,
                     headers=loop.headers,
@@ -327,7 +327,7 @@ def fetch_curl(
                     allow_redirects=False,
                 )
                 if session is not None
-                else curl_cffi.requests.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **Unpack[RequestParams] TypedDict is unstubbed
+                else curl_cffi.requests.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request TypedDict has no complete checker stubs.
                     verb,
                     loop.url,
                     headers=loop.headers,
