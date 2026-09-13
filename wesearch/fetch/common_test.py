@@ -5,13 +5,11 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import gzip
-import io
 import socket
 import zlib
 
 import brotli
 import pytest
-import zstandard
 
 from wesearch.fetch.common import (
     apply_redirect,
@@ -21,6 +19,7 @@ from wesearch.fetch.common import (
     public_host,
     rewrite_origin,
 )
+from wesearch.fetch.testing import zstd_compress
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -296,18 +295,18 @@ class TestDecompress:
 
     def test_zstd(self) -> None:
         data = b"hello world"
-        compressed = zstandard.ZstdCompressor().compress(data)
-        assert decompress(compressed, "zstd") == data
+        assert decompress(zstd_compress(data), "zstd") == data
 
     def test_zstd_streaming_frame_no_size(self) -> None:
         # Streaming-mode frames omit decompressed size from the header;
         # `ZstdDecompressor.decompress()` rejects them. Real servers
         # (e.g. Cloudflare) emit such frames -- we must handle them.
         data = b"hello world " * 1000
-        buf = io.BytesIO()
-        with zstandard.ZstdCompressor().stream_writer(buf, closefd=False) as w:
-            _ = w.write(data)
-        assert decompress(buf.getvalue(), "zstd") == data
+        assert decompress(zstd_compress(data, streaming=True), "zstd") == data
+
+    def test_zstd_garbage_raises(self) -> None:
+        with pytest.raises(ValueError, match="Decompression failed"):
+            decompress(b"not zstd", "zstd")
 
     def test_identity(self) -> None:
         assert decompress(b"raw", "identity") == b"raw"

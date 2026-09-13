@@ -45,7 +45,6 @@ def _load_libc() -> ctypes.CDLL | None:
         return None
 
 
-# house-ignore[globals] -- A process-wide libc handle, not a tunable.
 _libc = _load_libc()
 
 

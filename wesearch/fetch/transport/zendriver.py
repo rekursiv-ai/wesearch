@@ -721,9 +721,9 @@ def _request_pool_release(profile_dir: Path) -> None:
 # The single pooled browser manager, built once on first browser fetch. A
 # deliberate module singleton: it owns a live loop thread and open Chrome
 # processes -- shared runtime resources, not a tunable.
-# house-ignore[globals] -- Live pool of open browsers + its loop thread.
+
 _pool_singleton: _BrowserPool | None = None
-_pool_lock = threading.Lock()  # house-ignore[globals] -- Guards the singleton.
+_pool_lock = threading.Lock()
 
 
 def main() -> int:

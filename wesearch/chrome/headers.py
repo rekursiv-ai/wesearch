@@ -268,7 +268,7 @@ def is_google_property(host: str) -> bool:
 # The Google-owned property suffixes a real Chrome sends x-browser-*/x-client-data
 # to. Not an exhaustive Google-domain list -- the properties this library fetches
 # (Search, Scholar, and their static/api hosts).
-# house-ignore[globals] -- Derived constant, not a tunable.
+
 _GOOGLE_HOST_SUFFIXES: Final = (
     "google.com",
     "gstatic.com",

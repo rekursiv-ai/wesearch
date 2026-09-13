@@ -15,7 +15,6 @@ import importlib
 import math
 
 import pytest
-import zstandard
 
 from wesearch.fetch import (
     ContentParams,
@@ -37,6 +36,7 @@ from wesearch.fetch.testing import (
     StubSession,
     const_curl_session,
     lower_headers,
+    zstd_compress,
 )
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
@@ -381,7 +381,7 @@ class TestFetchRetry:
         html = b"<!DOCTYPE html><html>Just a moment...</html>"
         resp = self._mock_http_response(
             status=403,
-            body=zstandard.ZstdCompressor().compress(html),
+            body=zstd_compress(html),
             headers=[("content-encoding", "zstd"), ("server", "cloudflare")],
         )
         mock_conn = Mock()
