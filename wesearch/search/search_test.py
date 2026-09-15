@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
-from typing import Any, ClassVar, cast
+from typing import ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import json
@@ -16,12 +16,11 @@ import urllib.error
 import bs4
 import pytest
 
-from wesearch.fetch import FetchSession
+from wesearch.fetch import FetchSession, RequestParams
 from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
     ImageResult,
-    MapResult,
     MediaResult,
     PackageResult,
     PaperResult,
@@ -58,7 +57,7 @@ def _patch_fetch(
     # Fetch returns (body, session); wrap the byte-valued test inputs so the
     # mock matches that shape (an exception side_effect still raises).
     # Two direct calls rather than one `**kwargs` splat: the branches set
-    # mutually exclusive keys, and splatting a `dict[str, Any]` into `patch`'s
+    # mutually exclusive keys, and splatting an untyped mapping into `patch`'s
     # overload set erases what it returns.
     target = f"wesearch.search.{module}.fetch"
     if side_effect is not None:
@@ -79,7 +78,7 @@ def _tuple_side_effect(side_effect: object) -> object:
 
 @contextmanager
 def _patch_searxng_fetch(
-    payload: dict[str, Any],
+    payload: Mapping[str, object],
 ) -> Generator[MagicMock | AsyncMock]:
     body = json.dumps(payload).encode()
     with (
@@ -271,7 +270,9 @@ class TestSearchSearxng:
             searxng("test")
 
     def test_missing_fields_default_to_empty(self) -> None:
-        with _patch_searxng_fetch({"results": [{}]}):
+        empty_result: dict[str, object] = {}
+        payload: Mapping[str, object] = {"results": [empty_result]}
+        with _patch_searxng_fetch(payload):
             results = searxng("test")
         assert results == [
             SearchResult(url="", title="", snippet=""),
@@ -280,7 +281,7 @@ class TestSearchSearxng:
     def test_url_includes_query(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("hello world")
-        url = mock.call_args.args[0]
+        url = _recorded_url(mock)
         assert "q=hello+world" in url
         assert "format=json" in url
         assert url.startswith("https://search.example.test/search?")
@@ -306,7 +307,6 @@ class TestSearchSearxng:
         payload = {"results": [{"url": "https://m", "latitude": value}]}
         with _patch_searxng_fetch(payload):
             (result,) = searxng("q", categories="map")
-        assert isinstance(result, MapResult)
         assert result.latitude is None
 
     @pytest.mark.parametrize("field", ["latitude", "longitude"])
@@ -320,7 +320,6 @@ class TestSearchSearxng:
             _patch_fetch(module="searxng", return_value=body),
         ):
             (result,) = searxng("q", categories="map")
-        assert isinstance(result, MapResult)
         coordinate = result.latitude if field == "latitude" else result.longitude
         assert coordinate is None
 
@@ -363,7 +362,6 @@ class TestSearchSearxng:
         }
         with _patch_searxng_fetch(payload):
             (result,) = searxng("q", categories="science")
-        assert isinstance(result, PaperResult)
         assert result.citations is None
 
     def test_retries_a_throttled_instance(self) -> None:
@@ -372,7 +370,7 @@ class TestSearchSearxng:
         # already honors Retry-After -- but only if given a budget to spend.
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q")
-        assert mock.call_args.kwargs["request"].retry.retries >= 1
+        assert _request(mock).retry.retries >= 1
 
     def test_a_caller_can_bound_the_retry_budget(self) -> None:
         # ``retries`` multiplies ``timeout_sec``: this hardcodes 1, so a caller
@@ -381,23 +379,23 @@ class TestSearchSearxng:
         # the two backends answer the same question differently.
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q", retries=0)
-        assert mock.call_args.kwargs["request"].retry.retries == 0
+        assert _request(mock).retry.retries == 0
 
     def test_default_category_is_general(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q")
-        assert "categories=general" in mock.call_args.args[0]
+        assert "categories=general" in _recorded_url(mock)
 
     def test_social_media_category_url_encodes_space(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             results = searxng("q", categories="social media")
         # SearXNG's tab value carries a space; it must be percent-encoded.
-        assert "categories=social+media" in mock.call_args.args[0]
+        assert "categories=social+media" in _recorded_url(mock)
         assert results == []
 
 
 class TestSearchSearxngScience:
-    _PAPER_PAYLOAD: ClassVar[dict[str, Any]] = {
+    _PAPER_PAYLOAD: ClassVar[dict[str, object]] = {
         "results": [
             {
                 "template": "paper.html",
@@ -439,7 +437,6 @@ class TestSearchSearxngScience:
         # LSB: a web-result consumer reading url/title/snippet works unchanged.
         with _patch_searxng_fetch(self._PAPER_PAYLOAD):
             (paper,) = searxng("transformer", categories="science")
-        assert isinstance(paper, SearchResult)
         assert paper.url
         assert paper.title
         assert paper.snippet
@@ -447,7 +444,7 @@ class TestSearchSearxngScience:
     def test_science_category_sent(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q", categories="science")
-        assert "categories=science" in mock.call_args.args[0]
+        assert "categories=science" in _recorded_url(mock)
 
     def test_sparse_paper_defaults_empty(self) -> None:
         with _patch_searxng_fetch({"results": [{"template": "paper.html"}]}):
@@ -457,7 +454,7 @@ class TestSearchSearxngScience:
         assert paper.citations is None
 
     def test_malformed_published_date_is_none(self) -> None:
-        payload = {"results": [{"publishedDate": "not-a-date"}]}
+        payload: Mapping[str, object] = {"results": [{"publishedDate": "not-a-date"}]}
         with _patch_searxng_fetch(payload):
             (paper,) = searxng("q", categories="science")
         assert paper.published is None
@@ -551,7 +548,6 @@ class TestSearchSearxngStructuredCategories:
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("news", categories="news")
-        assert isinstance(r, MediaResult)
         assert not isinstance(r, VideoResult)
         assert r.published == datetime(2026, 6, 22)  # noqa: DTZ001 -- The fixture uses a naive timestamp to exercise legacy search data.
 
@@ -559,7 +555,6 @@ class TestSearchSearxngStructuredCategories:
         payload = {"results": [{"url": "https://s", "audio_src": "https://a"}]}
         with _patch_searxng_fetch(payload):
             (r,) = searxng("song", categories="music")
-        assert isinstance(r, MediaResult)
         assert r.audio_url == "https://a"
 
     def test_map(self) -> None:
@@ -577,7 +572,6 @@ class TestSearchSearxngStructuredCategories:
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("eiffel", categories="map")
-        assert isinstance(r, MapResult)
         assert r.latitude == 48.8584
         assert r.longitude == 2.2945
         # Non-string address values are dropped, not coerced.
@@ -586,7 +580,6 @@ class TestSearchSearxngStructuredCategories:
     def test_map_missing_coords_are_none(self) -> None:
         with _patch_searxng_fetch({"results": [{"url": "https://m"}]}):
             (r,) = searxng("x", categories="map")
-        assert isinstance(r, MapResult)
         assert r.latitude is None
         assert r.longitude is None
         assert dict(r.address) == {}
@@ -943,10 +936,10 @@ class TestSearchDuckduckgo:
             duckduckgo("test")
         # The query rides in the URL, not a POST body: a POSTed query is dropped
         # and DDG serves its empty homepage. GET with q= returns real results.
-        req = mock.call_args.kwargs["request"]
+        req = _request(mock)
         assert req.content.method == "GET"
         assert req.content.data is None
-        url = mock.call_args.args[0]
+        url = _recorded_url(mock)
         assert url.startswith("https://html.duckduckgo.com/html/?")
         assert "q=test" in url
         assert "kl=wt-wt" in url
@@ -976,8 +969,12 @@ class TestSearchDuckduckgo:
         ) as mock:
             duckduckgo("alpha")
             duckduckgo("beta")
-        ua_a = mock.call_args_list[0].kwargs["request"].content.headers["User-Agent"]
-        ua_b = mock.call_args_list[1].kwargs["request"].content.headers["User-Agent"]
+        headers_a = _request(mock, 0).content.headers
+        headers_b = _request(mock, 1).content.headers
+        assert headers_a is not None
+        assert headers_b is not None
+        ua_a = headers_a["User-Agent"]
+        ua_b = headers_b["User-Agent"]
         assert ua_a == ua_b
         assert ua_a.endswith("NSTNWV")
 
@@ -988,7 +985,7 @@ class TestSearchDuckduckgo:
         ) as mock:
             duckduckgo("!w python")
         # Bang tokens are quoted, then percent-encoded into the query string.
-        assert "q=%27%21w%27+python" in mock.call_args.args[0]
+        assert "q=%27%21w%27+python" in _recorded_url(mock)
 
     def test_rejects_too_long_query(self) -> None:
         # INF-026: an over-length query must raise, not silently return [].
@@ -1074,7 +1071,7 @@ class TestHeadersArg:
     def test_searxng_custom_headers(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q", headers={"User-Agent": "custom/1.0"})
-        assert mock.call_args.kwargs["request"].content.headers == {
+        assert _request(mock).content.headers == {
             "User-Agent": "custom/1.0",
         }
 
@@ -1084,7 +1081,7 @@ class TestHeadersArg:
             return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("q", headers={"User-Agent": "x"})
-        assert mock.call_args.kwargs["request"].content.headers == {
+        assert _request(mock).content.headers == {
             "User-Agent": "x",
             "Accept": "*/*",
             "Sec-Fetch-Dest": "document",
@@ -1094,6 +1091,21 @@ class TestHeadersArg:
             "Accept-Language": "all,all-ALL;q=0.7",
             "Referer": "https://html.duckduckgo.com/html/",
         }
+
+
+def _request(mock: MagicMock | AsyncMock, index: int = -1) -> RequestParams:
+    """Narrow a request recorded by a mock before inspecting its fields."""
+    recorded = mock.call_args if index == -1 else mock.call_args_list[index]
+    request = recorded.kwargs["request"]
+    assert isinstance(request, RequestParams)
+    return request
+
+
+def _recorded_url(mock: MagicMock | AsyncMock, index: int = -1) -> str:
+    """Narrow a URL recorded by a mock before using string operations."""
+    recorded = mock.call_args if index == -1 else mock.call_args_list[index]
+    url = cast(str, recorded.args[0])
+    return url
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from wesearch.fetch import (
 )
 from wesearch.fetch.testing import zstd_compress
 from wesearch.fetch.transport.stdlib import _open_connection
+from wesearch.lib.custom_json import DictCodec
 from wesearch.types.errors import (
     FetchError,
 )
@@ -110,7 +111,7 @@ class TestFetchStdlibPath:
                 ),
             )
         assert mock_conn.request.call_args.kwargs["body"] == b'{"key": "value"}'
-        headers = mock_conn.request.call_args.kwargs["headers"]
+        headers = _recorded_headers(mock_conn)
         assert headers["Content-Type"] == "application/json"
 
     def test_data_and_json_mutually_exclusive(self) -> None:
@@ -136,7 +137,7 @@ class TestFetchStdlibPath:
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        headers = mock_conn.request.call_args.kwargs["headers"]
+        headers = _recorded_headers(mock_conn)
         assert "a=1" in headers["Cookie"]
         assert "b=2" in headers["Cookie"]
 
@@ -153,7 +154,7 @@ class TestFetchStdlibPath:
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        headers = mock_conn.request.call_args.kwargs["headers"]
+        headers = _recorded_headers(mock_conn)
         assert headers["User-Agent"] == "custom"
 
     def test_raw_headers_skip_defaults(self) -> None:
@@ -200,7 +201,7 @@ class TestFetchStdlibPath:
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        headers = mock_conn.request.call_args.kwargs["headers"]
+        headers = _recorded_headers(mock_conn)
         assert headers == {
             "Host": "example.com",
             "User-Agent": "custom",
@@ -223,7 +224,7 @@ class TestFetchStdlibPath:
         assert mock_open.call_args.args[1] == "example.com"
         assert mock_open.call_args.kwargs["port"] == 8443
         assert mock_conn.request.call_args.args[1] == "/x"
-        headers = mock_conn.request.call_args.kwargs["headers"]
+        headers = _recorded_headers(mock_conn)
         assert headers["Authorization"] == "Basic " + base64.b64encode(b"u:p").decode()
 
     def test_caller_authorization_wins_over_userinfo(self) -> None:
@@ -239,7 +240,7 @@ class TestFetchStdlibPath:
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        headers = mock_conn.request.call_args.kwargs["headers"]
+        headers = _recorded_headers(mock_conn)
         assert headers["Authorization"] == "Bearer xyz"
 
     def test_http_error_raises_fetch_error(self) -> None:
@@ -602,7 +603,7 @@ class TestFetchStdlibBackend:
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        sent = conn_b.request.call_args.kwargs["headers"]
+        sent = _recorded_headers(conn_b)
         assert sent.get("Origin") != "https://a.com"
         assert sent.get("Origin") == "https://b.com"
 
@@ -632,7 +633,7 @@ class TestFetchStdlibBackend:
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        sent = conn_b.request.call_args.kwargs["headers"]
+        sent = _recorded_headers(conn_b)
         assert not any(k.lower() == "host" and v == "a.com" for k, v in sent.items())
 
     def test_303_converts_post_to_get(self) -> None:
@@ -808,9 +809,7 @@ class TestFetchStdlibBackend:
                 "https://example.com:8443/page",
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
-        assert mock_conn.request.call_args.kwargs["headers"]["Host"] == (
-            "example.com:8443"
-        )
+        assert _recorded_headers(mock_conn)["Host"] == "example.com:8443"
 
     def test_validatedhost_header_omitsdefault_port(self) -> None:
         # The converse: a default-port URL must NOT get a ":443" in Host (a real
@@ -828,7 +827,7 @@ class TestFetchStdlibBackend:
                 "https://example.com/page",
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
-        assert mock_conn.request.call_args.kwargs["headers"]["Host"] == "example.com"
+        assert _recorded_headers(mock_conn)["Host"] == "example.com"
 
     def test_cross_host_redirecthost_header_carries_nondefault_port(self) -> None:
         # A2 also applies on the REDIRECT path: a cross-host redirect to a
@@ -853,7 +852,7 @@ class TestFetchStdlibBackend:
                 "https://example.com/start",
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
-        assert conn_b.request.call_args.kwargs["headers"]["Host"] == "other.com:8443"
+        assert _recorded_headers(conn_b)["Host"] == "other.com:8443"
 
 
 class TestOpenConnection:
@@ -899,6 +898,11 @@ class TestOpenConnection:
             )
         assert body == b"stdlib"
         curl_request.assert_not_called()
+
+
+def _recorded_headers(mock_conn: Mock) -> dict[str, str]:
+    """Return the typed headers mapping recorded by a mock connection."""
+    return DictCodec.coerce(mock_conn.request.call_args.kwargs["headers"], str)
 
 
 if __name__ == "__main__":

@@ -79,7 +79,7 @@ def rss_url(raw_url: str) -> str:
     returned unchanged.
 
     Args:
-      raw_url: Any Reddit URL.
+      raw_url: object Reddit URL.
 
     Returns:
       feed_url: The ``.rss`` feed URL.

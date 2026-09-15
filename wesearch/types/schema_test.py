@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import typing
 
@@ -113,7 +113,7 @@ def test_both_union_spellings_yield_the_same_members() -> None:
     # the point is precisely that the deprecated spelling -- which a caller's
     # annotation may still use -- must resolve on the 3.12 floor, where
     # get_origin reports ``typing.Union`` for BOTH spellings.
-    optional_color = getattr(typing, "Optional")[_Color]  # noqa: B009 -- The test constructs the deprecated spelling to verify alias handling.
+    optional_color = cast(object, getattr(typing, "Optional")[_Color])  # noqa: B009 -- The test constructs the deprecated spelling to verify alias handling.
     assert literal_values(optional_color) == ("red", "green")
     assert literal_values(_Color | None) == ("red", "green")
 

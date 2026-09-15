@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal, get_args, overload
+from typing import Final, Literal, cast, get_args, overload
 from urllib.parse import urlencode
 
 import json
@@ -33,6 +33,7 @@ from wesearch.lib.custom_json import (
     ListCodec,
     StrCodec,
     decode_or_none,
+    loads,
 )
 from wesearch.search.custom_types import (
     CodeResult,
@@ -278,7 +279,7 @@ def searxng(
     # and the page reaches json.loads as a bare "line 1 column 1 (char 0)"
     # that names neither the backend nor the cause.
     try:
-        payload = json.loads(text)
+        payload = loads(text)
     except json.JSONDecodeError as e:
         raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
     items = ListCodec.coerce(DictCodec.coerce(payload).get("results"))
@@ -495,7 +496,7 @@ CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
 
 # Not a test: a tab added to the Literal without a record here must fail at
 # IMPORT, where the author sees it, rather than at the first query for that tab.
-assert set(CATEGORIES) == set(get_args(SearxngCategory.__value__)), (
+assert set(CATEGORIES) == set(get_args(cast(object, SearxngCategory.__value__))), (
     "every SearxngCategory needs a CATEGORIES record"
 )
 
@@ -524,7 +525,7 @@ def category_gloss() -> str:
     """
     return "\n".join(
         f"  - `{name}` -- {CATEGORIES[name].gloss}."
-        for name in get_args(SearxngCategory.__value__)
+        for name in cast(tuple[SearxngCategory, ...], get_args(SearxngCategory))
     )
 
 

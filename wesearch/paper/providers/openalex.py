@@ -34,7 +34,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON
+from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON, loads
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,
@@ -402,7 +402,7 @@ def _get(
             status=0,
         ) from e
     try:
-        body = json.loads(raw)
+        body = loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise BackendError(f"OpenAlex returned invalid JSON: {e}") from e
     # A cast would let a bare list or ``null`` through to an AttributeError on

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from unittest.mock import MagicMock, patch
 
 import json
 
 import pytest
 
-from wesearch.fetch import FetchSession
+from wesearch.fetch import FetchSession, RequestParams
 from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
 from wesearch.paper.providers import s2
@@ -17,18 +17,19 @@ from wesearch.types.errors import FetchError
 
 
 @pytest.fixture(autouse=True)
-def mock_limiter() -> Iterator[MagicMock]:
-    """Inject a mock shared gate so the S2 client never waits on real time."""
-    limiter = MagicMock()
+def mock_limiter() -> Iterator[_FakeLimiter]:
+    """Inject a fake shared gate so the S2 client never waits on real time.
+
+    Yields:
+      limiter: The fake gate, exposing what the client asked of it.
+
+    """
+    limiter = _FakeLimiter()
     with patch(
         "wesearch.paper.providers.s2.cross_process_limiter",
         return_value=limiter,
     ):
         yield limiter
-
-
-def _fetch_returning(payload: object) -> MagicMock:
-    return MagicMock(return_value=(json.dumps(payload).encode(), FetchSession()))
 
 
 class TestFields:
@@ -72,7 +73,9 @@ class TestGet:
 
 
 class TestBackoff:
-    def test_429_retries_then_raises_rate_limit(self, mock_limiter: MagicMock) -> None:
+    def test_429_retries_then_raises_rate_limit(
+        self, mock_limiter: _FakeLimiter
+    ) -> None:
         # Every attempt 429s: after the retry budget it surfaces RateLimitError,
         # and each retry records a growing backoff into the shared cooldown.
         err = FetchError("u", 429, {}, b"slow down")
@@ -82,19 +85,15 @@ class TestBackoff:
         ):
             s2.get("/paper/search", {})
         # Two retries -> two backoff triggers (1s, 2s); acquire once per attempt.
-        assert mock_limiter.trigger_cooldown.call_count == 2
-        assert [c.args[0] for c in mock_limiter.trigger_cooldown.call_args_list] == [
-            1.0,
-            2.0,
-        ]
-        assert mock_limiter.acquire.call_count == 3
+        assert mock_limiter.cooldowns == [1.0, 2.0]
+        assert mock_limiter.acquires == 3
 
-    def test_429_then_success_recovers(self, mock_limiter: MagicMock) -> None:
+    def test_429_then_success_recovers(self, mock_limiter: _FakeLimiter) -> None:
         err = FetchError("u", 429, {}, b"slow")
         ok = (json.dumps({"title": "ok"}).encode(), FetchSession())
         with patch("wesearch.paper.providers.s2.fetch", side_effect=[err, ok]):
             assert s2.get("/paper/x", {}) == {"title": "ok"}
-        assert mock_limiter.trigger_cooldown.call_count == 1
+        assert mock_limiter.cooldowns == [1.0]
 
 
 class TestBatch:
@@ -187,10 +186,11 @@ class TestPaginate:
             json.dumps({"data": [{"title": "P"}], "next": None}).encode(),
             FetchSession(),
         )
-        with patch("wesearch.paper.providers.s2.fetch", return_value=one) as mock:
+        fetch = _RecordingFetch(one)
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
             page = s2.author_papers("42", limit=None)
         assert [e.get("title") for e in page.entries] == ["P"]
-        assert mock.call_args.kwargs["url"].endswith("/author/42/papers")
+        assert fetch.urls[0].endswith("/author/42/papers")
 
 
 class TestSearchPaginate:
@@ -216,11 +216,14 @@ class TestSearchPaginate:
             json.dumps({"data": [{"title": "A"}], "total": 1}).encode(),
             FetchSession(),
         )
-        with patch("wesearch.paper.providers.s2.fetch", return_value=one) as mock:
+        fetch = _RecordingFetch(one)
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
             page, total = s2.search_paginate({"query": "x"}, limit=None)
         assert total == 1
         assert page.entries == [{"title": "A"}]
-        assert mock.call_args.kwargs["request"].content.params["limit"] == 100
+        params = fetch.requests[0].content.params
+        assert params is not None
+        assert params["limit"] == 100
 
 
 class TestSearchTotal:
@@ -264,6 +267,51 @@ class TestRecordMapping:
         assert rec.author_id == "42"
         assert rec.affiliations == ("MILA", "UdeM")
         assert rec.h_index == 200
+
+
+type _Fetch = Callable[..., tuple[bytes, FetchSession]]
+
+
+class _FakeLimiter:
+    """Records what the S2 client asks of its gate, instead of sleeping."""
+
+    def __init__(self) -> None:
+        self.acquires = 0
+        self.cooldowns: list[float] = []
+
+    def acquire(self) -> None:
+        self.acquires += 1
+
+    def trigger_cooldown(self, backoff_sec: float | None = None) -> None:
+        assert backoff_sec is not None
+        self.cooldowns.append(backoff_sec)
+
+
+class _RecordingFetch:
+    """A ``fetch`` stand-in that replays canned responses and records requests."""
+
+    def __init__(self, *responses: tuple[bytes, FetchSession]) -> None:
+        self._responses = list(responses)
+        self.urls: list[str] = []
+        self.requests: list[RequestParams] = []
+
+    def __call__(
+        self,
+        url: str,
+        *,
+        session: FetchSession | None = None,
+        request: RequestParams | None = None,
+    ) -> tuple[bytes, FetchSession]:
+        del session
+        assert request is not None
+        self.urls.append(url)
+        self.requests.append(request)
+        return self._responses.pop(0)
+
+
+def _fetch_returning(payload: object) -> _Fetch:
+    body = json.dumps(payload).encode()
+    return lambda *_args, **_kwargs: (body, FetchSession())
 
 
 if __name__ == "__main__":

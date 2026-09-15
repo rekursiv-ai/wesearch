@@ -199,7 +199,6 @@ def test_session_threads_across_requests(
     """
     request = RequestParams(policy=PolicyParams(transport=backend, trust="internal"))
     _, session = fetch(oracle.url, request=request)
-    assert isinstance(session, FetchSession)
     fetch(oracle.url, session=session, request=request)
     reused = oracle.captured()
     fetch(oracle.url, request=request)
@@ -293,7 +292,6 @@ def test_browser_backend_fetches_live_page(
     # is not this backend's contract. Rendered HTML with a body is.
     assert b"<html" in body.lower()
     assert b"</body>" in body.lower()
-    assert isinstance(session, FetchSession)
 
 
 # Read from the oracle, the same server-side record the fetch backends are judged by, so

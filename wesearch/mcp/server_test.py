@@ -17,6 +17,7 @@ import pytest
 pytest.importorskip("mcp.server")
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
+from wesearch.lib.custom_json import ListCodec
 from wesearch.mcp import server
 from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
@@ -78,9 +79,7 @@ def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     out = server.paper_search("mclmc")
     assert out["total"] == 41
     assert out["complete"] is False
-    records = out["records"]
-    assert isinstance(records, list)
-    first = cast(dict[str, object], records[0])
+    first = ListCodec.mappings(out["records"])[0]
     assert first["title"] == "Microcanonical Sampling"
 
 
@@ -191,7 +190,7 @@ def test_web_fetch_forwards_every_transport(monkeypatch: pytest.MonkeyPatch) -> 
         return FetchResult(text="body", url=url, kind="html", truncated=False)
 
     monkeypatch.setattr(server, "fetch_web", _fake)
-    for transport in get_args(Transport):
+    for transport in cast(tuple[Transport, ...], get_args(Transport)):
         server.web_fetch("https://e.co", transport=transport)
         assert captured["transport"] == transport
 
@@ -243,9 +242,10 @@ def test_mcp_renders_every_declared_param(
     examined, and a param added to the spec would have gone unnoticed exactly
     as the MCP ``browser`` bool did. ``web_search`` had no check at all.
     """
-    fn = getattr(server, tool)
+    fn: object = getattr(server, tool)  # pyright: ignore[reportAny] -- Tool names come from the declared schema table.
+    assert callable(fn)
     declared = set(spec.fields())
-    hints = get_type_hints(fn)
+    hints = cast(dict[str, object], get_type_hints(fn))
     assert declared - set(hints) == omitted
     for name in declared & set(hints):
         field = spec.fields()[name]
@@ -261,7 +261,12 @@ def test_mcp_renders_every_declared_param(
 
 def _signature_default(fn: Callable[..., object], name: str) -> object:
     """Return the default value ``fn``'s signature gives ``name``."""
-    return inspect.signature(fn).parameters[name].default
+    parameter = inspect.signature(fn).parameters[name]
+    default = cast(
+        str | int | float | bool | None,
+        parameter.default,
+    )
+    return default
 
 
 def test_web_fetch_treats_the_model_url_as_untrusted(
@@ -344,9 +349,7 @@ def test_paper_search_emits_library_records_verbatim(
     fake = search.SearchResult(records=[distinct, namesake], total=2, complete=True)
     monkeypatch.setattr(search, "search", _returns(fake))
     out = server.paper_search("discussion")
-    records = out["records"]
-    assert isinstance(records, list)
-    assert len(cast(list[object], records)) == 2
+    assert len(ListCodec.coerce(out["records"])) == 2
 
 
 def test_all_tools_registered() -> None:

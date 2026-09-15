@@ -414,8 +414,8 @@ def _curl_set_cookies(resp: Response) -> list[str]:
     """Return the individual ``Set-Cookie`` headers of a curl response."""
     get_list = getattr(resp.headers, "get_list", None)
     if get_list is None:
-        value = resp.headers.get("set-cookie")
-        return [value] if value else []
+        value: object = resp.headers.get("set-cookie")  # pyright: ignore[reportAny] -- curl_cffi's dynamic headers stub returns Any.
+        return [value] if isinstance(value, str) else []
     return list(cast(list[str], get_list("set-cookie")))
 
 

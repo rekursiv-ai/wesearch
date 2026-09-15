@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 from unittest.mock import MagicMock, patch
 
 import os
@@ -132,9 +132,11 @@ class TestDriveChrome:
             ),
         ):
             drive_chrome("https://localhost:1/")
-            assert "--ignore-certificate-errors" not in run.call_args.args[0]
+            argv = cast(list[str], run.call_args.args[0])
+            assert "--ignore-certificate-errors" not in argv
             drive_chrome("https://localhost:1/", ignore_certificate_errors=True)
-            assert "--ignore-certificate-errors" in run.call_args.args[0]
+            argv = cast(list[str], run.call_args.args[0])
+            assert "--ignore-certificate-errors" in argv
 
     def test_sandbox_flag_only_when_requested(self) -> None:
         # --no-sandbox drops Chrome's containment boundary. It is needed only
@@ -148,9 +150,11 @@ class TestDriveChrome:
             ),
         ):
             drive_chrome("https://example.com/")
-            assert "--no-sandbox" not in run.call_args.args[0]
+            argv = cast(list[str], run.call_args.args[0])
+            assert "--no-sandbox" not in argv
             drive_chrome("https://example.com/", disable_sandbox=True)
-            assert "--no-sandbox" in run.call_args.args[0]
+            argv = cast(list[str], run.call_args.args[0])
+            assert "--no-sandbox" in argv
 
 
 @pytest.mark.cli_git
@@ -164,7 +168,8 @@ def test_a_killed_group_takes_the_forked_grandchild_with_it() -> None:
     process = _spawn_probe()
     try:
         assert process.stdout is not None
-        grandchild = int(process.stdout.readline())
+        stdout = process.stdout
+        grandchild = int(stdout.readline())
         _kill_group(process)
 
         assert _died_within(grandchild, seconds=10.0), (
@@ -189,7 +194,8 @@ def test_a_child_dies_when_its_parent_is_sigkilled() -> None:
     parent = _spawn_probe("--proofed")
     try:
         assert parent.stdout is not None
-        child_pid = int(parent.stdout.readline())
+        stdout = parent.stdout
+        child_pid = int(stdout.readline())
         os.kill(parent.pid, signal.SIGKILL)
 
         assert _died_within(child_pid, seconds=10.0), (

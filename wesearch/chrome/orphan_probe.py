@@ -18,6 +18,8 @@ than scanning for one.
 
 from __future__ import annotations
 
+from typing import Protocol, cast
+
 import argparse
 import os
 import subprocess
@@ -36,14 +38,14 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 2)[2])
     _add_arguments(parser)
-    args = parser.parse_args()
+    flags = cast(_Flags, parser.parse_args())
 
-    if args.sleep:
-        time.sleep(args.hang_seconds)
+    if flags.sleep:
+        time.sleep(flags.hang_seconds)
         return 0
-    child = _spawn_child(proofed=args.proofed, hang_seconds=args.hang_seconds)
+    child = _spawn_child(proofed=flags.proofed, hang_seconds=flags.hang_seconds)
     print(child, flush=True)  # noqa: T201 -- this line IS the tool's output.
-    time.sleep(args.hang_seconds)
+    time.sleep(flags.hang_seconds)
     return 0
 
 
@@ -87,6 +89,12 @@ def _spawn_child(*, proofed: bool, hang_seconds: float) -> int:
         [sys.executable, __file__, "--sleep", "--hang-seconds", str(hang_seconds)],
         preexec_fn=die_with_parent,  # noqa: PLW1509 -- bare syscalls only; takes no lock a forked thread could hold.
     ).pid
+
+
+class _Flags(Protocol):
+    proofed: bool
+    sleep: bool
+    hang_seconds: float
 
 
 if __name__ == "__main__":

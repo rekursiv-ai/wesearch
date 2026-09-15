@@ -30,6 +30,7 @@ import os
 import threading
 import time
 
+from wesearch.lib.custom_json import DictCodec, FloatCodec, StrCodec, loads
 from wesearch.lib.userdirs import data_dir
 
 
@@ -112,11 +113,11 @@ def _encode(profile: Profile) -> bytes:
 def _try_decode(raw: bytes) -> Profile | None:
     """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
     try:
-        obj = json.loads(raw)
+        obj = DictCodec.coerce(loads(raw))
         return Profile(
-            ua=obj["ua"],
-            cookies=dict(obj["cookies"]),
-            created=obj["created"],
+            ua=StrCodec.coerce(obj.get("ua")),
+            cookies=DictCodec.coerce(obj.get("cookies"), str),
+            created=FloatCodec.coerce(obj.get("created")),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None

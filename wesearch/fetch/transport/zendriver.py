@@ -20,13 +20,14 @@ profile -- to debug a fetch that errored, or to seat a login.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Iterator, Mapping
+from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from concurrent.futures import Future
 from html import unescape
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast, override
+from typing import TYPE_CHECKING, NamedTuple, Protocol, TypeVar, cast, override
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
+import argparse
 import asyncio
 import atexit
 import contextlib
@@ -238,7 +239,7 @@ def _build_order(build: Path) -> tuple[list[int], str]:
     """Sort key ranking a download directory by version, newest highest."""
     # The name second, so unversioned directories still order deterministically
     # rather than by whatever iteration order the filesystem returns.
-    return [int(part) for part in re.findall(r"\d+", build.name)], build.name
+    return [int(m[0]) for m in re.finditer(r"\d+", build.name)], build.name
 
 
 def _process_command(pid: int, *, proc_root: Path, platform: str) -> str:
@@ -336,7 +337,7 @@ class _BrowserPool:
         )
         self._thread.start()
 
-    def run(self, coro: Coroutine[Any, Any, _T], *, timeout_sec: float = 0) -> _T:
+    def run(self, coro: Coroutine[object, object, _T], *, timeout_sec: float = 0) -> _T:
         """Run a coroutine on the pool's loop from a sync caller; return its result.
 
         Args:
@@ -623,11 +624,15 @@ def _fetch_browser(*, platform: str = sys.platform) -> str:
 # the real error in flight.
 def _kill_browser_process(browser: zendriver.Browser) -> None:
     """SIGKILL a browser whose cooperative ``stop()`` did not complete."""
-    process = getattr(browser, "_process", None)
+    process: object = getattr(
+        browser,
+        "_process",
+        None,
+    )
     if process is None:
         return  # Never launched by us, or already cleared by a completed stop.
     with contextlib.suppress(OSError):
-        process.kill()
+        cast(_KillableProcess, process).kill()
 
 
 def _fetch_browser_args(
@@ -729,8 +734,6 @@ def main() -> int:
       exit_code: 0 on success.
 
     """
-    import argparse  # noqa: PLC0415 -- CLI-only import, off the library path.
-
     parser = argparse.ArgumentParser(
         prog="fetch-zendriver",
         description=(
@@ -754,13 +757,13 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
-    args = parser.parse_args()
+    flags = cast(_Flags, parser.parse_args())
     print(
-        f"Opening {args.url} in Chrome on "
+        f"Opening {flags.url} in Chrome on "
         f"{data_dir() / 'rekursiv-ai' / 'wesearch' / 'fetch-zendriver'} -- "
         "close the window when done.",
     )
-    open_instance(args.url)
+    open_instance(flags.url)
     print("Window closed.")
     return 0
 
@@ -1034,7 +1037,7 @@ def _wire_url(url: str) -> str:
 def _fail(request_id: object) -> object:
     """Return the CDP verb refusing one intercepted request."""
     return zendriver.cdp.fetch.fail_request(
-        cast(Any, request_id),
+        cast("zendriver.cdp.fetch.RequestId", request_id),
         zendriver.cdp.network.ErrorReason.ACCESS_DENIED,
     )
 
@@ -1053,13 +1056,17 @@ def _fail(request_id: object) -> object:
 # Cloudflare-fronted URL, interleaved against the no-override control on a fresh egress,
 # the echo served the wall every run and the omission served the page every run.
 # headers.
-def _continue(request_id: object, headers: list[object] | None) -> object:
+def _continue(
+    request_id: object,
+    headers: list[zendriver.cdp.fetch.HeaderEntry] | None,
+) -> object:
     """Return the CDP verb releasing one intercepted request, optionally overriding."""
+    typed_request_id = cast("zendriver.cdp.fetch.RequestId", request_id)
     if headers is None:
-        return zendriver.cdp.fetch.continue_request(cast(Any, request_id))
+        return zendriver.cdp.fetch.continue_request(typed_request_id)
     return zendriver.cdp.fetch.continue_request(
-        cast(Any, request_id),
-        headers=cast(Any, headers),
+        typed_request_id,
+        headers=headers,
     )
 
 
@@ -1082,7 +1089,7 @@ def _carried_headers(
     caller_headers: dict[str, str] | None,
     target: str,
     origin_url: str,
-) -> list[object] | None:
+) -> list[zendriver.cdp.fetch.HeaderEntry] | None:
     """Return the header OVERRIDE for this hop, or ``None`` to send none."""
     if not caller_headers or origin(target) != origin(origin_url):
         return None
@@ -1106,7 +1113,7 @@ def _carried_headers(
         if name.lower() not in replaced
     }
     return [
-        cast(object, zendriver.cdp.fetch.HeaderEntry(name=name, value=value))
+        zendriver.cdp.fetch.HeaderEntry(name=name, value=value)
         for name, value in (kept | entitled).items()
     ]
 
@@ -1125,7 +1132,10 @@ def _carried_headers(
 # is then already covered.
 def _origin_bound() -> frozenset[str]:
     """Return the header names a cross-origin hop may not carry."""
-    default = inspect.signature(apply_redirect).parameters["origin_bound"].default
+    default = cast(
+        object,
+        inspect.signature(apply_redirect).parameters["origin_bound"].default,
+    )
     assert isinstance(default, frozenset)
     return cast(frozenset[str], default)
 
@@ -1139,7 +1149,9 @@ def _dispatch(
     command: object,
 ) -> None:
     """Send a CDP command from the synchronous event-handler thread."""
-    coroutine = tab.send(cast(Any, command))
+    coroutine = tab.send(
+        cast("Generator[dict[str, object], dict[str, object], object]", command),
+    )
     if loop.is_closed():
         coroutine.close()  # Nothing left to answer; do not warn on a stray task.
         return
@@ -1376,6 +1388,18 @@ def _pool() -> _BrowserPool:
             _pool_singleton = _BrowserPool()
             atexit.register(shutdown_browsers)
         return _pool_singleton
+
+
+class _Flags(Protocol):
+    """Typed command-line namespace for the executable entry point."""
+
+    url: str
+
+
+class _KillableProcess(Protocol):
+    """The private process handle slice used during browser cleanup."""
+
+    def kill(self) -> None: ...
 
 
 if __name__ == "__main__":

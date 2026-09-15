@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, get_args, get_origin
+from typing import Literal, cast, get_args, get_origin
 
 import types
 import typing
@@ -210,7 +210,7 @@ def literal_values(
     origin = get_origin(annotation)
     if origin in union_origins:
         values: list[object] = []
-        for arg in get_args(annotation):
+        for arg in cast(tuple[object, ...], get_args(annotation)):
             if arg is type(None):
                 continue
             members = literal_values(arg)
@@ -242,12 +242,13 @@ class Schema:
           result: Name to Field descriptor mapping.
 
         """
-        return {
-            name: value
-            for klass in reversed(cls.__mro__)
-            for name, value in vars(klass).items()
-            if isinstance(value, Field)
-        }
+        fields_: dict[str, Field[object]] = {}
+        for klass in reversed(cls.__mro__):
+            # The stub types ``vars(type)`` as ``MappingProxyType[str, Any]``;
+            # widening to ``object`` here makes the isinstance the narrowing.
+            namespace = cast(Mapping[str, object], vars(klass))
+            fields_ |= {k: v for k, v in namespace.items() if isinstance(v, Field)}
+        return fields_
 
     @classmethod
     def json_schema(cls) -> dict[str, object]:

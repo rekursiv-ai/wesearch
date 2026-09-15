@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +14,6 @@ from wesearch.web import (
     _KIND_HTML,
     _KIND_MARKDOWN,
     _KIND_RSS,
-    FetchResult,
     _extract_text,
     _fetch_body,
     _format_rss,
@@ -46,7 +46,6 @@ def test_fetch_web_html_path_extracts() -> None:
         return_value=(b"<html><body><p>Hi</p></body></html>", False),
     ):
         result = fetch_web("https://example.com")
-    assert isinstance(result, FetchResult)
     # Equality, and the markup check below: a containment-only assertion here
     # passes when extraction is BYPASSED and the source returned verbatim,
     # since the fixture's own markup contains "Hi".
@@ -224,7 +223,7 @@ def test_fetch_web_form_post_sends_only_the_form_body() -> None:
     """A form POST carries no JSON body, so the exclusion guard stays quiet."""
     with patch("wesearch.web.fetch", return_value=(b"ok", None)) as mock_fetch:
         fetch_web("https://api.example/x", method="POST", form_body={"a": "b"})
-    content = mock_fetch.call_args.kwargs["request"].content
+    content = cast(RequestParams, mock_fetch.call_args.kwargs["request"]).content
     assert content.data == {"a": "b"}
     assert content.json is NO_BODY
 
@@ -233,7 +232,7 @@ def test_fetch_web_json_body_none_sends_the_json_literal_null() -> None:
     """``json_body=None`` is a body -- the JSON ``null`` -- not its absence."""
     with patch("wesearch.web.fetch", return_value=(b"ok", None)) as mock_fetch:
         fetch_web("https://api.example/x", method="POST", json_body=None)
-    content = mock_fetch.call_args.kwargs["request"].content
+    content = cast(RequestParams, mock_fetch.call_args.kwargs["request"]).content
     assert content.json is None
     assert content.has_body
 

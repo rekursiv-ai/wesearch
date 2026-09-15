@@ -243,7 +243,6 @@ def _assert_web_results(results: list[SearchResult], query: str, backend: str) -
     if not results:
         pytest.skip(f"{backend} returned no results for {query!r} (soft block?)")
     for r in results:
-        assert isinstance(r, SearchResult)
         assert r.url.startswith(("http://", "https://")), (
             f"result for {query!r} has non-web url: {r.url!r}"
         )
@@ -330,7 +329,6 @@ def _require(results: list[SearchResult], category: str) -> SearchResult:
         pytest.skip(f"instance returned no results for category {category!r}")
     first = results[0]
     # Every result, whatever its subclass, is a SearchResult with a URL.
-    assert isinstance(first, SearchResult)
     assert first.url
     return first
 
@@ -410,8 +408,7 @@ class TestSearxngCategoriesLive:
 
     def test_social_media(self) -> None:
         results = _category_results("social media")
-        first = _require(results, "social media")
-        assert isinstance(first, SearchResult)
+        _require(results, "social media")
 
 
 if __name__ == "__main__":

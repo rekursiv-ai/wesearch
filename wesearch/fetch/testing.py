@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import io
 
 from curl_cffi import requests as cc_requests
+
+from wesearch.lib.custom_json import DictCodec
 
 
 try:
@@ -47,7 +49,7 @@ def zstd_compress(data: bytes, *, streaming: bool = False) -> bytes:
     return buf.getvalue()
 
 
-def lower_headers(kw: dict[str, Any]) -> dict[str, str]:
+def lower_headers(kw: dict[str, object]) -> dict[str, str]:
     """Lower-cased request headers from a curl ``request`` mock's kwargs.
 
     Args:
@@ -57,7 +59,7 @@ def lower_headers(kw: dict[str, Any]) -> dict[str, str]:
       result: The dict[str, str].
 
     """
-    headers = cast(dict[str, str] | None, kw.get("headers")) or {}
+    headers = DictCodec.coerce(kw.get("headers"), str)
     return {k.lower(): v for k, v in headers.items()}
 
 
@@ -90,7 +92,7 @@ class StubCookies:
     """Minimal curl-cookies stand-in: a recording jar plus a ``set`` that stores."""
 
     def __init__(self) -> None:
-        self.jar: list[Any] = []
+        self.jar: list[StubCookie] = []
 
     def set(
         self,
@@ -117,7 +119,7 @@ class StubSession:
     def __init__(self) -> None:
         self.cookies = StubCookies()
 
-    def request(self, *args: Any, **kwargs: Any) -> cc_requests.Response:  # noqa: ANN401 -- forwarded verbatim to curl_cffi's request.
+    def request(self, *args: object, **kwargs: object) -> cc_requests.Response:
         """Perform one request.
 
         Args:
@@ -128,10 +130,17 @@ class StubSession:
           response: The response ``curl_cffi`` produced.
 
         """
-        return cc_requests.request(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request signature is incomplete in its installed stubs.
+        request = cast(_CurlRequest, cc_requests.request)
+        return request(*args, **kwargs)
 
     def close(self) -> None:
         """Release held resources."""
+
+
+class _CurlRequest(Protocol):
+    """The curl request slice used by the session test double."""
+
+    def __call__(self, *args: object, **kwargs: object) -> cc_requests.Response: ...
 
 
 if __name__ == "__main__":
