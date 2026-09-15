@@ -32,7 +32,6 @@ import zendriver
 import zendriver.cdp.fetch
 import zendriver.cdp.network
 import zendriver.cdp.page
-import zendriver.core.util
 
 from wesearch.fetch.transport.zendriver import (
     BrowserResult,

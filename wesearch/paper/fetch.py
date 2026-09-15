@@ -16,7 +16,7 @@ only the network + format work, so it takes no sagent dependency.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import logging
 
@@ -27,14 +27,6 @@ from wesearch.paper.errors import NotFoundError
 from wesearch.paper.ids import s2_wire_id
 from wesearch.paper.providers import s2
 from wesearch.types.errors import FetchError
-
-
-if TYPE_CHECKING:
-    import bs4
-else:
-    from wrapt import lazy_import
-
-    bs4 = lazy_import("bs4")  # 140ms.
 
 
 __all__ = [
