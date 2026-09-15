@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import closing
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -240,17 +243,33 @@ class TestEchoOracleCleanup:
     def test_close_joins_a_stalled_handler_thread(self) -> None:
         # close() joined the accept thread only, so a handler could still be
         # inside _handle -- holding a client socket -- after teardown returned.
-        oracle = EchoOracle(client_timeout_sec=0.02)
-        context = ssl.create_default_context(cafile=str(oracle.ca_path))
-        stalled = context.wrap_socket(
-            socket.create_connection(("localhost", oracle.port), timeout=5),
-            server_hostname="localhost",
-        )
-        stalled.sendall(b"GET / HTTP")  # A head that never terminates.
-        time.sleep(0.01)
-        oracle.close()
-        assert not [t for t in threading.enumerate() if t.name.startswith("echo-")]
-        stalled.close()
+        started = threading.Event()
+        release = threading.Event()
+        oracle = EchoOracle()
+        try:
+            with (
+                patch.object(
+                    oracle,
+                    "_handle",
+                    partial(_stall_handler, started=started, release=release),
+                ),
+                closing(
+                    socket.create_connection(("localhost", oracle.port), timeout=5)
+                ),
+            ):
+                assert started.wait(5), "handler never accepted the connection"
+                handler = oracle._handlers[0]
+                with patch.object(
+                    handler,
+                    "join",
+                    partial(_release_and_join, join=handler.join, release=release),
+                ):
+                    oracle.close()
+                assert release.is_set(), "close did not join the stalled handler"
+                assert not handler.is_alive()
+        finally:
+            release.set()
+            oracle.close()
 
 
 class TestEchoOracleShutdown:
@@ -268,6 +287,27 @@ class TestEchoOracleShutdown:
         elapsed = time.perf_counter() - start
 
         assert elapsed < 1.0, f"close() took {elapsed:.2f}s; accept loop not woken"
+
+
+def _stall_handler(
+    raw: socket.socket,
+    *,
+    started: threading.Event,
+    release: threading.Event,
+) -> None:
+    with raw:
+        started.set()
+        assert release.wait(5), "handler was never released"
+
+
+def _release_and_join(
+    timeout: float | None = None,
+    *,
+    join: Callable[[float | None], None],
+    release: threading.Event,
+) -> None:
+    release.set()
+    join(timeout)
 
 
 if __name__ == "__main__":
