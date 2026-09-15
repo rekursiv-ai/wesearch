@@ -154,3 +154,8 @@ db_dumps/
 # replay it. Fetched on demand by scripts/compare_extractors.py; a copy that
 # lands in the tree is a rebuildable cache, never a checked-in fixture.
 testdata/
+
+# Patched copy of the type checkers' bundled stdlib stubs. `tools/typeshed_build.py`
+# regenerates it from the installed basedpyright/ty plus `typings/typeshed.patch`
+# (the `typeshed-build` pre-commit hook runs it); only the patch is tracked.
+/typings/typeshed.d/
