@@ -7,12 +7,12 @@ is exercised with no Chrome and no network.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import GeneratorType
-from typing import Any, Final, cast, override
+from typing import Final, cast, override
 
 import asyncio
 import atexit
@@ -84,12 +84,12 @@ class _FakeCookie:
 class _FakeCookieJar:
     def __init__(self, cookies: list[_FakeCookie]) -> None:
         self._cookies = cookies
-        self.seeded: list[Any] = []
+        self.seeded: list[object] = []
 
     async def get_all(self) -> list[_FakeCookie]:
         return self._cookies
 
-    async def set_all(self, cookies: list[Any]) -> None:
+    async def set_all(self, cookies: list[object]) -> None:
         self.seeded = cookies
 
 
@@ -144,19 +144,19 @@ class _FakeTab:
         href: str,
         documents: list[str] | None = None,
         parsing: str | None = None,
-        paused_events: list[Any] | None = None,
+        paused_events: list[object] | None = None,
     ) -> None:
         self._documents = documents if documents is not None else [content]
         self._parsing = parsing
         self._href = href
         self.closed = False
         self.navigations: list[str] = []
-        self.commands: list[Any] = []
-        self.handlers: list[Any] = []
-        self.paused_handlers: list[Any] = []
+        self.commands: list[object] = []
+        self.handlers: list[Callable[[object], None]] = []
+        self.paused_handlers: list[Callable[[object], None]] = []
         self.continued_requests: list[str] = []
         self.failed_requests: list[str] = []
-        self._paused_events: list[Any] = list(paused_events or [])
+        self._paused_events: list[object] = list(paused_events or [])
         self.wire_commands: list[dict[str, object]] = []
         self.content_reads = 0
         self._index = 0
@@ -164,7 +164,11 @@ class _FakeTab:
         # which the new document exists but has not parsed.
         self._is_parsing = False
 
-    def add_handler(self, event_type: object, handler: object) -> None:
+    def add_handler(
+        self,
+        event_type: object,
+        handler: Callable[[object], None],
+    ) -> None:
         # Routed by event type, mirroring zendriver's own dispatch: the
         # navigation watcher and the per-request guard must not receive each
         # other's events, which a single handler list cannot express.
@@ -270,7 +274,7 @@ class _FakeBrowser:
         cookies: list[_FakeCookie] | None = None,
         documents: list[str] | None = None,
         parsing: str | None = None,
-        paused_events: list[Any] | None = None,
+        paused_events: list[object] | None = None,
     ) -> None:
         self._content = content
         self._href = href
@@ -484,7 +488,7 @@ def test_the_pool_leaves_zendriver_spawn_alone(
     exit that actually leaked.
     """
     util = importlib.import_module("zendriver.core.util")
-    vendor = util._start_process
+    vendor = cast(Callable[..., object], util._start_process)
 
     async def fake_start(config: zendriver.Config) -> _FakeBrowser:
         del config
@@ -495,7 +499,7 @@ def test_the_pool_leaves_zendriver_spawn_alone(
         wesearch.fetch.transport.zendriver._launch_browser(tmp_path, headless=True),
     )
 
-    assert util._start_process is vendor, (
+    assert cast(Callable[..., object], util._start_process) is vendor, (
         "the pool patched zendriver's spawn; a thread-scoped parent-death "
         "signal kills pooled browsers when the pool's loop thread exits"
     )
@@ -569,7 +573,7 @@ def test_the_pool_never_stops_a_browser_a_caller_still_holds(
             f"the pool closed browsers {closed} while a caller still held one; "
             f"a browser is idle only when its caller says so"
         )
-        assert not cast(_FakeBrowser, held).stopped
+        assert not (held).stopped
     finally:
         pool.shutdown()
 
@@ -850,8 +854,22 @@ def test_a_failing_tab_close_does_not_mask_the_fetch_it_cleans_up_after(
 class _SlowCancelTab(_FakeTab):
     """A tab whose close hangs, then does real work while cancelling."""
 
-    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        *,
+        content: str = "<html>ok</html>",
+        href: str = "",
+        documents: list[str] | None = None,
+        parsing: str | None = None,
+        paused_events: list[object] | None = None,
+    ) -> None:
+        super().__init__(
+            content=content,
+            href=href,
+            documents=documents,
+            parsing=parsing,
+            paused_events=paused_events,
+        )
         self.finalized = False
 
     @override
@@ -880,7 +898,7 @@ def test_an_abandoned_tab_close_is_reaped_before_the_helper_returns() -> None:
     async def go() -> tuple[int, bool]:
         before = asyncio.all_tasks()
         await wesearch.fetch.transport.zendriver._closed(
-            cast(Any, tab),
+            cast(zendriver.Tab, tab),
             budget_sec=0.01,
         )
         leaked = [task for task in asyncio.all_tasks() - before if not task.done()]
@@ -899,7 +917,7 @@ def test_open_instance_releases_profile_then_clears_domain_cooldown(
     events: list[str] = []
 
     class FakePool:
-        def run(self, coroutine: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def run(self, coroutine: Coroutine[object, object, object]) -> None:
             events.append("launch")
             coroutine.close()
 
@@ -1110,7 +1128,6 @@ def test_navigate_returns_body_and_domain_cookies(
             on_redirect=None,
         ),
     )
-    assert isinstance(result, BrowserResult)
     assert result.body == b"<html>results</html>"
     # Only the domain-matching cookie is harvested; the foreign one is dropped.
     assert result.cookies == {"SID": "abc"}
@@ -1360,7 +1377,7 @@ class TestBrowserHonorsTrustPerHop:
         *,
         url: str = "https://public.example/start",
         trust: Trust = "untrusted",
-        on_redirect: Any = None,  # noqa: ANN401 -- forwarded to an upstream Any.
+        on_redirect: Callable[[str], None] | None = None,
         headers: dict[str, str] | None = None,
     ) -> _FakeTab:
         """Drive one navigation and return the tab that served it."""
@@ -1803,8 +1820,10 @@ def test_navigate_seeds_request_identity(
         ),
     )
     assert len(browser.cookies.seeded) == 1
-    assert browser.cookies.seeded[0].name == "CONSENT"
-    assert browser.cookies.seeded[0].value == "YES+"
+    seeded = browser.cookies.seeded[0]
+    assert isinstance(seeded, zendriver.cdp.network.CookieParam)
+    assert seeded.name == "CONSENT"
+    assert seeded.value == "YES+"
     assert browser.last_tab is not None
     # Three: the request guard's ``Fetch.enable`` precedes the two header
     # commands, because every tab is guarded whether or not headers are set.
@@ -1948,7 +1967,7 @@ def test_navigate_uses_one_overall_timeout(
     real_wait_for = asyncio.wait_for
 
     async def record_budget(
-        awaitable: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+        awaitable: Awaitable[object],
         timeout: float | None = None,  # noqa: ASYNC109 -- The browser test timeout bounds polling across an awaited operation.
     ) -> object:
         # A per-step timeout that RESET the budget would hand out a constant;
@@ -2283,7 +2302,11 @@ def test_settled_content_bounds_a_stalled_document_parse() -> None:
     wall = "<html><title>Just a moment...</title></html>"
 
     class _StalledParseTab:
-        def add_handler(self, event_type: Any, handler: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def add_handler(
+            self,
+            event_type: object,
+            handler: Callable[[object], None],
+        ) -> None:
             del event_type
             # Commit a navigation immediately, so the settle loop always
             # advances to the ready-state wait that has no ceiling.
@@ -2512,7 +2535,7 @@ def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> Non
 
         async def go() -> None:
             first = await pool.browser("e", _PROFILE, headless=True)
-            cast(Any, first).stopped = True  # Simulate Chrome exit.
+            cast(_FakeBrowser, first).stopped = True  # Simulate Chrome exit.
             second = await pool.browser("e", _PROFILE, headless=True)
             assert second is not first
 
@@ -2557,7 +2580,12 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
     waits: list[float] = []
 
     class _RecordingPool:
-        def run(self, coro: Any, *, timeout_sec: float = 0) -> BrowserResult:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def run(
+            self,
+            coro: Coroutine[object, object, object],
+            *,
+            timeout_sec: float = 0,
+        ) -> BrowserResult:
             coro.close()
             waits.append(timeout_sec)
             return BrowserResult(body=b"", cookies={}, final_url="")
@@ -2572,10 +2600,11 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
     )
 
     assert waits == [pytest.approx(60.0)]
-    close_budget = (
+    close_budget = cast(
+        object,
         inspect.signature(wesearch.fetch.transport.zendriver._closed)
         .parameters["budget_sec"]
-        .default
+        .default,
     )
     assert isinstance(close_budget, float)
     assert 0 < close_budget < waits[0] - 30.0
@@ -2615,7 +2644,7 @@ def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) 
 
             # ``result`` alone, though the listener splats the whole message:
             # the vendor reads only ``error`` and ``result``, and its
-            # ``**response: dict[str, Any]`` annotation rejects the integer
+            # ``**response: dict[str, object]`` annotation rejects the integer
             # ``id`` a real reply also carries.
             cancelled = Transaction(zendriver.cdp.page.navigate("about:blank"))
             cancelled.cancel()
@@ -2626,9 +2655,7 @@ def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) 
             # LIVE transaction still has to reach the caller awaiting it.
             live = Transaction(zendriver.cdp.page.navigate("about:blank"))
             live(result={"frameId": "F", "loaderId": "L"})
-            assert cast(tuple[object, ...], live.result())[0] == (
-                zendriver.cdp.page.FrameId("F")
-            )
+            assert (live.result())[0] == (zendriver.cdp.page.FrameId("F"))
 
     asyncio.run(go())
 

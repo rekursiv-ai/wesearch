@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import PolicyParams
+from wesearch.fetch import PolicyParams, RequestParams
 from wesearch.fetch.providers import reader_proxy
 from wesearch.types.errors import FetchError
 
@@ -55,9 +54,9 @@ class TestFetch:
 
     def test_wraps_target_in_proxy_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("JINA_AI_API_KEY", raising=False)
-        seen: dict[str, Any] = {}
+        seen: dict[str, object] = {}
 
-        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
             seen["url"] = url
             seen["headers"] = request.content.headers
             return b"# rendered", None
@@ -73,9 +72,9 @@ class TestFetch:
 
     def test_injects_bearer_when_key_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("JINA_AI_API_KEY", "jina_secret")
-        seen: dict[str, Any] = {}
+        seen: dict[str, object] = {}
 
-        def fake_fetch(url: str, *, request: Any) -> tuple[bytes, None]:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
             del url
             seen["headers"] = request.content.headers
             return b"ok", None
@@ -87,7 +86,7 @@ class TestFetch:
     def test_soft_fail_sentinel_raises(self) -> None:
         soft = b"Title\n\nWarning: Target URL returned error 404 while fetching"
 
-        def fake_fetch(url: str, *, request: object) -> tuple[bytes, None]:
+        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
             del url, request
             return soft, None
 

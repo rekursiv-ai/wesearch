@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from email.message import Message
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
@@ -143,13 +143,13 @@ class TestRefresh:
         },
     ]
 
-    def _refresh(self, kind: str, tmp_path: Path) -> list[str]:
+    def _refresh(self, kind: UserAgentKind, tmp_path: Path) -> list[str]:
         pool_file = tmp_path / f"{kind}.txt"
         with (
             patch.object(useragents, "_download_records", return_value=self._DATASET),
             patch.object(useragents, "_pool_path", return_value=pool_file),
         ):
-            useragents.refresh(cast(UserAgentKind, kind))
+            useragents.refresh(kind)
         return pool_file.read_text().splitlines()
 
     def test_desktop_filter_keeps_only_desktop_plain_chrome(
@@ -307,6 +307,7 @@ class TestDownload:
 
         assert records == TestRefresh._DATASET
         request = urlopen_mock.call_args.args[0]
+        assert isinstance(request, urllib.request.Request)
         assert request.get_header("User-agent")
         assert urlopen_mock.call_args.kwargs == {"timeout": 30}
 

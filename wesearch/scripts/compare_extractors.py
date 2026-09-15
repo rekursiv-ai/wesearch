@@ -43,6 +43,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 import argparse
 import hashlib
@@ -59,6 +60,14 @@ from wesearch.fetch import PolicyParams, RequestParams, Transport, fetch
 from wesearch.fetch.extractor.html2text import extract_html2text
 from wesearch.fetch.extractor.markdownify import extract_markdownify
 from wesearch.fetch.extractor.trafilatura import extract_trafilatura
+
+
+class _Flags(Protocol):
+    cache_dir: Path
+    refresh: bool
+    url: list[str]
+    converter: list[str]
+    samples: Path
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -341,36 +350,36 @@ def main(argv: Sequence[str] | None = None) -> int:
       status: 0 on success, 2 on validation error, 1 if no pages scored.
 
     """
-    args = _parse_args(argv)
+    flags = _parse_args(argv)
     # Validated before any fetch: an unrecognized name used to filter down to
     # nothing, fetch the whole corpus anyway, print an empty table, and exit 0
     # -- a typo read as "every converter is perfect".
-    unknown = sorted(set(args.converter) - set(converters()))
+    unknown = sorted(set(flags.converter) - set(converters()))
     if unknown:
         print(f"Unknown converter(s): {', '.join(unknown)}.")
         print(f"Available: {', '.join(converters())}.")
         return 2
-    missing_urls = sorted(set(args.url) - {p.url for p in CORPUS})
+    missing_urls = sorted(set(flags.url) - {p.url for p in CORPUS})
     if missing_urls:
         print(f"URL(s) not in the corpus: {', '.join(missing_urls)}.")
         return 2
-    pages = [p for p in CORPUS if not args.url or p.url in args.url]
-    names = [n for n in converters() if not args.converter or n in args.converter]
+    pages = [p for p in CORPUS if not flags.url or p.url in flags.url]
+    names = [n for n in converters() if not flags.converter or n in flags.converter]
     rows: list[tuple[Page, list[Score]]] = []
     for page in pages:
         try:
             html = cached_html(
                 page,
-                cache_dir=args.cache_dir,
-                refresh=bool(args.refresh),
+                cache_dir=flags.cache_dir,
+                refresh=bool(flags.refresh),
             )
         except Exception as error:  # noqa: BLE001 -- one unreachable page must not end the run.
             print(f"\n{page.slug}: UNAVAILABLE: {error}")
             continue
         rows.append((page, score_page(page, html, names=names)[1]))
-        _write_samples(page, html=html, out_dir=args.samples, names=names)
+        _write_samples(page, html=html, out_dir=flags.samples, names=names)
     if rows:
-        _print_table(rows, names=names, samples=args.samples)
+        _print_table(rows, names=names, samples=flags.samples)
     return 0 if rows else 1
 
 
@@ -396,9 +405,11 @@ def _readability_markdown(html: str) -> str:
 # containing the whole page.
 def _word_grams(text: str, size: int = 5) -> frozenset[tuple[str, ...]]:
     """Return the text's word n-grams, ignoring case, markup, and whitespace."""
-    words = [
-        str(v) for v in re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower())
-    ]
+    values = cast(
+        list[str],
+        re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower()),
+    )
+    words = [str(v) for v in values]
     return frozenset(
         tuple(words[i : i + size]) for i in range(max(0, len(words) - size + 1))
     )
@@ -486,7 +497,7 @@ def _write_samples(
             (out_dir / f"{page.slug}.{name}.txt").write_text(convert(html))
 
 
-def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+def _parse_args(argv: Sequence[str] | None) -> _Flags:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 2)[2])
     parser.add_argument(
@@ -518,7 +529,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=Path("/opt/scratch/artifacts/wesearch-extractors"),
         help="Where converter outputs are written for reading (default: %(default)s).",
     )
-    return parser.parse_args(argv)
+    return cast(_Flags, parser.parse_args(argv))
 
 
 if __name__ == "__main__":

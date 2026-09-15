@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-from typing import Any, cast, override
+from typing import cast, override
 from unittest.mock import Mock, patch
 
 import importlib
@@ -41,6 +41,7 @@ from wesearch.fetch.transport.curl import (
     _SessionKey,
     seed_session_jar,
 )
+from wesearch.lib.custom_json import DictCodec
 from wesearch.types.errors import (
     FetchError,
 )
@@ -146,13 +147,19 @@ class TestFetchCurlBackend:
                 state["i"] += 1
                 assert self._write is not None
                 assert self._header is not None
-                _ = self._write.write(hop.body)
-                _ = self._header.write(hop.raw_headers)
+                body = hop.body
+                raw_headers = hop.raw_headers
+                assert isinstance(body, bytes)
+                assert isinstance(raw_headers, bytes)
+                _ = self._write.write(body)
+                _ = self._header.write(raw_headers)
 
             def getinfo(self, option: int) -> bytes | int:
                 hop = hops[state["i"] - 1]
                 if int(option) == int(CurlInfo.RESPONSE_CODE):
-                    return int(hop.status)
+                    status = hop.status
+                    assert isinstance(status, int)
+                    return status
                 return b""
 
             def close(self) -> None:
@@ -252,7 +259,7 @@ class TestFetchCurlBackend:
                 ),
             )
 
-        options = dict(mock_req.call_args.kwargs.get("curl_options") or {})
+        options = _recorded_curl_options(mock_req)
         assert options.get(CurlOpt.RESOLVE) == ["example.com:443:93.184.216.34"]
 
     def test_one_shot_request_pins_a_non_default_port(self) -> None:
@@ -279,17 +286,19 @@ class TestFetchCurlBackend:
                 ),
             )
 
-        options = dict(mock_req.call_args.kwargs.get("curl_options") or {})
+        options = _recorded_curl_options(mock_req)
         assert options.get(CurlOpt.RESOLVE) == ["example.com:8443:93.184.216.34"]
 
     def test_pin_brackets_ipv6_resolve_entry(self) -> None:
         # REV2-002: a v6 pin must be "host:port:[v6]" -- curl mis-parses an
         # unbracketed IPv6 (its colons collide with the host:port delimiters).
-        built: list[dict[Any, Any]] = []
+        built: list[dict[object, object]] = []
 
         class _Session:
-            def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
-                built.append(dict(kwargs.get("curl_options") or {}))
+            def __init__(self, **kwargs: object) -> None:
+                options = kwargs.get("curl_options")
+                assert isinstance(options, dict) or options is None
+                built.append(cast(dict[object, object], options or {}))
                 self.cookies = StubCookies()
 
             def close(self) -> None:
@@ -333,7 +342,7 @@ class TestFetchCurlBackend:
                     policy=PolicyParams(transport="curl"),
                 ),
             )
-        second = mock_req.call_args_list[1].kwargs["headers"]
+        second = _recorded_headers(mock_req)
         assert second["Origin"] == "https://b.com"
 
     def test_simple_curl_rewrites_origin_on_cross_host_redirect(self) -> None:
@@ -353,7 +362,7 @@ class TestFetchCurlBackend:
                     content=ContentParams(method="POST", data={"x": "1"}),
                 ),
             )
-        second_headers = mock_req.call_args_list[1].kwargs["headers"]
+        second_headers = _recorded_headers(mock_req)
         assert second_headers.get("Origin") == "https://b.com"
 
     def test_pooled_curl_loads_caller_cookies_into_jar_not_header(self) -> None:
@@ -375,7 +384,7 @@ class TestFetchCurlBackend:
         kwargs = mock_req.call_args.kwargs
         # Cookie is in the jar, not the header, and cookies= kwarg is unset.
         assert {(c.name, c.value) for c in stub.cookies.jar} == {("CONSENT", "YES+")}
-        assert "Cookie" not in kwargs["headers"]
+        assert "Cookie" not in _recorded_headers(mock_req)
         assert not kwargs.get("cookies")
 
     def test_case_variant_cookie_header_not_duplicated(self) -> None:
@@ -392,7 +401,7 @@ class TestFetchCurlBackend:
                     ),
                 ),
             )
-        sent = mock_req.call_args.kwargs["headers"]
+        sent = _recorded_headers(mock_req)
         cookie_keys = [k for k in sent if k.lower() == "cookie"]
         assert len(cookie_keys) == 1, f"duplicate cookie header keys: {cookie_keys}"
 
@@ -482,7 +491,7 @@ class TestFetchCurlBackend:
             headers={"location": "https://example.com/result"},
         )
         resp_ok = self._mock_response(content=b"got it")
-        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
         def _record(*args: object, **kwargs: object) -> Mock:
             calls.append((args, kwargs))
@@ -511,7 +520,7 @@ class TestFetchCurlBackend:
             headers={"location": "https://example.com/result"},
         )
         resp_ok = self._mock_response(content=b"ok")
-        calls: list[dict[str, Any]] = []
+        calls: list[dict[str, object]] = []
 
         def _record(*_a: object, **kw: object) -> Mock:
             calls.append(kw)
@@ -526,7 +535,9 @@ class TestFetchCurlBackend:
                     content=ContentParams(method="POST", json={"x": 1}),
                 ),
             )
-        assert "Content-Type" not in calls[1]["headers"]
+        headers = calls[1]["headers"]
+        assert isinstance(headers, dict)
+        assert "Content-Type" not in (headers)
 
     def test_max_redirects_zero_returns_3xx_body_on_curl(self) -> None:
         # REV2061-001: max_redirects=0 means "do not follow, return the 3xx
@@ -717,7 +728,7 @@ class TestCurlPathSendsUserAgent:
                 self.wfile.write(b"ok")
 
             @override
-            def log_message(self, format: str, *args: Any) -> None:
+            def log_message(self, format: str, *args: object) -> None:
                 del format, args
 
         server = HTTPServer(("127.0.0.1", 0), _Echo)
@@ -776,6 +787,18 @@ class TestSeedSessionJar:
         assert jar["__Host-GSP"].path == "/"
         # A plain cookie is seeded non-Secure (Chrome sends it over either).
         assert jar["NID"].secure is False
+
+
+def _recorded_curl_options(mock_req: Mock) -> dict[object, object]:
+    """Return the typed curl options mapping recorded by a request mock."""
+    options = mock_req.call_args.kwargs.get("curl_options")
+    assert isinstance(options, dict)
+    return cast(dict[object, object], options)
+
+
+def _recorded_headers(mock_req: Mock) -> dict[str, str]:
+    """Return the typed headers mapping recorded by a request mock."""
+    return DictCodec.coerce(mock_req.call_args.kwargs["headers"], str)
 
 
 if __name__ == "__main__":

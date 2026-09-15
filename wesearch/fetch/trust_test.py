@@ -8,27 +8,29 @@ needs a special case here, the abstraction is still wrong.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from importlib import import_module
 from pathlib import Path
 from threading import Thread
-from typing import Any, override
+from typing import Protocol, cast, override
 from unittest.mock import patch
 
-import importlib
 import inspect
 
 import pytest
 
+from wesearch.fetch import fetch
 from wesearch.fetch.common import ValidatedHost
+from wesearch.fetch.fetch import _Request
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import CloudflareChallengeError
 from wesearch.types.params import PolicyParams, RequestParams, Transport, Trust
 
-
-fetch_mod = importlib.import_module("wesearch.fetch.fetch")
-curl_mod = importlib.import_module("wesearch.fetch.transport.curl")
-stdlib_mod = importlib.import_module("wesearch.fetch.transport.stdlib")
+import wesearch.fetch.transport.curl
+import wesearch.fetch.transport.stdlib
+import wesearch.fetch.transport.zendriver
 
 
 class _Echo(BaseHTTPRequestHandler):
@@ -44,7 +46,7 @@ class _Echo(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     @override
-    def log_message(self, format: str, *args: Any) -> None:
+    def log_message(self, format: str, *args: object) -> None:
         del format, args
 
 
@@ -52,6 +54,7 @@ class _Echo(BaseHTTPRequestHandler):
 def profiled_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """Pin an egress and seat a stored cookie for ``example.com``."""
     store = ProfileStore(base_dir=tmp_path)
+    fetch_module = _fetch_module()
 
     def shared(cls: type[ProfileStore]) -> ProfileStore:
         del cls
@@ -61,7 +64,7 @@ def profiled_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
         return "203.0.113.1"
 
     monkeypatch.setattr(ProfileStore, "shared", classmethod(shared))
-    monkeypatch.setattr(fetch_mod, "egress_ip", fixed_egress)
+    monkeypatch.setattr(fetch_module, "egress_ip", fixed_egress)
     store.save(
         "203.0.113.1",
         "example.com",
@@ -91,19 +94,23 @@ class TestCookiesSurviveTrust:
         del profiled
         sent: dict[str, str] = {}
 
-        def spy(url: str, **kwargs: Any) -> bytes:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def spy(
+            url: str,
+            *,
+            headers: dict[str, str],
+            session: _Session | None = None,
+            **_kwargs: object,
+        ) -> bytes:
             del url
-            jar = kwargs.get("session")
-            header = kwargs["headers"].get("Cookie", "")
-            names = [c.name for c in jar.cookies.jar] if jar is not None else []
-            sent["cookies"] = header or ",".join(names)
+            names = [c.name for c in session.cookies.jar] if session is not None else []
+            sent["cookies"] = headers.get("Cookie", "") or ",".join(names)
             return b"ok"
 
         with (
-            patch.object(fetch_mod, "fetch_curl", spy),
-            patch.object(fetch_mod, "fetch_stdlib", spy),
+            patch.object(_fetch_module(), "fetch_curl", spy),
+            patch.object(_fetch_module(), "fetch_stdlib", spy),
         ):
-            fetch_mod.fetch(
+            fetch(
                 "https://example.com/",
                 request=RequestParams(
                     policy=PolicyParams(transport=transport, trust=trust),
@@ -144,10 +151,12 @@ class TestBrowserUnderUntrusted:
             raise CloudflareChallengeError(url="https://example.com/", status=403)
 
         with (
-            patch.object(fetch_mod.zendriver, "fetch_zendriver", browser),
-            patch.object(fetch_mod, "fetch_curl", walled),
+            patch.object(
+                wesearch.fetch.transport.zendriver, "fetch_zendriver", browser
+            ),
+            patch.object(_fetch_module(), "fetch_curl", walled),
         ):
-            body, _ = fetch_mod.fetch(
+            body, _ = fetch(
                 "https://example.com/",
                 request=RequestParams(policy=PolicyParams(transport=transport)),
             )
@@ -161,12 +170,12 @@ class TestBrowserUnderUntrusted:
         del profiled
         resolved: list[str] = []
 
-        def spy(request: Any, **_kw: Any) -> bytes:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def spy(request: _Request, **_kw: object) -> bytes:
             resolved.append(request.params.policy.transport)
             return b"ok"
 
-        with patch.object(fetch_mod, "_fetch_with_identity", spy):
-            fetch_mod.fetch("https://example.com/", request=RequestParams())
+        with patch.object(_fetch_module(), "_fetch_with_identity", spy):
+            fetch("https://example.com/", request=RequestParams())
         assert resolved == ["curl-then-zendriver"]
 
     def test_learned_domain_routes_to_browser_under_untrusted(
@@ -175,19 +184,20 @@ class TestBrowserUnderUntrusted:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         del profiled
+        fetch_module = _fetch_module()
         monkeypatch.setattr(
-            fetch_mod.transport_routing,
+            fetch_module.transport_routing,
             "zendriver_domains",
             lambda: frozenset({"learned.example"}),
         )
         resolved: list[str] = []
 
-        def spy(request: Any, **_kw: Any) -> bytes:  # noqa: ANN401 -- forwarded to an upstream Any.
+        def spy(request: _Request, **_kw: object) -> bytes:
             resolved.append(request.params.policy.transport)
             return b"ok"
 
-        with patch.object(fetch_mod, "_fetch_with_identity", spy):
-            fetch_mod.fetch("https://learned.example/", request=RequestParams())
+        with patch.object(_fetch_module(), "_fetch_with_identity", spy):
+            fetch("https://learned.example/", request=RequestParams())
         assert resolved == ["zendriver"]
 
 
@@ -197,7 +207,7 @@ class TestTrustEnforcement:
     @pytest.mark.parametrize("transport", ["curl", "stdlib"])
     def test_untrusted_refuses_loopback(self, transport: Transport) -> None:
         with pytest.raises(ValueError, match="non-public"):
-            fetch_mod.fetch(
+            fetch(
                 "http://127.0.0.1:1/",
                 request=RequestParams(policy=PolicyParams(transport=transport)),
             )
@@ -213,7 +223,7 @@ class TestTrustEnforcement:
         )
         thread.start()
         try:
-            body, _ = fetch_mod.fetch(
+            body, _ = fetch(
                 f"http://127.0.0.1:{port}/",
                 request=RequestParams(
                     policy=PolicyParams(transport="curl", trust="internal"),
@@ -236,21 +246,28 @@ class TestPinnedForkIsGone:
     """
 
     def test_no_pinned_curl_function(self) -> None:
-        assert not hasattr(curl_mod, "_fetch_curl_pinned")
+        assert not hasattr(wesearch.fetch.transport.curl, "_fetch_curl_pinned")
 
     def test_no_simple_curl_function(self) -> None:
-        assert not hasattr(curl_mod, "_fetch_curl_simple")
+        assert not hasattr(wesearch.fetch.transport.curl, "_fetch_curl_simple")
 
     def test_fetch_curl_takes_no_validated_hosts(self) -> None:
         assert (
-            "validated_hosts" not in inspect.signature(curl_mod.fetch_curl).parameters
+            "validated_hosts"
+            not in inspect.signature(
+                wesearch.fetch.transport.curl.fetch_curl
+            ).parameters
         )
 
     def test_transports_keep_identical_signatures(self) -> None:
         # The dispatcher picks either backend by name, so a divergence here is
         # what let the pinned path quietly stop accepting a pooled session.
-        curl = set(inspect.signature(curl_mod.fetch_curl).parameters)
-        stdlib = set(inspect.signature(stdlib_mod.fetch_stdlib).parameters)
+        curl = set(
+            inspect.signature(wesearch.fetch.transport.curl.fetch_curl).parameters
+        )
+        stdlib = set(
+            inspect.signature(wesearch.fetch.transport.stdlib.fetch_stdlib).parameters
+        )
         assert curl == stdlib
 
 
@@ -283,11 +300,52 @@ class TestBurnDropsEveryPinnedSession:
             ): _Session("pinned"),
             ("5.6.7.8", "example.com", "chrome", None, 443): _Session("other-egress"),
         }
-        with patch.object(curl_mod, "_curl_sessions", pool):
-            curl_mod.close_curl_session("1.2.3.4", "example.com", "chrome")
+        with patch.object(wesearch.fetch.transport.curl, "_curl_sessions", pool):
+            wesearch.fetch.transport.curl.close_curl_session(
+                "1.2.3.4", "example.com", "chrome"
+            )
             survivors = list(pool)
         assert sorted(closed) == ["pinned", "unpinned"]
         assert survivors == [("5.6.7.8", "example.com", "chrome", None, 443)]
+
+
+class _Cookie(Protocol):
+    """The cookie member read by the transport spy."""
+
+    name: str
+
+
+class _CookieStore(Protocol):
+    """The cookie-jar member read by the transport spy."""
+
+    jar: Iterable[_Cookie]
+
+
+class _Session(Protocol):
+    """The pooled-session member read by the transport spy."""
+
+    cookies: _CookieStore
+
+
+class _Routing(Protocol):
+    """The routing member patched by the learned-domain test."""
+
+    zendriver_domains: Callable[[], frozenset[str]]
+
+
+class _FetchModule(Protocol):
+    """The fetch-module members patched by these tests."""
+
+    egress_ip: Callable[..., str | None]
+    fetch_curl: Callable[..., bytes]
+    fetch_stdlib: Callable[..., bytes]
+    _fetch_with_identity: Callable[..., bytes]
+    transport_routing: _Routing
+
+
+def _fetch_module() -> _FetchModule:
+    """Return the implementation module behind the package-level fetch export."""
+    return cast(_FetchModule, import_module("wesearch.fetch.fetch"))
 
 
 if __name__ == "__main__":

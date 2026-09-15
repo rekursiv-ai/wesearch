@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Protocol, cast
 from unittest.mock import Mock, patch
 
 import base64
@@ -26,10 +26,13 @@ from wesearch.fetch import (
     fetch,
 )
 from wesearch.fetch.fetch import (
+    _Request,
     _send_as,
     _split_userinfo,
+    _url_with_params,
     egress_ip,
     last_known_egress_ip,
+    resolve_transport,
     set_last_egress_ip,
 )
 from wesearch.fetch.testing import (
@@ -38,6 +41,7 @@ from wesearch.fetch.testing import (
     lower_headers,
     zstd_compress,
 )
+from wesearch.fetch.transport import transport_routing, zendriver
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import (
@@ -51,7 +55,7 @@ from wesearch.types.errors import (
 import wesearch.fetch
 
 
-fetch_mod = importlib.import_module("wesearch.fetch.fetch")
+fetch_mod = cast("_FetchModule", importlib.import_module("wesearch.fetch.fetch"))
 
 
 def test_fetch_uses_transport_package_layout() -> None:
@@ -69,14 +73,13 @@ class TestUrlWithParams:
         # A fragment ends the URL and is never sent to the server, so appending
         # the query after it silently dropped every parameter from the wire.
         assert (
-            fetch_mod._url_with_params("https://e/p#section", {"q": "x"})
+            _url_with_params("https://e/p#section", {"q": "x"})
             == "https://e/p?q=x#section"
         )
 
     def test_params_merge_into_an_existing_query(self) -> None:
         assert (
-            fetch_mod._url_with_params("https://e/p?a=1#s", {"q": "x"})
-            == "https://e/p?a=1&q=x#s"
+            _url_with_params("https://e/p?a=1#s", {"q": "x"}) == "https://e/p?a=1&q=x#s"
         )
 
 
@@ -440,7 +443,10 @@ class TestHeaderOrder:
         # Stdlib path is selected per-call via transport="stdlib", not a global.
         return
 
-    def _capture_headers(self, **fetch_kwargs: Any) -> dict[str, str]:  # noqa: ANN401 -- forwarded to an upstream Any.
+    def _capture_headers(
+        self,
+        content: ContentParams = ContentParams(),  # noqa: B008 -- Frozen dataclass; a shared default is safe.
+    ) -> dict[str, str]:
         resp = Mock(spec=http.client.HTTPResponse)
         resp.status = 200
         resp.read.return_value = b"ok"
@@ -456,11 +462,11 @@ class TestHeaderOrder:
             fetch(
                 "https://example.com/",
                 request=RequestParams(
-                    content=ContentParams(**fetch_kwargs),
+                    content=content,
                     policy=PolicyParams(transport="stdlib"),
                 ),
             )
-        return dict(mock_conn.request.call_args.kwargs["headers"])
+        return _recorded_headers(mock_conn.request)
 
     def test_get_navigation_order(self) -> None:
         # The exact order a real Chrome 146 navigation sends over HTTP/1.1 (the
@@ -509,7 +515,7 @@ class TestHeaderOrder:
         )
 
     def test_post_xhr_order_with_json(self) -> None:
-        headers = self._capture_headers(method="POST", json={"q": "x"})
+        headers = self._capture_headers(ContentParams(method="POST", json={"q": "x"}))
         assert list(headers) == [
             "Host",
             "sec-ch-ua",
@@ -532,7 +538,7 @@ class TestHeaderOrder:
         assert "Upgrade-Insecure-Requests" not in headers
 
     def test_post_xhr_order_with_form(self) -> None:
-        headers = self._capture_headers(method="POST", data={"q": "x"})
+        headers = self._capture_headers(ContentParams(method="POST", data={"q": "x"}))
         assert headers["Content-Type"] == "application/x-www-form-urlencoded"
         # Content-Type lives between Accept and Origin.
         keys = list(headers)
@@ -540,11 +546,13 @@ class TestHeaderOrder:
         assert keys.index("Origin") == keys.index("Content-Type") + 1
 
     def test_post_without_body_omits_content_type(self) -> None:
-        headers = self._capture_headers(method="POST")
+        headers = self._capture_headers(ContentParams(method="POST"))
         assert "Content-Type" not in headers
 
     def test_caller_override_preserves_slot(self) -> None:
-        headers = self._capture_headers(headers={"User-Agent": "Custom/1.0"})
+        headers = self._capture_headers(
+            ContentParams(headers={"User-Agent": "Custom/1.0"})
+        )
         keys = list(headers)
         assert headers["User-Agent"] == "Custom/1.0"
         # Slot is the same as the default User-Agent slot (after
@@ -556,7 +564,7 @@ class TestHeaderOrder:
         )
 
     def test_caller_new_header_appended(self) -> None:
-        headers = self._capture_headers(headers={"X-Trace": "abc"})
+        headers = self._capture_headers(ContentParams(headers={"X-Trace": "abc"}))
         assert list(headers)[-1] == "X-Trace"
 
     def test_validated_hosts_puts_host_first(self) -> None:
@@ -577,7 +585,7 @@ class TestHeaderOrder:
                 request=RequestParams(policy=PolicyParams(transport="stdlib")),
             )
 
-        captured = dict(mock_conn.request.call_args.kwargs["headers"])
+        captured = _recorded_headers(mock_conn.request)
         assert next(iter(captured)) == "Host"
         assert captured["Host"] == "example.com"
 
@@ -836,9 +844,8 @@ class TestFetchSession:
             "curl_cffi.requests.request",
             return_value=self._curl_response(headers={}),
         ):
-            body, session = fetch("https://x.com/p")
+            body, _ = fetch("https://x.com/p")
         assert body == b"ok"
-        assert isinstance(session, FetchSession)
 
     def test_session_learns_set_cookie(self) -> None:
         with patch(
@@ -873,7 +880,7 @@ class TestFetchSession:
             return_value=self._curl_response(headers={}),
         ) as req:
             fetch("https://x.com/p", session=prior)
-        sent = req.call_args.kwargs["headers"]
+        sent = _recorded_headers(req)
         assert "sec-ch-ua-arch" in sent
         assert "sec-ch-ua-bitness" in sent
         assert "sec-ch-ua-model" not in sent  # Never opted in.
@@ -889,7 +896,7 @@ class TestFetchSession:
                 "https://x.com/p",
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
-        sent = req.call_args.kwargs["headers"]
+        sent = _recorded_headers(req)
         assert "sec-ch-ua-arch" not in sent
 
     def test_threaded_session_seeds_prior_cookies(self) -> None:
@@ -1179,6 +1186,11 @@ class TestRedirectIdentityScoping:
         caller has no way to know is wrong -- stored ``b.example``'s session
         cookie in ``a.example``'s profile and jar, and the next fetch to
         ``a.example`` sent it there.
+
+        Args:
+          tmp_path: Temporary profile-store directory.
+          monkeypatch: Test monkeypatch fixture.
+
         """
         store = ProfileStore(base_dir=tmp_path)
 
@@ -1194,7 +1206,7 @@ class TestRedirectIdentityScoping:
 
         monkeypatch.setattr(ProfileStore, "shared", classmethod(_shared(store)))
         monkeypatch.setattr(fetch_mod, "egress_ip", fixed_egress)
-        monkeypatch.setattr(fetch_mod.zendriver, "fetch_zendriver", landed_elsewhere)
+        monkeypatch.setattr(zendriver, "fetch_zendriver", landed_elsewhere)
         _body, session = fetch(
             "https://a.example/start",
             request=RequestParams(policy=PolicyParams(transport="zendriver")),
@@ -1253,7 +1265,7 @@ class TestIdentityLayer:
                 "https://x.com/p",
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
-        sent = req.call_args.kwargs["headers"]
+        sent = _recorded_headers(req)
         assert "User-Agent" not in sent
         assert "Cookie" not in sent  # `jar` carries the stored cookie, not the header.
 
@@ -1280,7 +1292,7 @@ class TestIdentityLayer:
                     ),
                 ),
             )
-        sent = req.call_args.kwargs["headers"]
+        sent = _recorded_headers(req)
         assert sent["User-Agent"] == "Mine/1"
         # The caller cookie overrides the profile's GSP in the jar (single source).
         assert ("GSP", "caller") in {(c.name, c.value) for c in stub.cookies.jar}
@@ -1297,7 +1309,7 @@ class TestIdentityLayer:
                 "https://x.com/p",
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
-        assert "User-Agent" not in req.call_args.kwargs["headers"]
+        assert "User-Agent" not in _recorded_headers(req)
 
     def test_set_cookie_is_persisted(self) -> None:
         with patch(
@@ -1346,7 +1358,7 @@ class TestIdentityLayer:
         assert req.call_count == 2
         # The retry used a fresh identity: no poisoned cookies ride along (the UA
         # is curl's coherent impersonate UA, never seeded, so it cannot leak).
-        retry_headers = req.call_args_list[1].kwargs["headers"]
+        retry_headers = _recorded_headers(req, index=1)
         assert "GSP=old" not in retry_headers.get("Cookie", "")
         # The poisoned identity was discarded and a fresh one saved.
         got = self._store().load(self._EGRESS, "x.com")
@@ -1404,12 +1416,12 @@ class TestIdentityLayer:
                     ),
                 ),
             )
-        sent = req.call_args.kwargs["headers"]
+        sent = _recorded_headers(req)
         assert sent == {"User-Agent": "raw"}  # No profile UA, no stored cookie.
 
     def test_send_as_keyless_when_egress_none(self, tmp_path: Path) -> None:
         # _send_as with egress=None draws a UA, sends, persists nothing.
-        request = fetch_mod._Request(
+        request = _Request(
             url="https://x.com/p",
             session=FetchSession(impersonate="chrome"),
             params=RequestParams(policy=PolicyParams(transport="curl")),
@@ -1475,7 +1487,8 @@ class TestEgressIp:
     def test_uses_v6_endpoints(self) -> None:
         mock = Mock(return_value=b"2001:db8::5")
         self._probe(mock, ipv6=True)
-        assert "ipv6" in mock.call_args.args[0] or "api64" in mock.call_args.args[0]
+        url = _recorded_url(mock)
+        assert "ipv6" in url or "api64" in url
 
     def test_malformed_v6_reply_rejected(self) -> None:
         assert self._probe(Mock(return_value=b"::::"), ipv6=True) is None
@@ -1565,10 +1578,10 @@ class TestBrowserBackend:
         assert RequestParams().policy.transport == "auto"
 
     def test_auto_uses_general_curl_then_browser_fallback(self) -> None:
-        assert fetch_mod.resolve_transport("auto") == "curl-then-zendriver"
+        assert resolve_transport("auto") == "curl-then-zendriver"
 
     def test_auto_uses_curl_for_post(self) -> None:
-        assert fetch_mod.resolve_transport("auto", method="POST") == "curl"
+        assert resolve_transport("auto", method="POST") == "curl"
 
     def test_auto_uses_curl_for_get_body(self) -> None:
         with patch.object(
@@ -1581,7 +1594,7 @@ class TestBrowserBackend:
                 request=RequestParams(content=ContentParams(json={"query": "value"})),
             )
         assert body == b"ok"
-        assert direct.call_args.args[0].params.policy.transport == "curl"
+        assert _recorded_request(direct).policy.transport == "curl"
 
     def test_auto_post_to_learned_domain_uses_curl(self) -> None:
         # A domain learned to require the browser must not override method/body
@@ -1589,7 +1602,7 @@ class TestBrowserBackend:
         # zendriver leg (whose construction raises "supports only GET").
         with (
             patch.object(
-                fetch_mod.transport_routing,
+                transport_routing,
                 "zendriver_domains",
                 return_value=frozenset({"walled.example"}),
             ),
@@ -1604,7 +1617,7 @@ class TestBrowserBackend:
                 request=RequestParams(content=ContentParams(json={"q": "v"})),
             )
         assert body == b"ok"
-        assert direct.call_args.args[0].params.policy.transport == "curl"
+        assert _recorded_request(direct).policy.transport == "curl"
 
     def test_browser_fetch_observes_a_cookie_free_response(self) -> None:
         # ObserveParams.on_response promises a callback for EVERY response; gating it
@@ -1708,7 +1721,7 @@ class TestBrowserBackend:
             )
         # A fresh (egress, domain) key is saved with the harvested cookies.
         store.save.assert_called_once()
-        saved_profile = store.save.call_args.args[2]
+        saved_profile = _recorded_profile(store.save)
         assert saved_profile.cookies == {"cf_clearance": "tok"}
         assert saved_profile.ua
 
@@ -1773,7 +1786,7 @@ class TestCurlThenZendriverBackend:
             patch.object(fetch_mod, "_send_as", side_effect=CloudflareChallengeError()),
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch.object(
-                fetch_mod.transport_routing,
+                transport_routing,
                 "remember_zendriver_domain",
             ) as remember,
             patch(
@@ -1833,7 +1846,7 @@ class TestCurlThenZendriverBackend:
             patch.object(fetch_mod, "_send_as", return_value=b"enablejs"),
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch.object(
-                fetch_mod.transport_routing,
+                transport_routing,
                 "remember_zendriver_domain",
             ) as remember,
             patch(
@@ -1858,7 +1871,7 @@ class TestCurlThenZendriverBackend:
             patch.object(fetch_mod, "_send_as", side_effect=PuzzleChallengeError()),
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch.object(
-                fetch_mod.transport_routing,
+                transport_routing,
                 "remember_zendriver_domain",
             ) as remember,
             patch(
@@ -1887,12 +1900,12 @@ class TestCurlThenZendriverBackend:
             ) as via_curl,
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch.object(
-                fetch_mod.transport_routing,
+                transport_routing,
                 "zendriver_domains",
                 side_effect=lambda: frozenset(domains),
             ),
             patch.object(
-                fetch_mod.transport_routing,
+                transport_routing,
                 "remember_zendriver_domain",
                 side_effect=domains.add,
             ),
@@ -1928,6 +1941,49 @@ class TestCurlThenZendriverBackend:
                 ),
             )
         via.assert_not_called()
+
+
+class _FetchModule(Protocol):
+    """Patchable attributes imported from the fetch implementation module."""
+
+    curl_session: object
+    egress_ip: object
+    fetch: object
+    _fetch_once: object
+    _send_as: object
+
+
+def _recorded_headers(mock: Mock, *, index: int = 0) -> dict[str, str]:
+    """Return typed request headers recorded by a mock."""
+    call = mock.call_args_list[index]
+    assert isinstance(call.kwargs["headers"], dict)
+    return cast(dict[str, str], call.kwargs["headers"])
+
+
+def _recorded_url(mock: Mock) -> str:
+    """Return the typed URL recorded by a mock."""
+    call = mock.call_args
+    assert call is not None
+    assert isinstance(call.args[0], str)
+    return call.args[0]
+
+
+def _recorded_request(mock: Mock) -> RequestParams:
+    """Return typed request parameters recorded by a mock."""
+    call = mock.call_args
+    assert call is not None
+    assert isinstance(call.args[0], _Request)
+    request = call.args[0]
+    return request.params
+
+
+def _recorded_profile(mock: Mock) -> Profile:
+    """Return the typed profile recorded by a mock."""
+    call = mock.call_args
+    assert call is not None
+    assert isinstance(call.args[2], Profile)
+    value = call.args[2]
+    return value
 
 
 def _shared(store: ProfileStore) -> Callable[[type[ProfileStore]], ProfileStore]:

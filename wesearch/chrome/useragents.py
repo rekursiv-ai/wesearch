@@ -18,10 +18,9 @@ from __future__ import annotations
 
 from functools import cache
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, Protocol, cast
 
 import gzip
-import json
 import logging
 import random
 import stat
@@ -33,6 +32,7 @@ from wesearch.chrome.headers import (
     chrome_user_agent,
     impersonate_version_platform,
 )
+from wesearch.lib.custom_json import DictCodec, ListCodec, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -170,11 +170,7 @@ def _download_records() -> list[object]:
     body = b""
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(  # noqa: S310 -- fixed HTTPS dataset URL.
-                request,
-                timeout=30,
-            ) as response:
-                body = response.read()
+            body = _read_response(request)
             break
         except urllib.error.HTTPError as error:
             if (error.code != 429 and error.code < 500) or error.code >= 600:
@@ -184,19 +180,43 @@ def _download_records() -> list[object]:
         except (TimeoutError, urllib.error.URLError):
             if attempt == 2:
                 raise
-    parsed: object = json.loads(gzip.decompress(body))
+    parsed = loads(gzip.decompress(body))
     if not isinstance(parsed, list):
-        raise RuntimeError(f"expected JSON array from {url}; upstream shape changed?")  # noqa: TRY004 -- The refresh boundary converts vendor download failures to one domain error.
-    return cast(list[object], parsed)
+        raise RuntimeError(  # noqa: TRY004 -- Dataset shape is a downloader contract error.
+            "expected JSON array",
+        )
+    return ListCodec.coerce(parsed, object)
+
+
+def _read_response(request: urllib.request.Request) -> bytes:
+    """Perform one HTTPS request and return the body."""
+    # The stub declares urlopen's result as Any (`_UrlopenRet`); the cast names
+    # the slice this function reads, and the unit test's BytesIO fits it too.
+    response = cast(
+        _ReadableBody,
+        urllib.request.urlopen(request, timeout=30),  # noqa: S310 -- fixed HTTPS dataset URL.
+    )
+    with response:
+        return response.read()
+
+
+class _ReadableBody(Protocol):
+    """The slice of ``HTTPResponse`` the downloader uses; a ``BytesIO`` also fits."""
+
+    def read(self) -> bytes: ...
+
+    def __enter__(self) -> object: ...
+
+    def __exit__(self, *exc: object) -> object: ...
 
 
 def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[str]:
     """Select safe, plain Chrome identities for one pool."""
     selected_set: set[str] = set()
-    for record in records:
-        if not isinstance(record, dict):
+    for raw_record in records:
+        record = DictCodec.coerce(raw_record)
+        if not record:
             continue
-        record = cast(dict[str, object], record)
         ua = record.get("userAgent")
         device = record.get("deviceCategory")
         if not isinstance(ua, str):

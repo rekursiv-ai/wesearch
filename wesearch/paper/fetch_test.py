@@ -157,6 +157,7 @@ class TestDownload:
         assert source == "open_access"
         assert body == _PDF
         called = fetch_fn.call_args_list[0].args[0]
+        assert isinstance(called, str)
         assert "arxiv.org" not in called
 
     def test_oa_download_failure_returns_none(self) -> None:

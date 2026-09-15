@@ -29,7 +29,7 @@ from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Protocol, Self
+from typing import Protocol, Self, cast
 
 import contextlib
 import socket
@@ -96,7 +96,9 @@ class EchoOracle:
             self._lock = threading.Lock()
             self._handlers: list[threading.Thread] = []
             self._stopped = threading.Event()
-            self.port = int(self._sock.getsockname()[1])
+            # The socket stub returns Any; this is the address shape used below.
+            address = cast(tuple[str, int], self._sock.getsockname())
+            self.port = address[1]
             self.url = f"https://localhost:{self.port}/"
             self._thread = threading.Thread(
                 target=self._serve,
@@ -171,7 +173,7 @@ class EchoOracle:
         """Accept connections until the socket closes, capturing each request."""
         while True:
             try:
-                raw, _ = self._sock.accept()
+                raw, _ = cast(tuple[socket.socket, object], self._sock.accept())
             except OSError:
                 return  # Socket closed by close(); normal shutdown.
             if self._stopped.is_set():
