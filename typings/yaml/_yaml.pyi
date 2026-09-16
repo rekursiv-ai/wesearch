@@ -20,7 +20,13 @@ class Mark:
     buffer: Incomplete
     pointer: Incomplete
     def __init__(
-        self, name, index: int, line: int, column: int, buffer, pointer
+        self,
+        name,
+        index: int,
+        line: int,
+        column: int,
+        buffer,
+        pointer,
     ) -> None: ...
     def get_snippet(self): ...
 

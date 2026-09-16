@@ -12,7 +12,11 @@ class Node:
     start_mark: Mark | Any
     end_mark: Mark | Any
     def __init__(
-        self, tag: str, value, start_mark: Mark | None, end_mark: Mark | None
+        self,
+        tag: str,
+        value,
+        start_mark: Mark | None,
+        end_mark: Mark | None,
     ) -> None: ...
 
 class ScalarNode(Node):

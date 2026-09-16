@@ -74,7 +74,8 @@ class TestGet:
 
 class TestBackoff:
     def test_429_retries_then_raises_rate_limit(
-        self, mock_limiter: _FakeLimiter
+        self,
+        mock_limiter: _FakeLimiter,
     ) -> None:
         # Every attempt 429s: after the retry budget it surfaces RateLimitError,
         # and each retry records a growing backoff into the shared cooldown.

@@ -40,17 +40,27 @@ class BaseRepresenter:
     def represent_data(self, data) -> Node: ...
     @classmethod
     def add_representer(
-        cls, data_type: type[_T], representer: Callable[[Self, _T], Node]
+        cls,
+        data_type: type[_T],
+        representer: Callable[[Self, _T], Node],
     ) -> None: ...
     @classmethod
     def add_multi_representer(
-        cls, data_type: type[_T], representer: Callable[[Self, _T], Node]
+        cls,
+        data_type: type[_T],
+        representer: Callable[[Self, _T], Node],
     ) -> None: ...
     def represent_scalar(
-        self, tag: str, value, style: str | None = None
+        self,
+        tag: str,
+        value,
+        style: str | None = None,
     ) -> ScalarNode: ...
     def represent_sequence(
-        self, tag: str, sequence: Iterable[Incomplete], flow_style: bool | None = None
+        self,
+        tag: str,
+        sequence: Iterable[Incomplete],
+        flow_style: bool | None = None,
     ) -> SequenceNode: ...
     def represent_mapping(
         self,
@@ -80,7 +90,11 @@ class SafeRepresenter(BaseRepresenter):
     def represent_date(self, data: datetime.date) -> ScalarNode: ...
     def represent_datetime(self, data: datetime.datetime) -> ScalarNode: ...
     def represent_yaml_object(
-        self, tag: str, data, cls, flow_style: bool | None = None
+        self,
+        tag: str,
+        data,
+        cls,
+        flow_style: bool | None = None,
     ) -> MappingNode: ...
     def represent_undefined(self, data) -> Never: ...
 
@@ -88,12 +102,14 @@ class Representer(SafeRepresenter):
     def represent_complex(self, data: complex) -> ScalarNode: ...
     def represent_tuple(self, data: Iterable[Incomplete]) -> SequenceNode: ...
     def represent_name(
-        self, data: BuiltinFunctionType | FunctionType
+        self,
+        data: BuiltinFunctionType | FunctionType,
     ) -> ScalarNode: ...
     def represent_module(self, data: ModuleType) -> ScalarNode: ...
     def represent_object(self, data) -> SequenceNode | MappingNode: ...
     def represent_ordered_dict(
-        self, data: Mapping[Incomplete, Incomplete]
+        self,
+        data: Mapping[Incomplete, Incomplete],
     ) -> SequenceNode: ...
 
 __all__ = ["BaseRepresenter", "Representer", "RepresenterError", "SafeRepresenter"]
