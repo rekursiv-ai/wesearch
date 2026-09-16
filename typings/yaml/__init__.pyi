@@ -37,7 +37,8 @@ def compose(stream, Loader: type[_Loader | _CLoader] = ...): ...
 def compose_all(stream, Loader: type[_Loader | _CLoader] = ...): ...
 def load(stream: _ReadStream, Loader: type[_Loader | _CLoader]) -> _YAMLObject: ...
 def load_all(
-    stream: _ReadStream, Loader: type[_Loader | _CLoader]
+    stream: _ReadStream,
+    Loader: type[_Loader | _CLoader],
 ) -> Iterator[_YAMLObject]: ...
 def full_load(stream: _ReadStream) -> _YAMLObject: ...
 def full_load_all(stream: _ReadStream) -> Iterator[_YAMLObject]: ...
@@ -421,7 +422,8 @@ def add_constructor(
 def add_multi_constructor(
     tag_prefix: str,
     multi_constructor: Callable[
-        [Loader | FullLoader | UnsafeLoader, str, Node], Incomplete
+        [Loader | FullLoader | UnsafeLoader, str, Node],
+        Incomplete,
     ],
     Loader: None = None,
 ) -> None: ...
@@ -433,7 +435,8 @@ def add_multi_constructor(
 ) -> None: ...
 @overload
 def add_representer(
-    data_type: type[_T], representer: Callable[[Dumper, _T], Node]
+    data_type: type[_T],
+    representer: Callable[[Dumper, _T], Node],
 ) -> None: ...
 @overload
 def add_representer(
@@ -443,7 +446,8 @@ def add_representer(
 ) -> None: ...
 @overload
 def add_multi_representer(
-    data_type: type[_T], multi_representer: Callable[[Dumper, _T], Node]
+    data_type: type[_T],
+    multi_representer: Callable[[Dumper, _T], Node],
 ) -> None: ...
 @overload
 def add_multi_representer(

@@ -254,7 +254,7 @@ class TestEchoOracleCleanup:
                     partial(_stall_handler, started=started, release=release),
                 ),
                 closing(
-                    socket.create_connection(("localhost", oracle.port), timeout=5)
+                    socket.create_connection(("localhost", oracle.port), timeout=5),
                 ),
             ):
                 assert started.wait(5), "handler never accepted the connection"

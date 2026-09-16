@@ -551,7 +551,7 @@ class TestHeaderOrder:
 
     def test_caller_override_preserves_slot(self) -> None:
         headers = self._capture_headers(
-            ContentParams(headers={"User-Agent": "Custom/1.0"})
+            ContentParams(headers={"User-Agent": "Custom/1.0"}),
         )
         keys = list(headers)
         assert headers["User-Agent"] == "Custom/1.0"

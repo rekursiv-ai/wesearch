@@ -362,7 +362,10 @@ def test_launch_browser_caps_dead_browser_connect_budget(
 
     monkeypatch.setattr(zendriver, "start", fake_start)
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(tmp_path, headless=True),
+        wesearch.fetch.transport.zendriver._launch_browser(
+            tmp_path,
+            headless=True,
+        ),
     )
 
     budget = captured["timeout"] * captured["max_tries"]
@@ -383,7 +386,10 @@ def test_launch_browser_uses_vanilla_zendriver_config(
 
     monkeypatch.setattr(zendriver, "start", fake_start)
     result = asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(tmp_path, headless=True),
+        wesearch.fetch.transport.zendriver._launch_browser(
+            tmp_path,
+            headless=True,
+        ),
     )
 
     assert result is browser
@@ -461,7 +467,10 @@ def test_launch_browser_falls_back_when_no_reidentified_chrome(
         lambda: "",
     )
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(tmp_path, headless=True),
+        wesearch.fetch.transport.zendriver._launch_browser(
+            tmp_path,
+            headless=True,
+        ),
     )
 
     assert captured["executable"] == zendriver.Config().browser_executable_path
@@ -495,7 +504,10 @@ def test_the_pool_leaves_zendriver_spawn_alone(
 
     monkeypatch.setattr(zendriver, "start", fake_start)
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(tmp_path, headless=True),
+        wesearch.fetch.transport.zendriver._launch_browser(
+            tmp_path,
+            headless=True,
+        ),
     )
 
     assert cast(Callable[..., object], util._start_process) is vendor, (
@@ -1523,7 +1535,8 @@ class TestBrowserHonorsTrustPerHop:
         browser = _FakeBrowser(
             paused_events=[
                 _request_paused(
-                    "https://public.example/next", {"Cookie": "chrome=own"}
+                    "https://public.example/next",
+                    {"Cookie": "chrome=own"},
                 ),
             ],
         )

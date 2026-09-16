@@ -33,29 +33,41 @@ class BaseConstructor:
     def construct_object(self, node, deep: bool = False) -> _YAMLObject: ...
     def construct_scalar(self, node: ScalarNode) -> str: ...
     def construct_sequence(
-        self, node: SequenceNode, deep: bool = False
+        self,
+        node: SequenceNode,
+        deep: bool = False,
     ) -> list[Incomplete]: ...
     def construct_mapping(
-        self, node: MappingNode, deep: bool = False
+        self,
+        node: MappingNode,
+        deep: bool = False,
     ) -> dict[Hashable, Incomplete]: ...
     def construct_pairs(
-        self, node, deep: bool = False
+        self,
+        node,
+        deep: bool = False,
     ) -> list[tuple[Incomplete, Incomplete]]: ...
     @classmethod
     # Use typevars so we can have covariant behaviour in the parameter types
     def add_constructor(
-        cls, tag: str, constructor: Callable[[_L, _N], Incomplete]
+        cls,
+        tag: str,
+        constructor: Callable[[_L, _N], Incomplete],
     ) -> None: ...
     @classmethod
     def add_multi_constructor(
-        cls, tag_prefix: str | None, multi_constructor
+        cls,
+        tag_prefix: str | None,
+        multi_constructor,
     ) -> None: ...
 
 class SafeConstructor(BaseConstructor):
     def construct_scalar(self, node: ScalarNode | MappingNode) -> str: ...
     def flatten_mapping(self, node: MappingNode) -> None: ...
     def construct_mapping(
-        self, node: MappingNode, deep: bool = False
+        self,
+        node: MappingNode,
+        deep: bool = False,
     ) -> dict[Hashable, Incomplete]: ...
     def construct_yaml_null(self, node: ScalarNode) -> None: ...
     bool_values: ClassVar[dict[str, bool]]
@@ -68,13 +80,16 @@ class SafeConstructor(BaseConstructor):
     timestamp_regexp: ClassVar[Pattern[str]]
     def construct_yaml_timestamp(self, node: ScalarNode) -> date: ...
     def construct_yaml_omap(
-        self, node
+        self,
+        node,
     ) -> Generator[list[tuple[Incomplete, Incomplete]]]: ...
     def construct_yaml_pairs(
-        self, node
+        self,
+        node,
     ) -> Generator[list[tuple[Incomplete, Incomplete]]]: ...
     def construct_yaml_set(
-        self, node
+        self,
+        node,
     ) -> Generator[set[dict[Hashable, Incomplete]]]: ...
     def construct_yaml_str(self, node) -> str: ...
     def construct_yaml_seq(self, node) -> Generator[list[Incomplete]]: ...
@@ -92,7 +107,10 @@ class FullConstructor(SafeConstructor):
     def construct_python_complex(self, node) -> complex: ...
     def construct_python_tuple(self, node) -> tuple[Incomplete, ...]: ...
     def find_python_module(
-        self, name: str, mark, unsafe: bool = False
+        self,
+        name: str,
+        mark,
+        unsafe: bool = False,
     ) -> ModuleType: ...
     def find_python_name(self, name: str, mark, unsafe: bool = False): ...
     def construct_python_name(self, suffix: str, node): ...
@@ -107,11 +125,17 @@ class FullConstructor(SafeConstructor):
         unsafe: bool = False,
     ): ...
     def set_python_instance_state(
-        self, instance: object, state, unsafe: bool = False
+        self,
+        instance: object,
+        state,
+        unsafe: bool = False,
     ) -> None: ...
     def construct_python_object(self, suffix: str, node) -> Generator[Incomplete]: ...
     def construct_python_object_apply(
-        self, suffix: str, node, newobj: bool = False
+        self,
+        suffix: str,
+        node,
+        newobj: bool = False,
     ): ...
     def construct_python_object_new(self, suffix: str, node): ...
 
@@ -119,7 +143,12 @@ class UnsafeConstructor(FullConstructor):
     def find_python_module(self, name: str, mark) -> ModuleType: ...  # type: ignore[override]
     def find_python_name(self, name: str, mark): ...  # type: ignore[override]
     def make_python_instance(
-        self, suffix: str, node, args=None, kwds=None, newobj: bool = False
+        self,
+        suffix: str,
+        node,
+        args=None,
+        kwds=None,
+        newobj: bool = False,
     ): ...  # type: ignore[override]
     def set_python_instance_state(self, instance: object, state) -> None: ...  # type: ignore[override]
 

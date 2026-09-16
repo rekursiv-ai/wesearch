@@ -15,7 +15,13 @@ class SimpleKey:
     column: Incomplete
     mark: Incomplete
     def __init__(
-        self, token_number, required: bool, index, line, column, mark
+        self,
+        token_number,
+        required: bool,
+        index,
+        line,
+        column,
+        mark,
     ) -> None: ...
 
 class Scanner:
@@ -85,14 +91,16 @@ class Scanner:
     def scan_tag(self) -> TagToken: ...
     def scan_block_scalar(self, style) -> ScalarToken: ...
     def scan_block_scalar_indicators(
-        self, start_mark
+        self,
+        start_mark,
     ) -> tuple[bool | None, int | None]: ...
     def scan_block_scalar_ignored_line(self, start_mark) -> None: ...
     def scan_block_scalar_indentation(
         self,
     ) -> tuple[list[Incomplete], int, Incomplete]: ...
     def scan_block_scalar_breaks(
-        self, indent
+        self,
+        indent,
     ) -> tuple[list[Incomplete], Incomplete]: ...
     def scan_flow_scalar(self, style) -> ScalarToken: ...
     ESCAPE_REPLACEMENTS: Final[dict[str, str]]

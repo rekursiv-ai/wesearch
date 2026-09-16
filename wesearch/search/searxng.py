@@ -378,7 +378,8 @@ def _searxng_paper(item: dict[str, object]) -> PaperResult:
     # digits the field is not a count at all, and reading its first 24 would
     # fabricate one.
     cites = re.match(
-        r"^\s*(\d[\d,]{0,23})(?![\d,])", StrCodec.coerce(item.get("comments"))
+        r"^\s*(\d[\d,]{0,23})(?![\d,])",
+        StrCodec.coerce(item.get("comments")),
     )
     return PaperResult(
         url=StrCodec.coerce(item.get("url")),

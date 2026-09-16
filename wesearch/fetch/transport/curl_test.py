@@ -397,7 +397,8 @@ class TestFetchCurlBackend:
                 "https://example.com",
                 request=RequestParams(
                     content=ContentParams(
-                        headers={"cookie": "a=1"}, cookies={"b": "2"}
+                        headers={"cookie": "a=1"},
+                        cookies={"b": "2"},
                     ),
                 ),
             )

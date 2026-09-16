@@ -152,7 +152,9 @@ class TestBrowserUnderUntrusted:
 
         with (
             patch.object(
-                wesearch.fetch.transport.zendriver, "fetch_zendriver", browser
+                wesearch.fetch.transport.zendriver,
+                "fetch_zendriver",
+                browser,
             ),
             patch.object(_fetch_module(), "fetch_curl", walled),
         ):
@@ -255,7 +257,7 @@ class TestPinnedForkIsGone:
         assert (
             "validated_hosts"
             not in inspect.signature(
-                wesearch.fetch.transport.curl.fetch_curl
+                wesearch.fetch.transport.curl.fetch_curl,
             ).parameters
         )
 
@@ -263,10 +265,12 @@ class TestPinnedForkIsGone:
         # The dispatcher picks either backend by name, so a divergence here is
         # what let the pinned path quietly stop accepting a pooled session.
         curl = set(
-            inspect.signature(wesearch.fetch.transport.curl.fetch_curl).parameters
+            inspect.signature(wesearch.fetch.transport.curl.fetch_curl).parameters,
         )
         stdlib = set(
-            inspect.signature(wesearch.fetch.transport.stdlib.fetch_stdlib).parameters
+            inspect.signature(
+                wesearch.fetch.transport.stdlib.fetch_stdlib,
+            ).parameters,
         )
         assert curl == stdlib
 
@@ -302,7 +306,9 @@ class TestBurnDropsEveryPinnedSession:
         }
         with patch.object(wesearch.fetch.transport.curl, "_curl_sessions", pool):
             wesearch.fetch.transport.curl.close_curl_session(
-                "1.2.3.4", "example.com", "chrome"
+                "1.2.3.4",
+                "example.com",
+                "chrome",
             )
             survivors = list(pool)
         assert sorted(closed) == ["pinned", "unpinned"]

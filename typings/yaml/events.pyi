@@ -9,7 +9,9 @@ class Event:
     start_mark: _Mark | None
     end_mark: _Mark | None
     def __init__(
-        self, start_mark: _Mark | None = None, end_mark: _Mark | None = None
+        self,
+        start_mark: _Mark | None = None,
+        end_mark: _Mark | None = None,
     ) -> None: ...
 
 class NodeEvent(Event):

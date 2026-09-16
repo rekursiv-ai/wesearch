@@ -28,15 +28,20 @@ def obfuscate_sensitive_headers(
     items: Iterator[tuple[str | bytes, str | bytes]],
 ) -> Iterator[tuple[str | bytes, str | bytes]]: ...
 def normalize_header_key(
-    value: str | bytes, lower: bool, encoding: str | None = None
+    value: str | bytes,
+    lower: bool,
+    encoding: str | None = None,
 ) -> bytes: ...
 def normalize_header_value(
-    value: str | bytes, encoding: str | None = None
+    value: str | bytes,
+    encoding: str | None = None,
 ) -> bytes: ...
 
 class Headers(MutableMapping[str, str | None]):
     def __init__(
-        self, headers: HeaderTypes | None = None, encoding: str | None = None
+        self,
+        headers: HeaderTypes | None = None,
+        encoding: str | None = None,
     ) -> None: ...
     @property
     def encoding(self) -> str: ...
