@@ -490,14 +490,9 @@ reportInvalidCast = false                  # All cast() calls are intentional.
 
 # Extra.
 reportMissingModuleSource = false
-reportUnnecessaryTypeIgnoreComment = false
-reportPrivateLocalImportUsage = false      # Sibling *_test.py import module-private aliases.
-reportUnknownArgumentType = false
 reportUnknownMemberType = false
 reportUnknownVariableType = false
-reportUnknownParameterType = false
-reportUnknownLambdaType = false
-reportMissingTypeStubs = false
+reportUnnecessaryTypeIgnoreComment = false
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
 [tool.ty.environment]
