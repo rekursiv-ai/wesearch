@@ -14,8 +14,7 @@ thread with ``asyncio.to_thread``. Functions return parsed records or raise a
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import functools
 import json
@@ -37,6 +36,10 @@ from wesearch.ratelimit import cross_process_limiter
 from wesearch.types.errors import FetchError
 
 import wesearch.paper.paginate
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 __all__ = [
@@ -156,7 +159,8 @@ def get(
         backoff_base_sec=backoff_base_sec,
     )
     parsed = _loads(raw, path)
-    assert not isinstance(parsed, list), f"unexpected array from GET {path}"
+    if isinstance(parsed, list):
+        raise TypeError(f"unexpected array from GET {path}")
     return parsed
 
 

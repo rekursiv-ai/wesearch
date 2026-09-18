@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
-from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import Mock, patch
 
 import base64
@@ -53,6 +51,11 @@ from wesearch.types.errors import (
 )
 
 import wesearch.fetch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 
 fetch_mod = cast("_FetchModule", importlib.import_module("wesearch.fetch.fetch"))
@@ -1982,8 +1985,7 @@ def _recorded_profile(mock: Mock) -> Profile:
     call = mock.call_args
     assert call is not None
     assert isinstance(call.args[2], Profile)
-    value = call.args[2]
-    return value
+    return call.args[2]
 
 
 def _shared(store: ProfileStore) -> Callable[[type[ProfileStore]], ProfileStore]:

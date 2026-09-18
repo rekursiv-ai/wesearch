@@ -12,10 +12,14 @@ opt-in via :func:`wesearch.fetch.providers.reader_proxy.third_party_render_allow
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers.reader_proxy import fetch_reader_proxy
+
+
+if TYPE_CHECKING:
+    from wesearch.fetch import PolicyParams
 
 
 __all__ = [

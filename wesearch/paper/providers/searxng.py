@@ -14,12 +14,17 @@ there is no per-IP scrape budget to gate here, so this backend takes no
 
 from __future__ import annotations
 
-from wesearch.fetch import Transport
+from typing import TYPE_CHECKING
+
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import BackendError
 from wesearch.paper.ids import ARXIV_URL_RE, looks_like_paper_id
 from wesearch.search.custom_types import PaperResult, SearchError
 from wesearch.search.searxng import searxng
+
+
+if TYPE_CHECKING:
+    from wesearch.fetch import Transport
 
 
 __all__ = ["search"]

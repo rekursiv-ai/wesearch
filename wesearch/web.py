@@ -31,21 +31,22 @@ from wesearch.fetch import (
     classify_challenge,
     fetch,
 )
-from wesearch.fetch.custom_types import HttpMethod
 from wesearch.fetch.extractor.html2text import extract_html2text
 from wesearch.fetch.extractor.markdownify import extract_markdownify
 from wesearch.fetch.extractor.raw import extract_raw
 from wesearch.fetch.extractor.trafilatura import extract_trafilatura
 from wesearch.fetch.providers import google_news, reddit, x
 from wesearch.fetch.providers.fallback import fetch_with_reader_fallback
-from wesearch.lib.custom_json import JSONValue
-from wesearch.types.extractor import Extract
 from wesearch.types.params import NO_BODY, NoBody
 
 
 if TYPE_CHECKING:
     import defusedxml.common as _defused_common
     import defusedxml.ElementTree as _defused_etree  # noqa: N813 -- The public web adapter preserves the external provider's API name.
+
+    from wesearch.fetch.custom_types import HttpMethod
+    from wesearch.lib.custom_json import JSONValue
+    from wesearch.types.extractor import Extract
 else:
     from wrapt import lazy_import
 

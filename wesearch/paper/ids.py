@@ -7,10 +7,15 @@ spellings the backends and the PDF cache need.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import re
 
-from wesearch.paper.custom_types import IdType
 from wesearch.paper.errors import InvalidIdError
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import IdType
 
 
 __all__ = [

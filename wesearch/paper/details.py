@@ -9,19 +9,23 @@ Sync -- a coroutine call site lifts these with ``asyncio.to_thread``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import functools
 
 from wesearch.lib.custom_json import MutableJSON, decode_or_none
-from wesearch.paper.custom_types import IdType, PaperRecord
+from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.ids import s2_wire_id
-from wesearch.paper.paginate import Page
 from wesearch.paper.providers import (
     openalex,
     s2,
 )
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import IdType
+    from wesearch.paper.paginate import Page
 
 
 __all__ = [

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, cast
 from urllib.parse import urlparse
@@ -23,16 +22,19 @@ from wesearch.fetch.common import (
     redirect_target,
 )
 from wesearch.types.errors import FetchError
-from wesearch.types.params import Trust
 
 
 if TYPE_CHECKING:
     # Type-only: every use is an annotation or a quoted ``cast``. Keeping them
     # out of the runtime block preserves the lazy ``curl_cffi`` import below.
+    from collections.abc import Callable
+
     from curl_cffi import requests as cc_requests
     from curl_cffi.requests import Response
 
     import curl_cffi
+
+    from wesearch.types.params import Trust
 else:
     from wrapt import lazy_import
 
@@ -342,7 +344,6 @@ def fetch_curl(
             raise FetchError(loop.url, 0, {}, str(e).encode()) from e
         # curl_cffi's request/Session.request type a None return for the
         # thread/stream overloads; the sync call here always yields a Response.
-        assert resp is not None
         status = int(resp.status_code)
         resp_headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
         # curl_cffi's Headers.items() lossily folds duplicate Set-Cookie with

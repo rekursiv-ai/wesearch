@@ -15,9 +15,13 @@ back to its normalized title.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import re
 
-from wesearch.paper.custom_types import PaperRecord
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import PaperRecord
 
 
 __all__ = ["fuse", "normalize_title"]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, cast
 
 import io
@@ -17,6 +16,8 @@ try:
 except ImportError:
     zstd = None
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import zstandard  # pyright: ignore[reportMissingModuleSource] -- Stubbed in typings/; the wheel is only installed on <3.14.
 else:
     from wrapt import lazy_import

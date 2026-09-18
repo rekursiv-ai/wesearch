@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.custom_types import AuthorRecord
 from wesearch.paper.paginate import Page
 from wesearch.paper.providers import s2
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from wesearch.lib.custom_json import MutableJSON
 
 
 class TestAuthors:

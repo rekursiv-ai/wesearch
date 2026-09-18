@@ -17,7 +17,6 @@ import brotli
 
 from wesearch.chrome.headers import chrome_client_hints
 from wesearch.types.errors import FetchError
-from wesearch.types.params import Trust
 
 
 # Zstandard entered the stdlib in 3.14 (PEP 784); the public floor is 3.12,
@@ -31,6 +30,8 @@ except ImportError:
     zstd = None
 if TYPE_CHECKING:
     import zstandard  # pyright: ignore[reportMissingModuleSource] -- Stubbed in typings/; the wheel is only installed on <3.14.
+
+    from wesearch.types.params import Trust
 else:
     from wrapt import lazy_import
 

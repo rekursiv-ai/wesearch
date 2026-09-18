@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import override
+from typing import TYPE_CHECKING, override
 from urllib.parse import urlparse
 
 import http.client
@@ -22,7 +21,12 @@ from wesearch.fetch.common import (
     pinned_host,
     redirect_target,
 )
-from wesearch.types.params import Trust
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from wesearch.types.params import Trust
 
 
 __all__ = ["fetch_stdlib"]
@@ -212,7 +216,8 @@ class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
     @override
     def connect(self) -> None:
         http.client.HTTPConnection.connect(self)
-        assert self.sock is not None
+        if self.sock is None:
+            raise ValueError("Expected self.sock is not None.")
         self.sock = self._ssl_context.wrap_socket(
             self.sock,
             server_hostname=self._server_hostname,

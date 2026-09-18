@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
-from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.details import (
     citations,
@@ -21,6 +20,12 @@ from wesearch.paper.providers import (
     openalex,
     s2,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from wesearch.lib.custom_json import MutableJSON
 
 
 class TestCitations:

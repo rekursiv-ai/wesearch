@@ -12,8 +12,7 @@ that category's record.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 import json
 import logging
@@ -45,11 +44,14 @@ from wesearch.types.schema import Field, Schema
 
 logger = logging.getLogger(__name__)
 
-
 # Below the sorted block on purpose: the Google backend is source-only, so this
 # import must sit inside a copybarista fence, and ruff's isort pass reorders
 # across a fence in the import block -- sweeping unrelated imports inside it and
 # stripping them from the export.
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+
 class SearchParamsSchema(Schema):
     """What every search surface accepts.
 

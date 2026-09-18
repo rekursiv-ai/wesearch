@@ -40,10 +40,9 @@ output, which no aggregate score reveals.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import hashlib
@@ -60,6 +59,10 @@ from wesearch.fetch import PolicyParams, RequestParams, Transport, fetch
 from wesearch.fetch.extractor.html2text import extract_html2text
 from wesearch.fetch.extractor.markdownify import extract_markdownify
 from wesearch.fetch.extractor.trafilatura import extract_trafilatura
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 
 class _Flags(Protocol):

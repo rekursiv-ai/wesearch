@@ -16,18 +16,20 @@ only the network + format work, so it takes no sagent dependency.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import logging
 
 from wesearch.fetch import RequestParams, RetryParams, fetch
 from wesearch.lib.custom_json import MutableJSON
-from wesearch.paper.custom_types import IdType
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.ids import s2_wire_id
 from wesearch.paper.providers import s2
 from wesearch.types.errors import FetchError
 
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import IdType
 
 __all__ = [
     "batch_oa_urls",

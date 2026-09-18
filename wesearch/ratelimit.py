@@ -36,10 +36,8 @@ too, so the window is shareable across processes.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
 from functools import cache
-from pathlib import Path
-from typing import Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import asyncio
 import fcntl
@@ -50,6 +48,11 @@ import threading
 import time
 
 from wesearch.lib.userdirs import data_dir
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 
 class CooldownActiveError(Exception):

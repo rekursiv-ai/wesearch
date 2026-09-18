@@ -24,8 +24,8 @@ regression, which is what these tests exist to catch.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 import os
 import time
@@ -51,6 +51,10 @@ from wesearch.search.custom_types import (
 from wesearch.search.duckduckgo import duckduckgo
 from wesearch.search.searxng import searxng
 from wesearch.types.errors import BotDetectionError, FetchError
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
 
 
 # Only the group is module-wide. The RESOURCE marker is per class, because this

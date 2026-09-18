@@ -31,7 +31,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import (
-    TYPE_CHECKING,
     Final,
     Literal,
     TypeAlias,
@@ -43,12 +42,10 @@ from typing import (
 import math
 import random
 
+from curl_cffi.requests.session import HttpMethod
+
 from wesearch.lib.custom_json import JSONValue
 from wesearch.profile import parsedate_to_datetime_or_none
-
-
-if TYPE_CHECKING:
-    from curl_cffi.requests.session import HttpMethod
 
 
 __all__ = [

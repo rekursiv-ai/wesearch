@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from functools import cache
-from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import fcntl
@@ -32,6 +32,10 @@ import time
 
 from wesearch.lib.custom_json import DictCodec, FloatCodec, StrCodec, loads
 from wesearch.lib.userdirs import data_dir
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 __all__ = [

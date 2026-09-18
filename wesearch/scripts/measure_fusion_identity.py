@@ -17,16 +17,21 @@ request/second, so a 429 is retried with a fixed backoff.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import re
 import time
 
 from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
 from wesearch.paper.search import search
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from wesearch.paper.custom_types import PaperRecord
 
 
 _ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+?)(?:v\d+)?$", re.IGNORECASE)

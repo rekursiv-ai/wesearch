@@ -8,7 +8,7 @@ through ``wesearch.lib.userdirs``; an unisolated test writes into the developer'
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,6 +19,10 @@ from wesearch.lib.testing.userdirs_fixture import (
     isolate_user_dirs,
     pytest_configure,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 # Re-exported, not merely imported: an autouse fixture reaches only the

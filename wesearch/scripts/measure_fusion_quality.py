@@ -18,12 +18,17 @@ Live network calls to Semantic Scholar and OpenAlex.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import time
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fuse import normalize_title
 from wesearch.paper.search import SearchResult, search
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import PaperRecord
 
 
 def main(
