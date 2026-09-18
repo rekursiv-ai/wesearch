@@ -28,8 +28,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import TracebackType
-from typing import Protocol, Self, cast
+from typing import TYPE_CHECKING, Protocol, Self, cast
 
 import contextlib
 import socket
@@ -41,6 +40,10 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 
 __all__ = [

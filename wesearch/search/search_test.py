@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
-from typing import ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import json
@@ -46,6 +45,10 @@ from wesearch.types.errors import (
     FetchError,
     PuzzleChallengeError,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Mapping
 
 
 def _patch_fetch(
@@ -1104,8 +1107,7 @@ def _request(mock: MagicMock | AsyncMock, index: int = -1) -> RequestParams:
 def _recorded_url(mock: MagicMock | AsyncMock, index: int = -1) -> str:
     """Narrow a URL recorded by a mock before using string operations."""
     recorded = mock.call_args if index == -1 else mock.call_args_list[index]
-    url = cast(str, recorded.args[0])
-    return url
+    return cast(str, recorded.args[0])
 
 
 if __name__ == "__main__":

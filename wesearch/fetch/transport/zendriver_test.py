@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import GeneratorType
-from typing import Final, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import asyncio
 import atexit
@@ -39,9 +39,12 @@ from wesearch.fetch.transport.zendriver import (
     _navigate,
 )
 from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
-from wesearch.types.params import Trust
 
 import wesearch.fetch.transport.zendriver
+
+
+if TYPE_CHECKING:
+    from wesearch.types.params import Trust
 
 
 _CWD: Final = Path(__file__).resolve().parent

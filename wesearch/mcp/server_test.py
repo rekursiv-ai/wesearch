@@ -262,11 +262,10 @@ def test_mcp_renders_every_declared_param(
 def _signature_default(fn: Callable[..., object], name: str) -> object:
     """Return the default value ``fn``'s signature gives ``name``."""
     parameter = inspect.signature(fn).parameters[name]
-    default = cast(
+    return cast(
         str | int | float | bool | None,
         parameter.default,
     )
-    return default
 
 
 def test_web_fetch_treats_the_model_url_as_untrusted(

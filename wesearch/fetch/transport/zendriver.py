@@ -21,7 +21,6 @@ profile -- to debug a fetch that errored, or to seat a login.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
-from concurrent.futures import Future
 from html import unescape
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol, TypeVar, cast, override
@@ -49,14 +48,16 @@ from wesearch.fetch.challenge import classify_challenge
 from wesearch.fetch.common import apply_redirect, origin, pinned_host
 from wesearch.lib.userdirs import cache_dir, data_dir
 from wesearch.ratelimit import clear_domain_cooldowns
-from wesearch.types.params import Trust
 
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser
+    from concurrent.futures import Future
 
     import zendriver
     import zendriver.core.connection
+
+    from wesearch.types.params import Trust
 else:
     from wrapt import lazy_import
 

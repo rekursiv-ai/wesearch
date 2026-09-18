@@ -15,7 +15,7 @@ Pure functions over records: no tool framework, no MCP, no I/O.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from wesearch.search.custom_types import (
     CodeResult,
@@ -29,6 +29,10 @@ from wesearch.search.custom_types import (
     TorrentResult,
     VideoResult,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 __all__ = ["detail_fields", "format_result", "lean_result"]

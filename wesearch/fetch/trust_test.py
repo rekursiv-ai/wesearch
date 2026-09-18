@@ -8,12 +8,10 @@ needs a special case here, the abstraction is still wrong.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import import_module
-from pathlib import Path
 from threading import Thread
-from typing import Protocol, cast, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 from unittest.mock import patch
 
 import inspect
@@ -22,7 +20,6 @@ import pytest
 
 from wesearch.fetch import fetch
 from wesearch.fetch.common import ValidatedHost
-from wesearch.fetch.fetch import _Request
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import CloudflareChallengeError
@@ -31,6 +28,13 @@ from wesearch.types.params import PolicyParams, RequestParams, Transport, Trust
 import wesearch.fetch.transport.curl
 import wesearch.fetch.transport.stdlib
 import wesearch.fetch.transport.zendriver
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    from pathlib import Path
+
+    from wesearch.fetch.fetch import _Request
 
 
 class _Echo(BaseHTTPRequestHandler):

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from contextlib import closing
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import http.client
@@ -27,6 +27,10 @@ from wesearch.chrome.echo import (
     _requests_root,
     self_signed_localhost_cert,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class TestHeaderParsing:

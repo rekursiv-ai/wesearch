@@ -29,8 +29,6 @@ Requires a Chrome binary on PATH (skipped without one so CI stays green). Run::
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -54,6 +52,9 @@ from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
     from curl_cffi.requests import Response
 
 

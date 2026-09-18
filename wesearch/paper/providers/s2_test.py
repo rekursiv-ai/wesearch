@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import json
@@ -10,10 +11,13 @@ import json
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
-from wesearch.lib.custom_json import MutableJSON
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
 from wesearch.paper.providers import s2
 from wesearch.types.errors import FetchError
+
+
+if TYPE_CHECKING:
+    from wesearch.lib.custom_json import MutableJSON
 
 
 @pytest.fixture(autouse=True)

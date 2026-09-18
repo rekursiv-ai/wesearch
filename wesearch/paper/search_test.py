@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
-from wesearch.lib.custom_json import MutableJSON, MutableJSONValue
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import (
@@ -16,6 +16,10 @@ from wesearch.paper.providers import (
 from wesearch.paper.search import search
 
 import wesearch.paper.search
+
+
+if TYPE_CHECKING:
+    from wesearch.lib.custom_json import MutableJSON, MutableJSONValue
 
 
 def _rec(title: str, source: str) -> PaperRecord:

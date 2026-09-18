@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import get_args
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 
-from wesearch.types.extractor import Extract
 from wesearch.types.params import Extractor
 from wesearch.web import _EXTRACTORS
+
+
+if TYPE_CHECKING:
+    from wesearch.types.extractor import Extract
 
 
 def test_every_extractor_name_is_registered() -> None:

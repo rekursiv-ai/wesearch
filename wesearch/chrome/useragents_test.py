@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from email.message import Message
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
@@ -23,6 +22,10 @@ from wesearch.chrome.useragents import (
     impersonate_target,
     user_agent_pool,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @pytest.fixture(autouse=True)

@@ -18,9 +18,8 @@ Some builds enable additional scraped sources (see :mod:`.providers`); the
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
-from wesearch.fetch import Transport
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fuse import fuse
@@ -29,6 +28,10 @@ from wesearch.paper.providers import (
     s2,
     searxng,
 )
+
+
+if TYPE_CHECKING:
+    from wesearch.fetch import Transport
 
 
 __all__ = [

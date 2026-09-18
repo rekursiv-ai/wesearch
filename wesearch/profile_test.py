@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import threading
 import time
 
 from wesearch.profile import Profile, ProfileStore, parse_set_cookie
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _store(tmp_path: Path, *, ttl_sec: float = 3600.0) -> ProfileStore:

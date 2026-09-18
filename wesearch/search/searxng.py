@@ -7,10 +7,10 @@ overloads in :mod:`wesearch.search.search` meaningful.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal, cast, get_args, overload
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args, overload
 from urllib.parse import urlencode
 
 import json
@@ -50,6 +50,10 @@ from wesearch.search.custom_types import (
     VideoResult,
     clean_text,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -497,9 +501,8 @@ CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
 
 # Not a test: a tab added to the Literal without a record here must fail at
 # IMPORT, where the author sees it, rather than at the first query for that tab.
-assert set(CATEGORIES) == set(get_args(cast(object, SearxngCategory.__value__))), (
-    "every SearxngCategory needs a CATEGORIES record"
-)
+if set(CATEGORIES) != set(get_args(cast(object, SearxngCategory.__value__))):
+    raise ValueError("every SearxngCategory needs a CATEGORIES record")
 
 
 def category_parser(
