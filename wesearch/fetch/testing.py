@@ -18,7 +18,7 @@ except ImportError:
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    import zstandard  # pyright: ignore[reportMissingModuleSource] -- Stubbed in typings/; the wheel is only installed on <3.14.
+    import zstandard
 else:
     from wrapt import lazy_import
 

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 import gzip
-import io
 import ipaddress
 import socket
 import zlib
@@ -16,26 +15,12 @@ import zlib
 import brotli
 
 from wesearch.chrome.headers import chrome_client_hints
+from wesearch.lib import zstd_compat
 from wesearch.types.errors import FetchError
 
 
-# Zstandard entered the stdlib in 3.14 (PEP 784); the public floor is 3.12,
-# so the ``zstandard`` wheel is the fallback there. It is lazy because the
-# monorepo is 3.14-only and does not install it. Brotli has no stdlib port.
-# A try/except rather than a ``sys.version_info`` gate: the checkers pin 3.12
-# and would prune the stdlib branch as unreachable.
-try:
-    from compression import zstd
-except ImportError:
-    zstd = None
 if TYPE_CHECKING:
-    import zstandard  # pyright: ignore[reportMissingModuleSource] -- Stubbed in typings/; the wheel is only installed on <3.14.
-
     from wesearch.types.params import Trust
-else:
-    from wrapt import lazy_import
-
-    zstandard = lazy_import("zstandard")
 
 
 __all__ = [
@@ -440,26 +425,10 @@ def _decompress_one(body: bytes, enc: str) -> bytes:
         if enc == "br":
             return brotli.decompress(body)
         if enc == "zstd":
-            return _zstd_decompress(body)
+            return zstd_compat.decompress(body)
     except (OSError, ValueError, zlib.error, brotli.error) as e:
         raise ValueError(f"Decompression failed ({enc}): {e}") from None
     raise ValueError(f"Unknown Content-Encoding: {enc!r}")
-
-
-def _zstd_decompress(body: bytes) -> bytes:
-    """Decompress a zstd body; raise ValueError on a bad frame."""
-    # Servers (e.g. Cloudflare) emit streaming frames with no embedded content
-    # size. The stdlib one-shot handles them; the wheel's
-    # ``ZstdDecompressor.decompress()`` rejects them, so that path must stream.
-    if zstd is not None:
-        try:
-            return zstd.decompress(body)
-        except zstd.ZstdError as e:
-            raise ValueError(str(e)) from None
-    try:
-        return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
-    except zstandard.ZstdError as e:
-        raise ValueError(str(e)) from None
 
 
 def _netloc(hostname: str, port: int | None) -> str:
