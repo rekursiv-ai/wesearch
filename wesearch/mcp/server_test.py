@@ -16,6 +16,8 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
 from wesearch.lib.custom_json import ListCodec
 from wesearch.mcp import server
@@ -296,15 +298,45 @@ def test_web_fetch_treats_the_model_url_as_untrusted(
 def test_web_fetch_rejects_a_nonpositive_max_chars() -> None:
     # A negative bound slices from the END, returning nearly the whole page
     # while still reporting truncated=True.
-    with pytest.raises(ValueError, match="max_chars"):
+    with pytest.raises(ToolError, match="ValueError: 'max_chars'"):
         server.web_fetch("https://e.co", max_chars=-1)
 
 
 def test_paper_search_rejects_a_nonpositive_limit() -> None:
     # Unbounded, this reaches paginate's own ValueError, which escapes the
     # PaperError contract every caller catches.
-    with pytest.raises(ValueError, match="limit"):
+    with pytest.raises(ToolError, match="ValueError: 'limit'"):
         server.paper_search("q", limit=0)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "message"),
+    [
+        (
+            "web_search",
+            {"query": "q", "backend": "searxng"},
+            "SearchError: SEARXNG_URL must be set",
+        ),
+        ("paper_details", {"paper_id": "not-an-id"}, "InvalidIdError: "),
+    ],
+)
+def test_tool_errors_reach_the_client_with_their_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """A library error reaches the MCP client as a ToolError carrying its text.
+
+    The SDK withholds the text of every other exception, so each of these read
+    as a bare ``Error executing tool <name>`` -- a missing ``SEARXNG_URL`` was
+    indistinguishable from a DuckDuckGo CAPTCHA. Both cases fail before any
+    network I/O.
+    """
+    monkeypatch.delenv("SEARXNG_URL", raising=False)
+    with pytest.raises(ToolError, match=message) as caught:
+        asyncio.run(server.mcp.call_tool(tool, arguments))
+    assert not isinstance(caught.value, UnexpectedToolError)
 
 
 def test_paper_pdf_gives_colliding_slugs_distinct_paths(
