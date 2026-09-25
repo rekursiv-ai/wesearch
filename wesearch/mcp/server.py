@@ -25,11 +25,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
+import functools
 import hashlib
 
 
 try:
     from mcp.server import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError as e:  # pragma: no cover -- depends on the install's extras.
     # The MCP SDK is an optional extra, so this module is the one place in the
     # package where a missing dependency is expected. A bare ModuleNotFoundError
@@ -82,7 +84,27 @@ def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
     return decorate
 
 
+# The MCP SDK (2.x) reports any exception other than ``ToolError`` as a crash: the
+# client sees only ``Error executing tool <name>``, so a missing ``SEARXNG_URL``, a
+# DuckDuckGo CAPTCHA and a bad DOI all read identically, and a BotDetectionError's
+# recovery guidance never arrives. Every tool is a thin wrapper over the library,
+# whose errors are written for the caller, so all of them are forwarded. Applied
+# UNDER ``@mcp.tool()`` so the SDK registers the wrapped function.
+def _surface_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Re-raise a tool's failure as ``ToolError`` so its message reaches the client."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            raise ToolError(f"{type(e).__name__}: {e}") from e
+
+    return wrapper
+
+
 @mcp.tool()
+@_surface_errors
 def paper_search(
     query: str,
     *,
@@ -128,6 +150,7 @@ def paper_search(
 
 
 @mcp.tool()
+@_surface_errors
 def paper_details(paper_id: str) -> dict[str, object]:
     """Full metadata for one paper. Accepts a DOI or arXiv id in any common
     form (bare, doi:/arxiv: prefixed, or full URL).
@@ -149,6 +172,7 @@ def paper_details(paper_id: str) -> dict[str, object]:
 
 
 @mcp.tool()
+@_surface_errors
 def paper_references(
     paper_id: str,
     limit: int = 20,
@@ -178,6 +202,7 @@ def paper_references(
 
 
 @mcp.tool()
+@_surface_errors
 def paper_citations(
     paper_id: str,
     limit: int = 20,
@@ -220,6 +245,7 @@ def paper_citations(
 
 
 @mcp.tool()
+@_surface_errors
 def paper_pdf(paper_id: str) -> dict[str, object]:
     """Download a paper's PDF (arXiv direct, then open-access lookup) into
     the local cache and return its filesystem path.
@@ -247,6 +273,7 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
 
 
 @mcp.tool()
+@_surface_errors
 def author_search(query: str, limit: int = 10) -> dict[str, object]:
     """Find scholars by name; results are ranked by h-index.
 
@@ -272,6 +299,7 @@ def author_search(query: str, limit: int = 10) -> dict[str, object]:
 
 
 @mcp.tool()
+@_surface_errors
 def author_papers(
     author_id: str,
     limit: int = 20,
@@ -308,6 +336,7 @@ def author_papers(
 
 
 @mcp.tool()
+@_surface_errors
 @_append_doc(SearchParamsSchema.asset_markdown())
 def web_search(
     query: str,
@@ -356,6 +385,7 @@ def web_search(
 
 
 @mcp.tool()
+@_surface_errors
 @_append_doc(FetchParamsSchema.asset_markdown())
 def web_fetch(
     url: str,
