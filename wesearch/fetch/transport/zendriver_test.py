@@ -1020,7 +1020,7 @@ def test_devtools_port_falls_back_to_singleton_owner(tmp_path: Path) -> None:
     process = tmp_path / "proc" / "123"
     profile.mkdir()
     process.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("tron-123")
+    (profile / "SingletonLock").symlink_to("host-123")
     (process / "cmdline").write_bytes(
         b"/opt/google/chrome/chrome\0"
         + f"--user-data-dir={profile}\0".encode()
@@ -1043,7 +1043,7 @@ def test_devtools_port_reads_the_macos_profile_owner(
 ) -> None:
     profile = tmp_path / "profile"
     profile.mkdir()
-    (profile / "SingletonLock").symlink_to("tron-123")
+    (profile / "SingletonLock").symlink_to("host-123")
 
     def fake_run(
         args: list[str],
@@ -1085,7 +1085,7 @@ def test_devtools_port_rejects_different_profile_with_shared_prefix(
     process = tmp_path / "proc" / "123"
     profile.mkdir()
     process.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("tron-123")
+    (profile / "SingletonLock").symlink_to("host-123")
     (process / "cmdline").write_text(
         "/opt/google/chrome/chrome "
         f"--user-data-dir={profile}-other "
