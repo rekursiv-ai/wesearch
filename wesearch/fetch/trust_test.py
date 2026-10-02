@@ -20,6 +20,7 @@ import pytest
 
 from wesearch.fetch import fetch
 from wesearch.fetch.common import ValidatedHost
+from wesearch.fetch.transport import zendriver
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import CloudflareChallengeError
@@ -27,7 +28,6 @@ from wesearch.types.params import PolicyParams, RequestParams, Transport, Trust
 
 import wesearch.fetch.transport.curl
 import wesearch.fetch.transport.stdlib
-import wesearch.fetch.transport.zendriver
 
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ class TestBrowserUnderUntrusted:
 
         with (
             patch.object(
-                wesearch.fetch.transport.zendriver,
+                zendriver,
                 "fetch_zendriver",
                 browser,
             ),
