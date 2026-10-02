@@ -80,8 +80,14 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
-class BrowserUnavailableError(RuntimeError):
+class BrowserUnavailableError(OSError):
     """Chrome could not be launched or connected to on this host.
+
+    An ``OSError`` because it is one at the boundary: an unreachable browser is a
+    failed connection like any other. Every caller that already turns a transport's
+    ``OSError`` into its own error (a paper backend, a search backend) then does so
+    for a host with no Chrome too, instead of the escape that aborted a fused
+    paper search although Semantic Scholar had answered.
 
     A capability condition (Chrome absent, incompatible, or unable to bind its
     DevTools port), distinct from a fetch or parse failure: callers that need a

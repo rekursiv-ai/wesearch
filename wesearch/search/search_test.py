@@ -16,6 +16,7 @@ import bs4
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
+from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
@@ -110,6 +111,18 @@ class TestSearchDispatch:
         err = urllib.error.URLError(ConnectionResetError(104, "reset"))
         with (
             _patch_fetch(module="duckduckgo", side_effect=err),
+            pytest.raises(SearchError, match="duckduckgo"),
+        ):
+            search("cats", backend="duckduckgo")
+
+    def test_a_browser_that_cannot_launch_is_a_search_error(self) -> None:
+        # A bot-blocked request escalates to a browser; on a host with no Chrome
+        # that raised a bare RuntimeError past every caller's SearchError handler.
+        with (
+            _patch_fetch(
+                module="duckduckgo",
+                side_effect=BrowserUnavailableError("no Chrome"),
+            ),
             pytest.raises(SearchError, match="duckduckgo"),
         ):
             search("cats", backend="duckduckgo")

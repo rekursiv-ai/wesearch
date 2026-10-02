@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import (
@@ -126,6 +127,26 @@ class TestFusedSearch:
                 return_value=([_rec("s", "s2")], 1, True),
             ),
             patch.object(openalex, "fetch", return_value=(b"[]", object())),
+        ):
+            result = search("q")
+        assert [r.title for r in result.records] == ["s"]
+        assert not result.complete
+
+    def test_a_host_with_no_browser_still_gets_the_api_backends_result(self) -> None:
+        # OpenAlex escalates to a browser when it is bot-blocked. On a host with no
+        # Chrome that used to abort the whole search with a RuntimeError, although
+        # Semantic Scholar had answered.
+        with (
+            patch.object(
+                wesearch.paper.search,
+                "_s2_search",
+                return_value=([_rec("s", "s2")], 1, True),
+            ),
+            patch.object(
+                openalex,
+                "fetch",
+                side_effect=BrowserUnavailableError("no Chrome"),
+            ),
         ):
             result = search("q")
         assert [r.title for r in result.records] == ["s"]
