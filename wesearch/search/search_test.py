@@ -6,11 +6,11 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib import error
 
 import json
 import logging
 import os
-import urllib.error
 
 import bs4
 import pytest
@@ -108,7 +108,7 @@ class TestStripScripts:
 
 class TestSearchDispatch:
     def test_network_error_normalized(self) -> None:
-        err = urllib.error.URLError(ConnectionResetError(104, "reset"))
+        err = error.URLError(ConnectionResetError(104, "reset"))
         with (
             _patch_fetch(module="duckduckgo", side_effect=err),
             pytest.raises(SearchError, match="duckduckgo"),

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from http import client
 from unittest.mock import Mock, patch
 
 import base64
 import gzip
-import http.client
 import socket
 
 import pytest
@@ -34,7 +34,7 @@ class TestFetchStdlibPath:
         body: bytes = b"hello",
         headers: list[tuple[str, str]] | None = None,
     ) -> Mock:
-        resp = Mock(spec=http.client.HTTPResponse)
+        resp = Mock(spec=client.HTTPResponse)
         resp.status = status
         resp.read.return_value = body
         resp.getheaders.return_value = headers or [
@@ -281,7 +281,7 @@ class TestConnectionClosedOnError:
         return
 
     def _mock_conn(self, status: int, body: bytes = b"nope") -> Mock:
-        resp = Mock(spec=http.client.HTTPResponse)
+        resp = Mock(spec=client.HTTPResponse)
         resp.status = status
         resp.read.return_value = body
         resp.getheaders.return_value = [("content-encoding", "identity")]
@@ -310,11 +310,11 @@ class TestConnectionClosedOnError:
     def test_conn_closed_on_each_retried_attempt(self) -> None:
         # A retryable 500 that then succeeds opens a fresh conn per attempt;
         # the first attempt's conn must be closed before the retry, not leaked.
-        resp_500 = Mock(spec=http.client.HTTPResponse)
+        resp_500 = Mock(spec=client.HTTPResponse)
         resp_500.status = 500
         resp_500.read.return_value = b"ISE"
         resp_500.getheaders.return_value = [("content-encoding", "identity")]
-        resp_ok = Mock(spec=http.client.HTTPResponse)
+        resp_ok = Mock(spec=client.HTTPResponse)
         resp_ok.status = 200
         resp_ok.read.return_value = b"ok"
         resp_ok.getheaders.return_value = [("content-encoding", "identity")]
@@ -356,7 +356,7 @@ class TestFetchStdlibBackend:
         body: bytes = b"hello",
         headers: list[tuple[str, str]] | None = None,
     ) -> Mock:
-        resp = Mock(spec=http.client.HTTPResponse)
+        resp = Mock(spec=client.HTTPResponse)
         resp.status = status
         resp.read.return_value = body
         resp.getheaders.return_value = headers or [
@@ -872,14 +872,14 @@ class TestOpenConnection:
                 captured.append(host)
 
         with patch(
-            "wesearch.fetch.transport.stdlib.http.client.HTTPSConnection",
+            "wesearch.fetch.transport.stdlib.client.HTTPSConnection",
             _Stub,
         ):
             _open_connection("https", "example.com", timeout_sec=10)
         assert captured == ["example.com"]
 
     def test_explicit_stdlib_bypasses_curl(self) -> None:
-        response = Mock(spec=http.client.HTTPResponse)
+        response = Mock(spec=client.HTTPResponse)
         response.status = 200
         response.read.return_value = b"stdlib"
         response.getheaders.return_value = [("content-encoding", "identity")]

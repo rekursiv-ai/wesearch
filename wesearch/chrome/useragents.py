@@ -19,14 +19,13 @@ from __future__ import annotations
 from functools import cache
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
+from urllib import error, request
 
 import gzip
 import logging
 import random
 import stat
 import tempfile
-import urllib.error
-import urllib.request
 
 from wesearch.chrome.headers import (
     chrome_user_agent,
@@ -163,21 +162,23 @@ def _download_records() -> list[object]:
         "https://raw.githubusercontent.com/intoli/user-agents/"
         "main/src/user-agents.json.gz"
     )
-    request = urllib.request.Request(
+    dataset_request = request.Request(
         url,
         headers={"User-Agent": _refresh_user_agent("chrome_desktop")},
     )
     body = b""
     for attempt in range(3):
         try:
-            body = _read_response(request)
+            body = _read_response(dataset_request)
             break
-        except urllib.error.HTTPError as error:
-            if (error.code != 429 and error.code < 500) or error.code >= 600:
+        except error.HTTPError as http_error:
+            if (
+                http_error.code != 429 and http_error.code < 500
+            ) or http_error.code >= 600:
                 raise
             if attempt == 2:
                 raise
-        except (TimeoutError, urllib.error.URLError):
+        except (TimeoutError, error.URLError):
             if attempt == 2:
                 raise
     parsed = loads(gzip.decompress(body))
@@ -188,13 +189,13 @@ def _download_records() -> list[object]:
     return ListCodec.coerce(parsed, object)
 
 
-def _read_response(request: urllib.request.Request) -> bytes:
+def _read_response(dataset_request: request.Request) -> bytes:
     """Perform one HTTPS request and return the body."""
     # The stub declares urlopen's result as Any (`_UrlopenRet`); the cast names
     # the slice this function reads, and the unit test's BytesIO fits it too.
     response = cast(
         _ReadableBody,
-        urllib.request.urlopen(request, timeout=30),  # noqa: S310 -- fixed HTTPS dataset URL.
+        request.urlopen(dataset_request, timeout=30),  # noqa: S310 -- fixed HTTPS dataset URL.
     )
     with response:
         return response.read()

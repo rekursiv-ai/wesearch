@@ -42,7 +42,12 @@ except ImportError as e:  # pragma: no cover -- depends on the install's extras.
 
 from wesearch.fetch.custom_types import FetchParamsSchema
 from wesearch.lib.userdirs import cache_dir
-from wesearch.paper import authors, details, fetch
+from wesearch.paper import (
+    authors,
+    details,
+    fetch,
+    search as paper_search_module,
+)
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
 from wesearch.search.custom_types import SearchBackends, SearxngCategory
@@ -54,8 +59,6 @@ from wesearch.types.params import (
     Transport,
 )
 from wesearch.web import fetch_web
-
-import wesearch.paper.search
 
 
 mcp = MCPServer(
@@ -134,7 +137,7 @@ def paper_search(
     """
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
-    result = wesearch.paper.search.search(
+    result = paper_search_module.search(
         query,
         source=source,
         limit=limit,
