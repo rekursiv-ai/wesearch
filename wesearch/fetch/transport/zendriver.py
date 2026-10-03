@@ -54,8 +54,9 @@ if TYPE_CHECKING:
     from argparse import ArgumentParser
     from concurrent.futures import Future
 
+    from zendriver.core import connection
+
     import zendriver
-    import zendriver.core.connection
 
     from wesearch.types.params import Trust
 else:
@@ -65,6 +66,7 @@ else:
     # measured) and is paid only when a browser fetch actually runs, never at
     # ``wesearch`` import.
     zendriver = lazy_import("zendriver")
+    connection = lazy_import("zendriver.core.connection")
 
 
 __all__ = [
@@ -508,18 +510,18 @@ class _BrowserPool:
 # for inactivity rather than merged.
 def _tolerate_late_cdp_replies() -> None:
     """Make zendriver drop a CDP reply whose transaction already finished."""
-    # Reached through the module, not bound at import: ``zendriver`` here is a
+    # Reached through the module, not bound at import: ``connection`` here is a
     # ``lazy_import`` proxy, and a proxied CLASS answers ``__call__`` with its
     # own construction hook rather than the class attribute -- patching that
     # leaves the real ``Transaction`` untouched.
-    transaction = zendriver.core.connection.Transaction
+    transaction = connection.Transaction
     vendor = cast(Callable[..., None], transaction.__call__)
     # Keyed on the DEFINING module, so a second launch does not stack a second
     # wrapper: an armed class carries this module's function.
     if vendor.__module__ == __name__:
         return
 
-    def call(self: zendriver.core.connection.Transaction, **response: object) -> None:
+    def call(self: connection.Transaction, **response: object) -> None:
         if not self.done():
             vendor(self, **response)
 

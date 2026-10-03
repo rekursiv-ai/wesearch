@@ -20,14 +20,11 @@ import pytest
 
 from wesearch.fetch import fetch
 from wesearch.fetch.common import ValidatedHost
-from wesearch.fetch.transport import zendriver
+from wesearch.fetch.transport import curl, stdlib, zendriver
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import CloudflareChallengeError
 from wesearch.types.params import PolicyParams, RequestParams, Transport, Trust
-
-import wesearch.fetch.transport.curl
-import wesearch.fetch.transport.stdlib
 
 
 if TYPE_CHECKING:
@@ -252,31 +249,31 @@ class TestPinnedForkIsGone:
     """
 
     def test_no_pinned_curl_function(self) -> None:
-        assert not hasattr(wesearch.fetch.transport.curl, "_fetch_curl_pinned")
+        assert not hasattr(curl, "_fetch_curl_pinned")
 
     def test_no_simple_curl_function(self) -> None:
-        assert not hasattr(wesearch.fetch.transport.curl, "_fetch_curl_simple")
+        assert not hasattr(curl, "_fetch_curl_simple")
 
     def test_fetch_curl_takes_no_validated_hosts(self) -> None:
         assert (
             "validated_hosts"
             not in inspect.signature(
-                wesearch.fetch.transport.curl.fetch_curl,
+                curl.fetch_curl,
             ).parameters
         )
 
     def test_transports_keep_identical_signatures(self) -> None:
         # The dispatcher picks either backend by name, so a divergence here is
         # what let the pinned path quietly stop accepting a pooled session.
-        curl = set(
-            inspect.signature(wesearch.fetch.transport.curl.fetch_curl).parameters,
+        curl_params = set(
+            inspect.signature(curl.fetch_curl).parameters,
         )
-        stdlib = set(
+        stdlib_params = set(
             inspect.signature(
-                wesearch.fetch.transport.stdlib.fetch_stdlib,
+                stdlib.fetch_stdlib,
             ).parameters,
         )
-        assert curl == stdlib
+        assert curl_params == stdlib_params
 
 
 class TestBurnDropsEveryPinnedSession:
@@ -308,8 +305,8 @@ class TestBurnDropsEveryPinnedSession:
             ): _Session("pinned"),
             ("5.6.7.8", "example.com", "chrome", None, 443): _Session("other-egress"),
         }
-        with patch.object(wesearch.fetch.transport.curl, "_curl_sessions", pool):
-            wesearch.fetch.transport.curl.close_curl_session(
+        with patch.object(curl, "_curl_sessions", pool):
+            curl.close_curl_session(
                 "1.2.3.4",
                 "example.com",
                 "chrome",

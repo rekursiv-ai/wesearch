@@ -6,12 +6,12 @@ from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import patch
+from urllib import request
 from urllib.error import HTTPError, URLError
 
 import gzip
 import io
 import json
-import urllib.request
 
 import pytest
 
@@ -302,21 +302,21 @@ class TestDownload:
 
     def test_download_uses_stdlib_with_fixed_identity(self) -> None:
         with patch.object(
-            urllib.request,
+            request,
             "urlopen",
             return_value=io.BytesIO(self._PAYLOAD),
         ) as urlopen_mock:
             records = useragents._download_records()
 
         assert records == TestRefresh._DATASET
-        request = urlopen_mock.call_args.args[0]
-        assert isinstance(request, urllib.request.Request)
-        assert request.get_header("User-agent")
+        sent_request = urlopen_mock.call_args.args[0]
+        assert isinstance(sent_request, request.Request)
+        assert sent_request.get_header("User-agent")
         assert urlopen_mock.call_args.kwargs == {"timeout": 30}
 
     def test_download_retries_transient_url_error(self) -> None:
         with patch.object(
-            urllib.request,
+            request,
             "urlopen",
             side_effect=[URLError("temporary"), io.BytesIO(self._PAYLOAD)],
         ) as urlopen_mock:
@@ -334,7 +334,7 @@ class TestDownload:
             fp=None,
         )
         with patch.object(
-            urllib.request,
+            request,
             "urlopen",
             side_effect=[error, io.BytesIO(self._PAYLOAD)],
         ) as urlopen_mock:
@@ -355,7 +355,7 @@ class TestDownload:
             fp=None,
         )
         with (
-            patch.object(urllib.request, "urlopen", side_effect=error) as urlopen_mock,
+            patch.object(request, "urlopen", side_effect=error) as urlopen_mock,
             pytest.raises(HTTPError) as raised,
         ):
             useragents._download_records()
@@ -366,7 +366,7 @@ class TestDownload:
     def test_download_stops_after_three_transient_failures(self) -> None:
         with (
             patch.object(
-                urllib.request,
+                request,
                 "urlopen",
                 side_effect=URLError("temporary"),
             ) as urlopen_mock,
@@ -385,7 +385,7 @@ class TestDownload:
             fp=None,
         )
         with (
-            patch.object(urllib.request, "urlopen", side_effect=error) as urlopen_mock,
+            patch.object(request, "urlopen", side_effect=error) as urlopen_mock,
             pytest.raises(HTTPError),
         ):
             useragents._download_records()
@@ -395,7 +395,7 @@ class TestDownload:
     def test_download_rejects_non_array_json(self) -> None:
         payload = gzip.compress(json.dumps({"userAgent": "Chrome/149"}).encode())
         with (
-            patch.object(urllib.request, "urlopen", return_value=io.BytesIO(payload)),
+            patch.object(request, "urlopen", return_value=io.BytesIO(payload)),
             pytest.raises(RuntimeError, match="expected JSON array"),
         ):
             useragents._download_records()

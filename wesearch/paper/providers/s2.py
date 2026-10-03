@@ -29,13 +29,12 @@ from wesearch.fetch import (
     fetch,
 )
 from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON
+from wesearch.paper import paginate as paper_paginate
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
 from wesearch.paper.paginate import Cursor, Page
 from wesearch.ratelimit import cross_process_limiter
 from wesearch.types.errors import FetchError
-
-import wesearch.paper.paginate
 
 
 if TYPE_CHECKING:
@@ -312,7 +311,7 @@ def search_paginate(
         page_size_max=search_page_max,
         is_depth_ceiling=lambda e: e.status == 400,
     )
-    return wesearch.paper.paginate.paginate(
+    return paper_paginate.paginate(
         cursor,
         limit=limit,
         keep=lambda _e: True,
@@ -518,7 +517,7 @@ def _paginate(
         # only 400 a cursor walk can provoke -- so treat it as the depth ceiling.
         is_depth_ceiling=lambda e: e.status == 400,
     )
-    return wesearch.paper.paginate.paginate(cursor, limit=limit, keep=keep)
+    return paper_paginate.paginate(cursor, limit=limit, keep=keep)
 
 
 def _fetch_offset_page(

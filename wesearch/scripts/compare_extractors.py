@@ -49,11 +49,11 @@ import hashlib
 import re
 import time
 
+from lxml import html
 from trafilatura.baseline import html2txt
 from trafilatura.external import try_readability
 
 import html2text
-import lxml.html
 
 from wesearch.fetch import PolicyParams, RequestParams, Transport, fetch
 from wesearch.fetch.extractor.html2text import extract_html2text
@@ -396,10 +396,10 @@ def _html2text(html: str) -> str:
 
 # Uses trafilatura's vendored readability fork so the comparison needs no separate
 # install; it is the same algorithm behind Firefox Reader View.
-def _readability_markdown(html: str) -> str:
+def _readability_markdown(page_html: str) -> str:
     """Extract with readability, then convert -- the common two-step agent recipe."""
-    article = try_readability(lxml.html.fromstring(html))
-    return _html2text(lxml.html.tostring(article, encoding="unicode"))
+    article = try_readability(html.fromstring(page_html))
+    return _html2text(html.tostring(article, encoding="unicode"))
 
 
 # Markdown link targets are stripped first. Left in, a URL's words interleave with the

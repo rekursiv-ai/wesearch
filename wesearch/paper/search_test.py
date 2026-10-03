@@ -8,15 +8,13 @@ from unittest.mock import patch
 import pytest
 
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
+from wesearch.paper import search
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import (
     openalex,
     s2,
 )
-from wesearch.paper.search import search
-
-import wesearch.paper.search
 
 
 if TYPE_CHECKING:
@@ -34,7 +32,7 @@ class TestSearchDispatch:
             "search",
             return_value=([_rec("a", "openalex")], 1, True),
         ):
-            result = search("q", source="openalex")
+            result = search.search("q", source="openalex")
         assert [r.title for r in result.records] == ["a"]
         assert result.total == 1
         assert result.complete
@@ -48,17 +46,17 @@ class TestSearchDispatch:
             "search",
             return_value=([_rec("a", "openalex")], 500, False),
         ):
-            result = search("q", source="openalex", limit=1)
+            result = search.search("q", source="openalex", limit=1)
         assert not result.complete
 
     def test_transport_forwarded_to_provider(self) -> None:
         with patch.object(openalex, "search", return_value=([], 0, True)) as provider:
-            search("q", source="openalex", transport="stdlib")
+            search.search("q", source="openalex", transport="stdlib")
         assert provider.call_args.kwargs["transport"] == "stdlib"
 
     def test_unknown_source_raises(self) -> None:
         with pytest.raises(PaperError, match="Unknown search source"):
-            search("q", source="bogus")  # ty: ignore[invalid-argument-type] -- The test passes an invalid source to exercise error handling.  # pyright: ignore[reportArgumentType] -- The test passes an invalid source to exercise error handling.
+            search.search("q", source="bogus")  # ty: ignore[invalid-argument-type] -- The test passes an invalid source to exercise error handling.  # pyright: ignore[reportArgumentType] -- The test passes an invalid source to exercise error handling.
 
 
 class TestFusedSearch:
@@ -75,7 +73,7 @@ class TestFusedSearch:
                 return_value=([_rec("o", "openalex")], 1, True),
             ),
         ):
-            result = search("q")  # Fused default.
+            result = search.search("q")  # Fused default.
         assert {r.title for r in result.records} == {"s", "o"}
         assert result.total == 2
         assert result.complete
@@ -85,7 +83,7 @@ class TestFusedSearch:
         # total must not be less than what's returned (max(1,1,2) == 2).
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 return_value=([_rec("s", "s2")], 1, True),
             ),
@@ -95,14 +93,14 @@ class TestFusedSearch:
                 return_value=([_rec("o", "openalex")], 1, True),
             ),
         ):
-            result = search("q")
+            result = search.search("q")
         assert len(result.records) == 2
         assert result.total >= len(result.records)
 
     def test_one_backend_error_is_partial_not_fatal(self) -> None:
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 side_effect=PaperError("s2 down"),
             ),
@@ -112,7 +110,7 @@ class TestFusedSearch:
                 return_value=([_rec("o", "openalex")], 3, True),
             ),
         ):
-            result = search("q")
+            result = search.search("q")
         assert [r.title for r in result.records] == ["o"]
         assert not result.complete  # Partial -> caller may decline to cache.
 
@@ -122,13 +120,13 @@ class TestFusedSearch:
         # escaping the provider aborted the entire search.
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 return_value=([_rec("s", "s2")], 1, True),
             ),
             patch.object(openalex, "fetch", return_value=(b"[]", object())),
         ):
-            result = search("q")
+            result = search.search("q")
         assert [r.title for r in result.records] == ["s"]
         assert not result.complete
 
@@ -138,7 +136,7 @@ class TestFusedSearch:
         # Semantic Scholar had answered.
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 return_value=([_rec("s", "s2")], 1, True),
             ),
@@ -148,21 +146,21 @@ class TestFusedSearch:
                 side_effect=BrowserUnavailableError("no Chrome"),
             ),
         ):
-            result = search("q")
+            result = search.search("q")
         assert [r.title for r in result.records] == ["s"]
         assert not result.complete
 
     def test_total_failure_raises(self) -> None:
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 side_effect=PaperError("s2 down"),
             ),
             patch.object(openalex, "search", side_effect=PaperError("oa down")),
             pytest.raises(PaperError),
         ):
-            search("q")
+            search.search("q")
 
     def test_fused_records_honor_limit(self) -> None:
         # Each backend returns up to ``limit`` rows, so a fused set of disjoint
@@ -173,13 +171,13 @@ class TestFusedSearch:
         oa_hits = [_rec(f"o{i}", "openalex") for i in range(5)]
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 return_value=(s2_hits, 100, False),
             ),
             patch.object(openalex, "search", return_value=(oa_hits, 100, False)),
         ):
-            result = search("q", limit=5)
+            result = search.search("q", limit=5)
         assert len(result.records) == 5
         # Five fused records were dropped by the trim, so the caller has not
         # seen everything the backends returned, let alone everything matching.
@@ -193,13 +191,13 @@ class TestFusedSearch:
         oa_hits = [_rec("oa_solo", "openalex"), _rec("shared", "openalex")]
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 return_value=(s2_hits, 9, False),
             ),
             patch.object(openalex, "search", return_value=(oa_hits, 9, False)),
         ):
-            result = search("q", limit=1)
+            result = search.search("q", limit=1)
         assert [r.title for r in result.records] == ["shared"]
 
     def test_fused_total_not_below_trimmed_records(self) -> None:
@@ -207,7 +205,7 @@ class TestFusedSearch:
         # returned, so trimming must not drag it below the honest backend total.
         with (
             patch.object(
-                wesearch.paper.search,
+                search,
                 "_s2_search",
                 return_value=([_rec("s", "s2")], 7, False),
             ),
@@ -217,7 +215,7 @@ class TestFusedSearch:
                 return_value=([_rec("o", "openalex")], 3, False),
             ),
         ):
-            result = search("q", limit=1)
+            result = search.search("q", limit=1)
         assert result.total == 7
 
 
@@ -237,7 +235,7 @@ class TestS2SearchParams:
             return {"total": 0, "data": []}
 
         with patch.object(s2, "get", side_effect=fake_get):
-            search(
+            search.search(
                 "q",
                 source="s2",
                 limit=7,
@@ -264,7 +262,7 @@ class TestS2SearchParams:
             return {"total": 0, "data": []}
 
         with patch.object(s2, "get", side_effect=fake_get):
-            search("q", source="s2", year_from=2020)
+            search.search("q", source="s2", year_from=2020)
         assert captured["year"] == "2020-"
 
     def test_limit_clamped_to_search_ceiling(self) -> None:
@@ -286,7 +284,7 @@ class TestS2SearchParams:
             return {"total": 0, "data": []}
 
         with patch.object(s2, "get", side_effect=fake_get):
-            search("q", source="s2", limit=200)
+            search.search("q", source="s2", limit=200)
         assert seen  # A limit was sent.
         assert all(lim <= 100 for lim in seen)
 
@@ -309,7 +307,7 @@ class TestS2SearchParams:
             return body
 
         with patch.object(s2, "get", side_effect=fake_get):
-            result = search("q", source="s2", limit=200)
+            result = search.search("q", source="s2", limit=200)
         assert len(result.records) == 200
         assert result.total == 250
 

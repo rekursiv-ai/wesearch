@@ -13,10 +13,10 @@ that category's record.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, overload
+from urllib import error
 
 import json
 import logging
-import urllib.error
 
 from wesearch.fetch import Transport
 from wesearch.search.custom_types import (
@@ -274,7 +274,7 @@ def search(
         FetchError,
         OSError,
         TimeoutError,
-        urllib.error.URLError,
+        error.URLError,
         json.JSONDecodeError,
     ) as e:
         raise SearchError(f"{backend} search failed: {e}") from e

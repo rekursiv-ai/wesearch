@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from http import client
 from typing import TYPE_CHECKING, override
 from urllib.parse import urlparse
 
-import http.client
 import ssl
 
 from wesearch.fetch.challenge import classify_http_error
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 __all__ = ["fetch_stdlib"]
 
-HTTPConn = http.client.HTTPConnection | http.client.HTTPSConnection
+HTTPConn = client.HTTPConnection | client.HTTPSConnection
 
 
 def fetch_stdlib(
@@ -199,7 +199,7 @@ def fetch_stdlib(
         raw_conn.close()
 
 
-class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
+class _ValidatedHTTPSConnection(client.HTTPSConnection):
     def __init__(
         self,
         host: str,
@@ -215,7 +215,7 @@ class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
 
     @override
     def connect(self) -> None:
-        http.client.HTTPConnection.connect(self)
+        client.HTTPConnection.connect(self)
         if self.sock is None:
             raise ValueError("Expected self.sock is not None.")
         self.sock = self._ssl_context.wrap_socket(
@@ -253,13 +253,13 @@ def _open_connection(
                 timeout=handshake_sec,
                 context=ctx,
             )
-        return http.client.HTTPSConnection(
+        return client.HTTPSConnection(
             connect_host,
             port=port,
             timeout=handshake_sec,
             context=ctx,
         )
-    return http.client.HTTPConnection(connect_host, port=port, timeout=handshake_sec)
+    return client.HTTPConnection(connect_host, port=port, timeout=handshake_sec)
 
 
 # The connection was built with the narrower CONNECT budget, which would otherwise also

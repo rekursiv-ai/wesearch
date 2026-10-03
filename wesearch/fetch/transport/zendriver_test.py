@@ -25,22 +25,19 @@ import tempfile
 import threading
 import time
 
+from zendriver import Browser, Config, Tab
+from zendriver.cdp import fetch, network, page
 from zendriver.core.connection import Transaction
 
 import pytest
-import zendriver
-import zendriver.cdp.fetch
-import zendriver.cdp.network
-import zendriver.cdp.page
 
+from wesearch.fetch.transport import zendriver
 from wesearch.fetch.transport.zendriver import (
     BrowserResult,
     _BrowserPool,
     _navigate,
 )
 from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
-
-import wesearch.fetch.transport.zendriver
 
 
 if TYPE_CHECKING:
@@ -100,25 +97,25 @@ class _FakeCookieJar:
 # the fake and be rejected in production -- the exact direction a test must never fail
 # in. Only the two fields the transport reads carry meaning; the rest are the shape the
 # class requires.
-def _main_frame_navigated() -> zendriver.cdp.page.FrameNavigated:
+def _main_frame_navigated() -> page.FrameNavigated:
     """Return a real ``FrameNavigated`` for the MAIN frame (``parent_id is None``)."""
-    frame = zendriver.cdp.page.Frame(
-        id_=zendriver.cdp.page.FrameId("main"),
-        loader_id=zendriver.cdp.network.LoaderId("loader"),
+    frame = page.Frame(
+        id_=page.FrameId("main"),
+        loader_id=network.LoaderId("loader"),
         url="https://walled.example/",
         domain_and_registry="walled.example",
         security_origin="https://walled.example",
         mime_type="text/html",
-        secure_context_type=zendriver.cdp.page.SecureContextType.SECURE,
+        secure_context_type=page.SecureContextType.SECURE,
         cross_origin_isolated_context_type=(
-            zendriver.cdp.page.CrossOriginIsolatedContextType.NOT_ISOLATED
+            page.CrossOriginIsolatedContextType.NOT_ISOLATED
         ),
         gated_api_features=[],
         parent_id=None,
     )
-    return zendriver.cdp.page.FrameNavigated(
+    return page.FrameNavigated(
         frame=frame,
-        type_=zendriver.cdp.page.NavigationType.NAVIGATION,
+        type_=page.NavigationType.NAVIGATION,
     )
 
 
@@ -174,7 +171,7 @@ class _FakeTab:
         # Routed by event type, mirroring zendriver's own dispatch: the
         # navigation watcher and the per-request guard must not receive each
         # other's events, which a single handler list cannot express.
-        if event_type is zendriver.cdp.fetch.RequestPaused:
+        if event_type is fetch.RequestPaused:
             self.paused_handlers.append(handler)
             return
         self.handlers.append(handler)
@@ -341,7 +338,7 @@ class _StubPool:
 
 def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> _StubPool:
     pool = _StubPool(browser)
-    monkeypatch.setattr(wesearch.fetch.transport.zendriver, "_pool", lambda: pool)
+    monkeypatch.setattr(zendriver, "_pool", lambda: pool)
     return pool
 
 
@@ -358,14 +355,14 @@ def test_launch_browser_caps_dead_browser_connect_budget(
     # surfacing as a fast skip.
     captured: dict[str, float] = {}
 
-    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+    async def fake_start(config: Config) -> _FakeBrowser:
         captured["timeout"] = config.browser_connection_timeout
         captured["max_tries"] = config.browser_connection_max_tries
         return _FakeBrowser()
 
-    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr("zendriver.start", fake_start)
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(
+        zendriver._launch_browser(
             tmp_path,
             headless=True,
         ),
@@ -383,13 +380,13 @@ def test_launch_browser_uses_vanilla_zendriver_config(
     browser = _FakeBrowser()
     browser_args: list[str] = []
 
-    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+    async def fake_start(config: Config) -> _FakeBrowser:
         browser_args.extend(config())
         return browser
 
-    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr("zendriver.start", fake_start)
     result = asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(
+        zendriver._launch_browser(
             tmp_path,
             headless=True,
         ),
@@ -420,19 +417,19 @@ def test_launch_browser_uses_the_browser_that_claims_no_url_scheme(
     """
     captured: dict[str, object] = {}
 
-    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+    async def fake_start(config: Config) -> _FakeBrowser:
         captured["executable"] = config.browser_executable_path
         captured["args"] = config()
         return _FakeBrowser()
 
-    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr("zendriver.start", fake_start)
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_fetch_browser",
         lambda: "/cache/ChromeForTesting",
     )
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(
+        zendriver._launch_browser(
             tmp_path,
             headless=headless,
         ),
@@ -458,25 +455,25 @@ def test_launch_browser_falls_back_when_no_reidentified_chrome(
     """
     captured: dict[str, object] = {}
 
-    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+    async def fake_start(config: Config) -> _FakeBrowser:
         captured["executable"] = config.browser_executable_path
         captured["args"] = config()
         return _FakeBrowser()
 
-    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr("zendriver.start", fake_start)
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_fetch_browser",
         lambda: "",
     )
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(
+        zendriver._launch_browser(
             tmp_path,
             headless=True,
         ),
     )
 
-    assert captured["executable"] == zendriver.Config().browser_executable_path
+    assert captured["executable"] == Config().browser_executable_path
     # Stock Chrome already holds its Keychain entry, so mocking it here would
     # cut the operator's own browser off from cookies it legitimately has.
     assert "--use-mock-keychain" not in cast(list[str], captured["args"])
@@ -501,13 +498,13 @@ def test_the_pool_leaves_zendriver_spawn_alone(
     util = importlib.import_module("zendriver.core.util")
     vendor = cast(Callable[..., object], util._start_process)
 
-    async def fake_start(config: zendriver.Config) -> _FakeBrowser:
+    async def fake_start(config: Config) -> _FakeBrowser:
         del config
         return _FakeBrowser()
 
-    monkeypatch.setattr(zendriver, "start", fake_start)
+    monkeypatch.setattr("zendriver.start", fake_start)
     asyncio.run(
-        wesearch.fetch.transport.zendriver._launch_browser(
+        zendriver._launch_browser(
             tmp_path,
             headless=True,
         ),
@@ -536,19 +533,19 @@ def test_creating_the_pool_registers_process_exit_teardown(
 
     monkeypatch.setattr(atexit, "register", registered.append)
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_pool_singleton",
         None,
     )
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_BrowserPool",
         stub_pool,
     )
 
-    wesearch.fetch.transport.zendriver._pool()
+    zendriver._pool()
 
-    assert wesearch.fetch.transport.zendriver.shutdown_browsers in registered
+    assert zendriver.shutdown_browsers in registered
 
 
 def test_the_pool_never_stops_a_browser_a_caller_still_holds(
@@ -570,12 +567,12 @@ def test_the_pool_never_stops_a_browser_a_caller_still_holds(
     """
     launched: list[_FakeBrowser] = []
 
-    async def launch(profile_dir: Path, *, headless: bool) -> zendriver.Browser:
+    async def launch(profile_dir: Path, *, headless: bool) -> Browser:
         del profile_dir, headless
         launched.append(_FakeBrowser())
-        return cast(zendriver.Browser, launched[-1])
+        return cast(Browser, launched[-1])
 
-    pool = wesearch.fetch.transport.zendriver._BrowserPool(serve_control=False)
+    pool = zendriver._BrowserPool(serve_control=False)
     try:
         monkeypatch.setattr(pool, "_launch", launch)
         held = pool.run(pool.browser("ip", _PROFILE / "0", headless=True))
@@ -608,11 +605,11 @@ def test_open_instance_uses_blank_tab_before_requested_url(
         return browser
 
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_launch_browser",
         fake_launch,
     )
-    asyncio.run(wesearch.fetch.transport.zendriver._open_instance(url, _PROFILE))
+    asyncio.run(zendriver._open_instance(url, _PROFILE))
 
     assert browser.gets == ["about:blank"]
     assert browser.last_tab is not None
@@ -661,8 +658,8 @@ def test_a_wedged_browser_stop_gives_up_at_its_budget() -> None:
 
     async def go() -> float:
         started = time.monotonic()
-        await wesearch.fetch.transport.zendriver._stopped(
-            cast(zendriver.Browser, browser),
+        await zendriver._stopped(
+            cast(Browser, browser),
             budget_sec=0.01,
         )
         return time.monotonic() - started
@@ -694,20 +691,20 @@ def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
         return browser
 
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_launch_browser",
         fake_launch,
     )
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_stopped",
-        partial(wesearch.fetch.transport.zendriver._stopped, budget_sec=0.01),
+        partial(zendriver._stopped, budget_sec=0.01),
     )
 
     async def go() -> float:
         started = time.monotonic()
         with pytest.raises(RuntimeError, match="navigation refused"):
-            await wesearch.fetch.transport.zendriver._open_instance(
+            await zendriver._open_instance(
                 "https://gated.example/page",
                 _PROFILE,
             )
@@ -754,14 +751,14 @@ def test_a_failing_browser_stop_does_not_replace_the_error_it_cleans_up_after(
         return browser
 
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_launch_browser",
         fake_launch,
     )
 
     with pytest.raises(RuntimeError, match="navigation refused"):
         asyncio.run(
-            wesearch.fetch.transport.zendriver._open_instance(
+            zendriver._open_instance(
                 "https://gated.example/page",
                 _PROFILE,
             ),
@@ -781,8 +778,8 @@ def test_a_wedged_browser_stop_kills_the_process() -> None:
     browser._process = process
 
     asyncio.run(
-        wesearch.fetch.transport.zendriver._stopped(
-            cast(zendriver.Browser, browser),
+        zendriver._stopped(
+            cast(Browser, browser),
             budget_sec=0.01,
         ),
     )
@@ -797,8 +794,8 @@ def test_a_failing_browser_stop_kills_the_process() -> None:
     browser._process = process
 
     asyncio.run(
-        wesearch.fetch.transport.zendriver._stopped(
-            cast(zendriver.Browser, browser),
+        zendriver._stopped(
+            cast(Browser, browser),
             budget_sec=1.0,
         ),
     )
@@ -812,8 +809,8 @@ def test_killing_a_browser_that_was_never_launched_is_a_no_op() -> None:
     It runs with the caller's real error in flight, so anything raised here
     would replace it.
     """
-    wesearch.fetch.transport.zendriver._kill_browser_process(
-        cast(zendriver.Browser, _FakeBrowser()),
+    zendriver._kill_browser_process(
+        cast(Browser, _FakeBrowser()),
     )
 
 
@@ -911,8 +908,8 @@ def test_an_abandoned_tab_close_is_reaped_before_the_helper_returns() -> None:
 
     async def go() -> tuple[int, bool]:
         before = asyncio.all_tasks()
-        await wesearch.fetch.transport.zendriver._closed(
-            cast(zendriver.Tab, tab),
+        await zendriver._closed(
+            cast(Tab, tab),
             budget_sec=0.01,
         )
         leaked = [task for task in asyncio.all_tasks() - before if not task.done()]
@@ -944,18 +941,18 @@ def test_open_instance_releases_profile_then_clears_domain_cooldown(
         return 1
 
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_request_pool_release",
         release,
     )
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "clear_domain_cooldowns",
         clear,
     )
-    monkeypatch.setattr(wesearch.fetch.transport.zendriver, "_pool", FakePool)
+    monkeypatch.setattr(zendriver, "_pool", FakePool)
 
-    wesearch.fetch.transport.zendriver.open_instance(
+    zendriver.open_instance(
         "https://gated.example/page",
         profile_dir=_PROFILE,
     )
@@ -967,16 +964,16 @@ def test_pool_control_releases_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     releases: list[bool] = []
     checked: list[Path] = []
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_close_orphan_browser",
         checked.append,
     )
-    server = wesearch.fetch.transport.zendriver._PoolControlServer(
+    server = zendriver._PoolControlServer(
         _PROFILE,
         lambda: releases.append(True),
     )
     try:
-        wesearch.fetch.transport.zendriver._request_pool_release(_PROFILE)
+        zendriver._request_pool_release(_PROFILE)
     finally:
         server.close()
     assert releases == [True]
@@ -984,11 +981,11 @@ def test_pool_control_releases_profile(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_control_address_uses_platform_socket_namespace() -> None:
-    linux_address = wesearch.fetch.transport.zendriver._control_address(
+    linux_address = zendriver._control_address(
         _PROFILE,
         platform="linux",
     )
-    darwin_address = wesearch.fetch.transport.zendriver._control_address(
+    darwin_address = zendriver._control_address(
         _PROFILE,
         platform="darwin",
     )
@@ -1005,12 +1002,12 @@ def test_pool_release_closes_orphan_when_control_is_unreachable(
 ) -> None:
     closed: list[Path] = []
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_close_orphan_browser",
         closed.append,
     )
 
-    wesearch.fetch.transport.zendriver._request_pool_release(tmp_path)
+    zendriver._request_pool_release(tmp_path)
 
     assert closed == [tmp_path]
 
@@ -1029,7 +1026,7 @@ def test_devtools_port_falls_back_to_singleton_owner(tmp_path: Path) -> None:
     )
 
     assert (
-        wesearch.fetch.transport.zendriver._devtools_port(
+        zendriver._devtools_port(
             profile,
             proc_root=tmp_path / "proc",
         )
@@ -1069,7 +1066,7 @@ def test_devtools_port_reads_the_macos_profile_owner(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert (
-        wesearch.fetch.transport.zendriver._devtools_port(
+        zendriver._devtools_port(
             profile,
             proc_root=tmp_path / "proc",
             platform="darwin",
@@ -1093,7 +1090,7 @@ def test_devtools_port_rejects_different_profile_with_shared_prefix(
     )
 
     assert (
-        wesearch.fetch.transport.zendriver._devtools_port(
+        zendriver._devtools_port(
             profile,
             proc_root=tmp_path / "proc",
         )
@@ -1109,7 +1106,7 @@ def test_devtools_port_rejects_stale_marker_without_profile_owner(
     (profile / "DevToolsActivePort").write_text("4567\n/devtools/browser/id\n")
 
     assert (
-        wesearch.fetch.transport.zendriver._devtools_port(
+        zendriver._devtools_port(
             profile,
             proc_root=tmp_path / "proc",
         )
@@ -1339,20 +1336,20 @@ def _request_paused(
     headers: dict[str, str] | None = None,
     *,
     request_id: str = "req-1",
-) -> zendriver.cdp.fetch.RequestPaused:
+) -> fetch.RequestPaused:
     """Return a real ``RequestPaused`` for a main-frame document request."""
-    request = zendriver.cdp.network.Request(
+    request = network.Request(
         url=url,
         method="GET",
-        headers=zendriver.cdp.network.Headers(headers or {}),
-        initial_priority=zendriver.cdp.network.ResourcePriority.HIGH,
+        headers=network.Headers(headers or {}),
+        initial_priority=network.ResourcePriority.HIGH,
         referrer_policy="no-referrer",
     )
-    return zendriver.cdp.fetch.RequestPaused(
-        request_id=zendriver.cdp.fetch.RequestId(request_id),
+    return fetch.RequestPaused(
+        request_id=fetch.RequestId(request_id),
         request=request,
-        frame_id=zendriver.cdp.page.FrameId("main"),
-        resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
+        frame_id=page.FrameId("main"),
+        resource_type=network.ResourceType.DOCUMENT,
         response_error_reason=None,
         response_status_code=None,
         response_status_text=None,
@@ -1380,7 +1377,7 @@ class TestBrowserHonorsTrustPerHop:
         assert (
             "trust"
             in inspect.signature(
-                wesearch.fetch.transport.zendriver.fetch_zendriver,
+                zendriver.fetch_zendriver,
             ).parameters
         )
 
@@ -1836,7 +1833,7 @@ def test_navigate_seeds_request_identity(
     )
     assert len(browser.cookies.seeded) == 1
     seeded = browser.cookies.seeded[0]
-    assert isinstance(seeded, zendriver.cdp.network.CookieParam)
+    assert isinstance(seeded, network.CookieParam)
     assert seeded.name == "CONSENT"
     assert seeded.value == "YES+"
     assert browser.last_tab is not None
@@ -1862,7 +1859,7 @@ def test_navigate_timeout_includes_browser_acquisition(
 
     slow_pool = _SlowPool()
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_pool",
         lambda: slow_pool,
     )
@@ -1933,9 +1930,9 @@ def test_navigate_reports_its_own_timeout_when_teardown_also_wedges(
     browser = _WedgedBrowser()
     _patch_pool(monkeypatch, browser)
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "_closed",
-        partial(wesearch.fetch.transport.zendriver._closed, budget_sec=0.01),
+        partial(zendriver._closed, budget_sec=0.01),
     )
 
     async def go() -> float:
@@ -2292,8 +2289,8 @@ def test_settled_content_returns_promptly_when_the_wall_clears_off_loop(
         thread = threading.Thread(target=clear_from_another_thread)
         thread.start()
         try:
-            body = await wesearch.fetch.transport.zendriver._settled_content(
-                cast(zendriver.Tab, _ClearsOffLoopTab()),
+            body = await zendriver._settled_content(
+                cast(Tab, _ClearsOffLoopTab()),
                 budget_sec=1.0,
             )
             assert body == "<html>ok</html>"
@@ -2337,8 +2334,8 @@ def test_settled_content_bounds_a_stalled_document_parse() -> None:
 
     async def go() -> float:
         started = time.monotonic()
-        body = await wesearch.fetch.transport.zendriver._settled_content(
-            cast(zendriver.Tab, _StalledParseTab()),
+        body = await zendriver._settled_content(
+            cast(Tab, _StalledParseTab()),
             budget_sec=0.01,
         )
         assert body == wall
@@ -2606,8 +2603,8 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
             return BrowserResult(body=b"", cookies={}, final_url="")
 
     pool = _RecordingPool()
-    monkeypatch.setattr(wesearch.fetch.transport.zendriver, "_pool", lambda: pool)
-    wesearch.fetch.transport.zendriver.fetch_zendriver(
+    monkeypatch.setattr(zendriver, "_pool", lambda: pool)
+    zendriver.fetch_zendriver(
         "https://example.com/",
         profile_dir=_PROFILE,
         egress="e",
@@ -2617,9 +2614,7 @@ def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
     assert waits == [pytest.approx(60.0)]
     close_budget = cast(
         object,
-        inspect.signature(wesearch.fetch.transport.zendriver._closed)
-        .parameters["budget_sec"]
-        .default,
+        inspect.signature(zendriver._closed).parameters["budget_sec"].default,
     )
     assert isinstance(close_budget, float)
     assert 0 < close_budget < waits[0] - 30.0
@@ -2647,12 +2642,12 @@ def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) 
 
     async def go() -> None:
         with pytest.MonkeyPatch.context() as patcher:
-            patcher.setattr(zendriver, "start", fake_start)
+            patcher.setattr("zendriver.start", fake_start)
             # Restored to the VENDOR's own ``__call__``, undoing any arming an
             # earlier test in this process did: the guard is installed
             # class-wide, so without this the assertions below pass vacuously.
             patcher.setattr(Transaction, "__call__", _VENDOR_TRANSACTION_CALL)
-            await wesearch.fetch.transport.zendriver._launch_browser(
+            await zendriver._launch_browser(
                 tmp_path,
                 headless=True,
             )
@@ -2661,16 +2656,16 @@ def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) 
             # the vendor reads only ``error`` and ``result``, and its
             # ``**response: dict[str, object]`` annotation rejects the integer
             # ``id`` a real reply also carries.
-            cancelled = Transaction(zendriver.cdp.page.navigate("about:blank"))
+            cancelled = Transaction(page.navigate("about:blank"))
             cancelled.cancel()
             cancelled(result={"frameId": "F", "loaderId": "L"})
             assert cancelled.cancelled()
 
             # The guard must drop only what is already settled: a reply to a
             # LIVE transaction still has to reach the caller awaiting it.
-            live = Transaction(zendriver.cdp.page.navigate("about:blank"))
+            live = Transaction(page.navigate("about:blank"))
             live(result={"frameId": "F", "loaderId": "L"})
-            assert (live.result())[0] == (zendriver.cdp.page.FrameId("F"))
+            assert (live.result())[0] == (page.FrameId("F"))
 
     asyncio.run(go())
 
@@ -2698,7 +2693,7 @@ def test_pool_shutdown_bounds_teardown_across_all_browsers() -> None:
         browser._process = processes[index]
         pool._browsers[("egress", f"/profile/{index}")] = (
             True,
-            cast(zendriver.Browser, browser),
+            cast(Browser, browser),
         )
 
     pool.shutdown(budget_sec=0.01)
@@ -2765,7 +2760,7 @@ def roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
     playwright = tmp_path / "cache" / "ms-playwright"
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
-        wesearch.fetch.transport.zendriver,
+        zendriver,
         "cache_dir",
         lambda: tmp_path / "cache",
     )
@@ -2779,16 +2774,16 @@ def test_non_macos_hosts_need_no_separate_browser() -> None:
     rather than a running process, and a headless server has only the stock
     Chrome installed anyway.
     """
-    assert wesearch.fetch.transport.zendriver._fetch_browser(platform="linux") == ""
-    assert wesearch.fetch.transport.zendriver._fetch_browser(platform="win32") == ""
+    assert zendriver._fetch_browser(platform="linux") == ""
+    assert zendriver._fetch_browser(platform="win32") == ""
 
 
 def test_non_macos_hosts_launch_with_no_extra_flags() -> None:
     # Chrome on a headless server has no keychain to mock, so a flag leaking
     # onto that path would break the only browser it has.
     assert (
-        wesearch.fetch.transport.zendriver._fetch_browser_args(
-            wesearch.fetch.transport.zendriver._fetch_browser(platform="linux"),
+        zendriver._fetch_browser_args(
+            zendriver._fetch_browser(platform="linux"),
         )
         == []
     )
@@ -2799,13 +2794,13 @@ def test_no_install_falls_back_to_zendriver(roots: tuple[Path, Path]) -> None:
     # find Chrome".
     del roots
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(platform="darwin") == ""
+    assert zendriver._fetch_browser(platform="darwin") == ""
 
 
 def test_a_puppeteer_install_is_found(roots: tuple[Path, Path]) -> None:
     expected = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(
+    assert zendriver._fetch_browser(
         platform="darwin",
     ) == str(expected)
 
@@ -2813,7 +2808,7 @@ def test_a_puppeteer_install_is_found(roots: tuple[Path, Path]) -> None:
 def test_a_playwright_install_is_found(roots: tuple[Path, Path]) -> None:
     expected = _fetch_browser_install(roots[1], "chromium-1217")
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(
+    assert zendriver._fetch_browser(
         platform="darwin",
     ) == str(expected)
 
@@ -2824,7 +2819,7 @@ def test_the_newest_build_wins(roots: tuple[Path, Path]) -> None:
     _ = _fetch_browser_install(roots[0], "mac_arm-131.0.6778.85")
     newest = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(
+    assert zendriver._fetch_browser(
         platform="darwin",
     ) == str(newest)
 
@@ -2846,7 +2841,7 @@ def test_build_order_is_numeric_not_lexical(
     _ = _fetch_browser_install(roots[0], older)
     expected = _fetch_browser_install(roots[0], newer)
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(
+    assert zendriver._fetch_browser(
         platform="darwin",
     ) == str(expected)
 
@@ -2859,7 +2854,7 @@ def test_unversioned_build_directories_still_order_deterministically() -> None:
 
     ranked = sorted(
         unversioned,
-        key=wesearch.fetch.transport.zendriver._build_order,
+        key=zendriver._build_order,
         reverse=True,
     )
 
@@ -2872,7 +2867,7 @@ def test_a_directory_without_the_binary_is_skipped(roots: tuple[Path, Path]) -> 
     (roots[1] / "ffmpeg-1011").mkdir(parents=True)
     expected = _fetch_browser_install(roots[1], "chromium-1217")
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(
+    assert zendriver._fetch_browser(
         platform="darwin",
     ) == str(expected)
 
@@ -2886,7 +2881,7 @@ def test_an_intel_download_is_found(roots: tuple[Path, Path]) -> None:
         arch="chrome-mac-x64",
     )
 
-    assert wesearch.fetch.transport.zendriver._fetch_browser(
+    assert zendriver._fetch_browser(
         platform="darwin",
     ) == str(expected)
 
@@ -2897,7 +2892,7 @@ def test_chrome_for_testing_gets_the_mock_keychain_flag() -> None:
     Chrome ignores an unknown flag rather than rejecting it, so a misspelling
     restores the keychain prompt and the launch blocks behind it.
     """
-    assert wesearch.fetch.transport.zendriver._fetch_browser_args(
+    assert zendriver._fetch_browser_args(
         "/cache/ChromeForTesting",
     ) == ["--use-mock-keychain"]
 
@@ -2905,7 +2900,7 @@ def test_chrome_for_testing_gets_the_mock_keychain_flag() -> None:
 def test_stock_chrome_keeps_its_own_keychain() -> None:
     # It owns a real keychain entry, and mocking that cuts it off from cookies
     # it legitimately has.
-    assert wesearch.fetch.transport.zendriver._fetch_browser_args("") == []
+    assert zendriver._fetch_browser_args("") == []
 
 
 def test_no_prose_cites_a_line_number_in_this_package() -> None:

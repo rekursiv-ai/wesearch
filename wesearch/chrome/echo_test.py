@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from contextlib import closing
 from functools import partial
+from http import client
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-import http.client
 import socket
 import ssl
 import struct
@@ -124,7 +124,7 @@ class TestEchoOracle:
     def test_captures_ordered_headers_of_a_live_request(self) -> None:
         with EchoOracle() as oracle:
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
-            conn = http.client.HTTPSConnection(
+            conn = client.HTTPSConnection(
                 "localhost",
                 oracle.port,
                 timeout=5,
@@ -140,7 +140,7 @@ class TestEchoOracle:
     def test_ignores_non_root_requests(self) -> None:
         with EchoOracle() as oracle:
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
-            conn = http.client.HTTPSConnection(
+            conn = client.HTTPSConnection(
                 "localhost",
                 oracle.port,
                 timeout=5,
@@ -180,7 +180,7 @@ class TestEchoOracleResilience:
             aborting.close()
 
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
-            conn = http.client.HTTPSConnection(
+            conn = client.HTTPSConnection(
                 "localhost",
                 oracle.port,
                 timeout=5,
@@ -208,7 +208,7 @@ class TestEchoOracleResilience:
             )
             stalled.sendall(b"GET / HTTP")  # A head that never terminates.
 
-            served = http.client.HTTPSConnection(
+            served = client.HTTPSConnection(
                 "localhost",
                 oracle.port,
                 timeout=5,
