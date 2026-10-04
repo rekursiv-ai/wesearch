@@ -49,6 +49,8 @@ from wesearch.lib.userdirs import data_dir
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from wesearch.types.params import Trust
 
 
@@ -4229,11 +4231,23 @@ def test_browser_pool_control_server_receives_profile_and_release(
     assert created[0][1] is zendriver.shutdown_browsers
 
 
+@pytest.fixture
+def socket_dir() -> Iterator[Path]:
+    """Yield a directory shallow enough to bind a Unix socket in.
+
+    AF_UNIX caps a socket path at 108 bytes, and ``tmp_path`` nests several levels
+    under ``TMPDIR``: past the cap wherever TMPDIR is itself long. Production binds
+    directly under ``tempfile.gettempdir()`` for the same reason.
+    """
+    with tempfile.TemporaryDirectory(prefix="zd-") as root:
+        yield Path(root)
+
+
 def test_pool_control_server_tracks_filesystem_socket_path(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    socket_dir: Path,
 ) -> None:
-    address = tmp_path / "control.sock"
+    address = socket_dir / "control.sock"
 
     serve_calls: list[float] = []
 
