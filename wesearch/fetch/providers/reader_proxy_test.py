@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import PolicyParams, RequestParams
+from wesearch.fetch import PolicyParams, RequestParams, RetryParams
 from wesearch.fetch.providers import reader_proxy
 from wesearch.types.errors import FetchError
 
@@ -19,8 +19,16 @@ class TestThirdPartyConsent:
 
     def test_refuses_without_consent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("WESEARCH_ALLOW_THIRD_PARTY_RENDER", raising=False)
-        with pytest.raises(FetchError, match="third-party egress"):
+        with pytest.raises(FetchError) as raised:
             reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
+        assert raised.value.url == "https://x.com/a"
+        assert raised.value.status == 0
+        assert raised.value.headers == {}
+        assert raised.value.body == (
+            b"Reader-proxy render requires third-party egress to "
+            b"https://r.jina.ai/...; set JINA_AI_API_KEY or "
+            b"WESEARCH_ALLOW_THIRD_PARTY_RENDER=1 to allow."
+        )
 
     @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
     def test_allows_on_truthy(
@@ -84,7 +92,7 @@ class TestFetch:
         assert seen["headers"] == {"Authorization": "Bearer jina_secret"}
 
     def test_soft_fail_sentinel_raises(self) -> None:
-        soft = b"Title\n\nWarning: Target URL returned error 404 while fetching"
+        soft = b"A" * 200 + b"Warning: Target URL returned error 404 while fetching"
 
         def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
             del url, request
@@ -96,6 +104,43 @@ class TestFetch:
         ):
             reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
         assert exc.value.status == 502
+        assert exc.value.url == "https://x.com/a"
+        assert exc.value.headers == {}
+        assert exc.value.body == soft[:200]
+
+    def test_proxy_request_preserves_url_delimiters_and_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("JINA_AI_API_KEY", raising=False)
+        policy = PolicyParams()
+        seen: list[object] = []
+
+        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
+            seen.extend((url, request))
+            return b"ok", None
+
+        with patch.object(reader_proxy, "fetch", fake_fetch):
+            assert (
+                reader_proxy.fetch_reader_proxy(
+                    "https://x.com/a?q=1&x=2",
+                    policy=policy,
+                )
+                == b"ok"
+            )
+        assert seen[0] == "https://r.jina.ai/https://x.com/a%3Fq%3D1%26x%3D2"
+        assert isinstance(seen[1], RequestParams)
+        assert seen[1].policy is policy
+        assert seen[1].retry == RetryParams(timeout_sec=30)
+
+    @pytest.mark.parametrize("value", [" TRUE ", "YeS", "ON"])
+    def test_consent_strips_and_casefolds(
+        self,
+        value: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("WESEARCH_ALLOW_THIRD_PARTY_RENDER", value)
+        assert reader_proxy.third_party_render_allowed() is True
 
 
 if __name__ == "__main__":

@@ -259,7 +259,10 @@ class ProfileStore:
         # with the "|" separator nor produce a colon in the filename (illegal on
         # some filesystems). quote(safe="") escapes ":" -> "%3A", so distinct
         # (egress, domain) pairs never map to one path.
-        key = f"{quote(egress_ip, safe='')}|{quote(domain, safe='')}"
+        key = (
+            f"{quote(egress_ip).replace('/', '%2F')}|"
+            f"{quote(domain).replace('/', '%2F')}"
+        )
         return self._base / f"{key}.json"
 
     # ``max_bytes`` (default 1 MiB) caps a runaway file; cookie jars are small.

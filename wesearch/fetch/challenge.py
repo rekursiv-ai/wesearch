@@ -131,7 +131,7 @@ def classify_http_error(
 
 def _text(content: str | bytes) -> str:
     decoded = (
-        content.decode("utf-8", "replace") if isinstance(content, bytes) else content
+        content.decode(errors="replace") if isinstance(content, bytes) else content
     )
     return decoded.lower()
 
@@ -167,7 +167,19 @@ def _tags(
     """Return the rendered tags of ``text``, with script/style bodies removed."""
     # ``finditer`` + ``group(0)``, not ``findall``: typeshed types the latter's
     # result as ``list[Any]``, which erases the element type downstream.
-    return [match.group(0) for match in tag.finditer(script_body.sub(r"\1\3", text))]
+    return [
+        match.group(0)
+        for match in tag.finditer(script_body.sub(_replace_script_body, text))
+    ]
+
+
+def _replace_script_body(match: re.Match[str]) -> str:
+    """Keep script/style tags while removing their contents."""
+    opening = match.group(1)
+    closing = match.group(3)
+    assert isinstance(opening, str)
+    assert isinstance(closing, str)
+    return opening + closing
 
 
 # Restricts each marker to a class/id attribute value or a bare attribute name (``data-
@@ -216,4 +228,5 @@ def _is_widget_occurrence(
 def _is_cloudflare_mitigated(headers: dict[str, str]) -> bool:
     """Whether Cloudflare declares it served a challenge page for this response."""
     lower_headers = {key.lower(): value.lower() for key, value in headers.items()}
-    return lower_headers.get("cf-mitigated", "").strip() == "challenge"
+    value = lower_headers.get("cf-mitigated")
+    return value is not None and value.strip() == "challenge"

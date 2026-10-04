@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, cast
 
+import codecs
 import contextlib
 import socket
 import ssl
@@ -233,7 +234,7 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
       key_path: Destination for the PEM private key.
 
     """
-    key = rsa.generate_private_key(public_exponent=65_537, key_size=2048)
+    key = rsa.generate_private_key(public_exponent=65_537, key_size=1 << 11)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.now(UTC)
     cert = (
@@ -290,19 +291,19 @@ def _read_head(conn: _Recvable, *, max_bytes: int = 1 << 16) -> str:
         if not chunk:
             return ""
         data += chunk
-    return data[: end + 4].decode("latin-1") if end != -1 else ""
+    return codecs.latin_1_decode(data[: end + 4])[0] if end != -1 else ""
 
 
 def _requests_root(request: str) -> bool:
     """Whether the request line targets ``/`` (ignore Chrome sub-resource GETs)."""
-    line = request.split("\r\n", 1)[0]
+    line = request.partition("\r\n")[0]
     parts = line.split(" ")
     return len(parts) >= 2 and parts[1] == "/"
 
 
 def _header_names(request: str) -> tuple[str, ...]:
     """Ordered lower-cased header names from a raw HTTP/1.1 request head."""
-    return tuple(line.split(":", 1)[0].lower() for line in _header_lines(request))
+    return tuple(line.partition(":")[0].lower() for line in _header_lines(request))
 
 
 # Stops at the blank line ending the block, so a body that arrived in the same read

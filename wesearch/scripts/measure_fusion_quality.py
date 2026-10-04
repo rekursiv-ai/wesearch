@@ -95,9 +95,9 @@ def _residual_duplicates(records: list[PaperRecord]) -> int:
     for rec in records:
         keys: set[str] = set()
         if rec.doi:
-            keys.add(f"doi:{rec.doi.lower()}")
+            keys.add(f"doi:{str.casefold(rec.doi)}")
         if rec.arxiv_id:
-            keys.add(f"arxiv:{rec.arxiv_id.lower()}")
+            keys.add(f"arxiv:{str.casefold(rec.arxiv_id)}")
         if not keys:
             keys = {f"title:{normalize_title(rec.title)}"}
         if keys & seen:

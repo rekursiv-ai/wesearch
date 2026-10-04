@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, cast, get_args, get_type_hints
 
 import asyncio
 import inspect
+import itertools
+import re
 
 import pytest
 
@@ -19,7 +21,7 @@ pytest.importorskip("mcp.server")
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
-from wesearch.lib.custom_json import ListCodec
+from wesearch.lib.custom_json import DictCodec, ListCodec
 from wesearch.mcp import server
 from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
@@ -383,20 +385,161 @@ def test_paper_search_emits_library_records_verbatim(
     assert len(ListCodec.coerce(out["records"])) == 2
 
 
+_TOOLS = (
+    "paper_search",
+    "paper_details",
+    "paper_references",
+    "paper_citations",
+    "paper_pdf",
+    "author_search",
+    "author_papers",
+    "web_search",
+    "web_fetch",
+)
+
+
+def test_append_doc_preserves_existing_text_and_adds_extra() -> None:
+    def tool() -> None:
+        """Existing."""
+
+    decorated = server._append_doc("Generated.")(tool)
+    assert decorated is tool
+    assert tool.__doc__ == "Existing.\n\nGenerated.\n"
+
+
+def test_append_doc_preserves_leading_text_and_empty_doc() -> None:
+    def tool() -> None:
+        pass
+
+    tool.__doc__ = "  Existing  "
+    assert server._append_doc("Extra")(tool).__doc__ == "  Existing\n\nExtra\n"
+
+    tool.__doc__ = None
+    assert server._append_doc("Extra")(tool).__doc__ == "\n\nExtra\n"
+
+
+def test_main_runs_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[bool] = []
+    monkeypatch.setattr(server.mcp, "run", lambda: called.append(True))
+    assert server.main() == 0
+    assert called == [True]
+
+
 def test_all_tools_registered() -> None:
     tools = asyncio.run(server.mcp.list_tools())
-    names = {tool.name for tool in tools}
-    assert names == {
+    assert {tool.name for tool in tools} == set(_TOOLS)
+
+
+# A client reads each tool's docstring as its description, and the gates require
+# that docstring to carry ``Args:`` and ``Returns:``. Both sections drifted from the
+# code once already -- ``web_fetch`` advertised transports that do not exist and four
+# return fields it never sent -- so both are pinned to what each tool really takes
+# and returns.
+@pytest.mark.parametrize("tool", _TOOLS)
+def test_tool_description_documents_every_parameter(tool: str) -> None:
+    published = {t.name: t for t in asyncio.run(server.mcp.list_tools())}[tool]
+    entries = _entries(_section(published.description or "", "Args"))
+    schema = cast(dict[str, object], published.input_schema)
+    properties = DictCodec.coerce(schema["properties"])
+    assert list(entries) == list(properties)
+    for name, text in entries.items():
+        # A value an entry quotes must be one the parameter accepts.
+        allowed = _enum_values(properties[name])
+        quoted = {match.group(1) for match in re.finditer(r'"([^"]+)"', text)}
+        assert not allowed or quoted <= allowed, f"{tool}.{name}: {quoted - allowed}"
+
+
+_LISTING = details.Listing(records=[_RECORD], complete=True)
+
+
+# Keys are written in double quotes under ``Returns:``, values in single quotes, so
+# the documented key set can be read back exactly. ``paper_details`` (one paper's
+# lean record, whose keys vary with the fields it has) and ``web_search`` (a list)
+# return no fixed key set and are absent by design.
+_RETURN_SHAPES: list[tuple[str, Callable[..., object], tuple[object, str, object]]] = [
+    (
         "paper_search",
-        "paper_details",
-        "paper_references",
-        "paper_citations",
-        "paper_pdf",
+        server.paper_search,
+        (
+            search,
+            "search",
+            search.SearchResult(records=[_RECORD], total=1, complete=True),
+        ),
+    ),
+    ("paper_references", server.paper_references, (details, "references", _LISTING)),
+    ("paper_citations", server.paper_citations, (details, "citations", _LISTING)),
+    ("paper_pdf", server.paper_pdf, (fetch, "download", (b"%PDF-x", "arxiv"))),
+    (
         "author_search",
-        "author_papers",
-        "web_search",
+        server.author_search,
+        (authors, "search_authors", authors.AuthorSearchResult(records=[], total=0)),
+    ),
+    ("author_papers", server.author_papers, (authors, "author_papers", _LISTING)),
+    (
         "web_fetch",
-    }
+        server.web_fetch,
+        (
+            server,
+            "fetch_web",
+            FetchResult(text="t", url="https://e.co", kind=_KIND_HTML, truncated=False),
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "tool", "stub"), _RETURN_SHAPES)
+def test_tool_description_names_every_returned_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    tool: Callable[..., object],
+    stub: tuple[object, str, object],
+) -> None:
+    owner, attribute, value = stub
+    monkeypatch.setattr(owner, attribute, _returns(value))
+    monkeypatch.setattr(server, "cache_dir", _returns(tmp_path))
+    published = {t.name: t for t in asyncio.run(server.mcp.list_tools())}[name]
+    returns = "\n".join(_section(published.description or "", "Returns"))
+    documented = {match.group(1) for match in re.finditer(r'"(\w+)"', returns)}
+    # One positional argument serves every tool here: each takes a query or an id
+    # first, and the stub ignores it.
+    out = tool("10.1000/x")
+    assert isinstance(out, dict)
+    assert documented == set(cast(dict[str, object], out))
+
+
+def _section(description: str, name: str) -> list[str]:
+    """Return the lines under ``description``'s ``name:`` header, relative to it."""
+    lines = description.splitlines()
+    # Python 3.13 strips a docstring's common indentation at compile time and 3.12
+    # keeps it, so the header is ``Args:`` on one and ``    Args:`` on the other.
+    # The public export validates on 3.12; match the header at any indentation.
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"{name}:")
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    body = (line[indent:] for line in lines[start + 1 :])
+    return list(itertools.takewhile(lambda line: line.startswith("  "), body))
+
+
+def _entries(lines: list[str]) -> dict[str, str]:
+    """Map each ``name: text`` entry of a docstring section to its whole text."""
+    entries: dict[str, str] = {}
+    name = ""
+    for line in lines:
+        if entry := re.match(r"  (\w+): (.*)", line):
+            name = entry.group(1)
+            entries[name] = entry.group(2)
+        else:
+            entries[name] += f" {line.strip()}"
+    return entries
+
+
+def _enum_values(schema: object) -> set[object]:
+    """Return every ``enum`` member of a JSON-Schema property, through ``anyOf``."""
+    prop = DictCodec.coerce(schema)
+    values = set(ListCodec.coerce(prop.get("enum")))
+    for branch in ListCodec.mappings(prop.get("anyOf")):
+        values |= _enum_values(branch)
+    return values
 
 
 if __name__ == "__main__":

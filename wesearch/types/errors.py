@@ -38,7 +38,7 @@ class FetchError(Exception):
         self.headers = headers
         self.body = body
         if status == 0:
-            reason = body.decode("utf-8", "replace").strip() or "connection failed"
+            reason = body.decode(errors="replace").strip() or "connection failed"
             super().__init__(f"connection failed: {url}: {reason}")
         else:
             super().__init__(f"HTTP {status}: {url}")

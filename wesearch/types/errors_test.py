@@ -12,6 +12,34 @@ from wesearch.types.errors import (
 )
 
 
+class TestFetchErrorConstruction:
+    def test_http_error_stores_context_and_formats_message(self) -> None:
+        err = FetchError(
+            "https://x.com/doc",
+            404,
+            {"content-type": "text/html"},
+            b"missing",
+        )
+        assert err.url == "https://x.com/doc"
+        assert err.status == 404
+        assert err.headers == {"content-type": "text/html"}
+        assert err.body == b"missing"
+        assert str(err) == "HTTP 404: https://x.com/doc"
+
+    def test_connection_error_decodes_and_strips_body(self) -> None:
+        err = FetchError("https://x.com/doc", 0, {}, b"  refused\n")
+        assert str(err) == "connection failed: https://x.com/doc: refused"
+
+    def test_connection_error_replaces_invalid_utf8(self) -> None:
+        err = FetchError("https://x.com/doc", 0, {}, b"bad\xff")
+        assert str(err) == "connection failed: https://x.com/doc: bad�"
+
+    def test_connection_error_without_body_uses_default_reason(self) -> None:
+        assert str(FetchError("https://x.com/doc", 0, {}, b"  ")) == (
+            "connection failed: https://x.com/doc: connection failed"
+        )
+
+
 class TestHierarchy:
     def test_leaves_subclass_root(self) -> None:
         assert issubclass(PuzzleChallengeError, BotDetectionError)
@@ -70,10 +98,20 @@ class TestGuidance:
         assert "google" in GoogleSorryError.guidance.lower()
         assert "javascript" in GoogleJavascriptRequiredError.guidance.lower()
 
+    def test_recovery_quotes_url_and_names_cooldown(self) -> None:
+        assert BotDetectionError.recovery("https://x.com/a path") == (
+            "Run `fetch-zendriver 'https://x.com/a path'`, solve the challenge, "
+            "then close Chrome to clear this domain's cooldown."
+        )
+
     def test_explain_includes_url_and_guidance(self) -> None:
         message = CloudflareChallengeError.explain("https://x.com/doc")
-        assert message.startswith("Fetch blocked: https://x.com/doc")
-        assert CloudflareChallengeError.guidance in message
+        assert message == (
+            "Fetch blocked: https://x.com/doc -- "
+            f"{CloudflareChallengeError.guidance} "
+            "Run `fetch-zendriver https://x.com/doc`, solve the challenge, "
+            "then close Chrome to clear this domain's cooldown."
+        )
 
 
 if __name__ == "__main__":

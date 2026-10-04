@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Final
 
 import errno
+import os
 
 import pytest
 
@@ -162,6 +163,181 @@ def test_corrupt_cache_is_discarded_whole_not_mangled(tmp_path: Path) -> None:
 
     assert zendriver_domains(path=path) == frozenset({"fresh.example"})
     assert "\ufffd" not in path.read_text()
+
+
+def test_read_domains_logs_open_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "domains.txt"
+
+    def fail_open(*args: object, **kwargs: object) -> int:
+        del args, kwargs
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(os, "open", fail_open)
+    caplog.set_level("WARNING", logger=transport_routing.__name__)
+
+    assert zendriver_domains(path=path) == frozenset()
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Ignoring unreadable Zendriver domain list at {path}.",
+    ]
+
+
+def test_read_domains_logs_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "domains.txt"
+    path.write_text("good.example\n")
+
+    def fail_read(*args: object, **kwargs: object) -> bytes:
+        del args, kwargs
+        raise OSError("read failed")
+
+    monkeypatch.setattr(transport_routing, "_read_all", fail_read)
+    caplog.set_level("WARNING", logger=transport_routing.__name__)
+
+    assert zendriver_domains(path=path) == frozenset()
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Ignoring unreadable Zendriver domain list at {path}.",
+    ]
+
+
+def test_read_domains_logs_decode_failure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "domains.txt"
+    path.write_bytes(b"good.example\n\xff")
+    caplog.set_level("WARNING", logger=transport_routing.__name__)
+
+    assert zendriver_domains(path=path) == frozenset()
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Ignoring undecodable Zendriver domain list at {path}.",
+    ]
+
+
+def test_read_all_reads_beyond_one_megabyte(tmp_path: Path) -> None:
+    path = tmp_path / "domains.txt"
+    payload = b"a" * ((1 << 21) + 1)
+    path.write_bytes(payload)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        assert transport_routing._read_all(descriptor) == payload
+    finally:
+        os.close(descriptor)
+
+
+def test_read_all_uses_one_megabyte_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    chunks = iter((b"first", b""))
+
+    def read(descriptor: int, size: int) -> bytes:
+        del descriptor
+        calls.append(size)
+        return next(chunks)
+
+    monkeypatch.setattr(os, "read", read)
+
+    assert transport_routing._read_all(3) == b"first"
+    assert calls == [1 << 20, 1 << 20]
+
+
+def test_read_domains_uses_close_on_exec_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "domains.txt"
+    path.write_text("good.example\n")
+    calls: list[tuple[object, ...]] = []
+    real_open = os.open
+
+    def record_open(
+        file_path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        calls.append((file_path, flags) if mode == 0o777 else (file_path, flags, mode))
+        return real_open(file_path, flags, mode)
+
+    monkeypatch.setattr(os, "open", record_open)
+    assert transport_routing.zendriver_domains(path=path) == {"good.example"}
+    assert calls == [
+        (path, os.O_RDONLY | os.O_CLOEXEC),
+    ]
+
+
+def test_carriage_return_domain_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"^Invalid Zendriver domain:"):
+        remember_zendriver_domain("safe.example\rother.example", path=tmp_path / "x")
+
+
+def test_remember_uses_private_file_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "domains.txt"
+    calls: list[tuple[object, ...]] = []
+    real_open = os.open
+
+    def record_open(
+        file_path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        calls.append((file_path, flags) if mode == 0o777 else (file_path, flags, mode))
+        return real_open(file_path, flags, mode)
+
+    monkeypatch.setattr(os, "open", record_open)
+    remember_zendriver_domain("private.example", path=path)
+
+    assert calls == [
+        (
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+            0o600,
+        ),
+    ]
+
+
+def test_corrupt_remember_logs_discard(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "domains.txt"
+    path.write_bytes(b"\xff")
+    caplog.set_level("WARNING", logger=transport_routing.__name__)
+
+    remember_zendriver_domain("fresh.example", path=path)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Discarding undecodable Zendriver domain list at {path}.",
+    ]
+
+
+def test_remember_truncates_before_rewriting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "domains.txt"
+    path.write_text("old.example\n")
+    real_ftruncate = os.ftruncate
+    sizes: list[int] = []
+
+    def record_ftruncate(descriptor: int, size: int) -> None:
+        sizes.append(size)
+        real_ftruncate(descriptor, size)
+
+    monkeypatch.setattr(os, "ftruncate", record_ftruncate)
+    remember_zendriver_domain("new.example", path=path)
+
+    assert sizes == [0]
+    assert path.read_text() == "new.example\nold.example\n"
 
 
 if __name__ == "__main__":

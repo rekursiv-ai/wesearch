@@ -30,16 +30,19 @@ def test_params_include_inherited_base_first() -> None:
 
 
 def test_json_schema_renders_types_enums_and_required() -> None:
-    schema = _Derived.json_schema()
-    assert schema["required"] == ["name"]
-    props = schema["properties"]
-    assert isinstance(props, dict)
-    assert props["color"] == {
-        "type": "string",
-        "enum": ["red", "green"],
-        "description": "A color.",
+    assert _Derived.json_schema() == {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {"type": "string", "description": "A name."},
+            "color": {
+                "type": "string",
+                "enum": ["red", "green"],
+                "description": "A color.",
+            },
+            "count": {"type": "integer", "description": "How many."},
+        },
     }
-    assert props["count"] == {"type": "integer", "description": "How many."}
 
 
 def test_coerce_defaults_the_omitted() -> None:
@@ -74,6 +77,7 @@ def test_literal_values_unwraps_alias_and_optional() -> None:
     """
     assert literal_values(_Alias) == ("a", "b")
     assert set(literal_values(_Color | None)) == {"red", "green"}
+    assert set(literal_values(None | _Color)) == {"red", "green"}
     assert literal_values(str) == ()
 
 
@@ -151,6 +155,16 @@ def test_a_tuple_knob_accepts_the_list_json_decodes_to() -> None:
     field = Field[tuple[str, ...]](annotation=tuple)
     assert field.schema() == {"type": "array"}
     assert field.coerce("items", ["a"]) == ["a"]
+    with pytest.raises(ValueError, match="expected list or tuple, got str"):
+        field.coerce("items", "a")
+
+
+def test_asset_markdown_renders_defaults_and_descriptions() -> None:
+    assert _Derived.asset_markdown() == (
+        "- `name` -- A name.\n"
+        "- `color` -- A color. Default `red`.\n"
+        "- `count` -- How many. Default `1`."
+    )
 
 
 def test_a_non_literal_union_advertises_no_shape_it_cannot_enforce() -> None:

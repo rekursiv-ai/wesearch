@@ -38,7 +38,9 @@ def matches(url: str) -> bool:
       result: The bool.
 
     """
-    hostname = urlparse(url).hostname or ""
+    hostname = urlparse(url).hostname
+    if hostname is None:
+        return False
     if hostname in ("x.com", "twitter.com"):
         return True
     return hostname.endswith((".x.com", ".twitter.com"))

@@ -21,11 +21,12 @@ from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
     ImageResult,
-    MediaResult,
     PackageResult,
     PaperResult,
+    SearchBackends,
     SearchError,
     SearchResult,
+    SearxngCategory,
     TorrentResult,
     VideoResult,
     gsa_headers_for_query,
@@ -39,13 +40,14 @@ from wesearch.search.duckduckgo import (
     _duckduckgo_validate_body,
     duckduckgo,
 )
-from wesearch.search.search import search
-from wesearch.search.searxng import _searxng_url, searxng
+from wesearch.search.search import SearchParamsSchema, search
+from wesearch.search.searxng import _searxng_url, category_gloss, searxng
 from wesearch.types.errors import (
     BotDetectionError,
     FetchError,
     PuzzleChallengeError,
 )
+from wesearch.types.schema import literal_values
 
 
 if TYPE_CHECKING:
@@ -494,6 +496,20 @@ class TestSearchSearxngScience:
             search("q", backend="duckduckgo", categories="science")
 
 
+class TestCategoryGloss:
+    def test_the_search_spec_describes_every_tab(self) -> None:
+        # Every search tool publishes this list as the meaning of each SearXNG tab.
+        # ``get_args`` on the PEP 695 alias itself returns nothing -- its members
+        # hide behind ``__value__`` -- so the list rendered empty and both tool
+        # descriptions lost every tab without an error.
+        tabs = literal_values(SearxngCategory)
+        description = SearchParamsSchema.fields()["categories"].description
+        assert tabs
+        assert len(category_gloss().splitlines()) == len(tabs)
+        for tab in tabs:
+            assert f"`{tab}` -- " in description
+
+
 class TestSearchSearxngStructuredCategories:
     def test_images(self) -> None:
         payload = {
@@ -543,7 +559,6 @@ class TestSearchSearxngStructuredCategories:
         }
         with _patch_searxng_fetch(payload):
             (r,) = searxng("clip", categories="videos")
-        assert isinstance(r, MediaResult)  # VideoResult is-a MediaResult.
         assert r.length == "3:21"
         assert r.views == "1.2M"
         assert r.author == "Channel"
@@ -1081,6 +1096,69 @@ class TestLiveQueryAvailabilitySkips:
 
         with pytest.raises(ValueError, match="markup changed"):
             self._run(raises_parser_fault, backend="wedged-probe", timeout_sec=0.1)
+
+
+class TestSearchDispatchDefaults:
+    def test_general_without_backend_uses_default_provider(self) -> None:
+        with (
+            patch("wesearch.search.search.DEFAULT_SEARCH_BACKEND", "searxng"),
+            patch("wesearch.search.search.searxng", return_value=[]) as provider,
+        ):
+            assert (
+                search("q", num_results=3, headers={"X": "y"}, transport="stdlib") == []
+            )
+        provider.assert_called_once_with(
+            "q",
+            3,
+            {"X": "y"},
+            categories="general",
+            transport="stdlib",
+        )
+
+    def test_non_general_without_backend_forces_searxng(self) -> None:
+        with (
+            patch(
+                "wesearch.search.search.DEFAULT_SEARCH_BACKEND",
+                "duckduckgo",
+            ),
+            patch("wesearch.search.search.searxng", return_value=[]) as provider,
+        ):
+            assert search("q", categories="science") == []
+        provider.assert_called_once_with(
+            "q",
+            10,
+            None,
+            categories="science",
+            transport="auto",
+        )
+
+    def test_duckduckgo_dispatch_forwards_headers(self) -> None:
+        with patch(
+            "wesearch.search.search.duckduckgo",
+            return_value=[],
+        ) as provider:
+            assert search("q", backend="duckduckgo", headers={"X": "y"}) == []
+        provider.assert_called_once_with(
+            "q",
+            10,
+            {"X": "y"},
+            transport="auto",
+        )
+
+    def test_general_without_backend_uses_build_default_exactly(self) -> None:
+        with (
+            patch("wesearch.search.search.DEFAULT_SEARCH_BACKEND", "duckduckgo"),
+            patch(
+                "wesearch.search.search.duckduckgo",
+                return_value=[],
+            ) as provider,
+        ):
+            assert search("q") == []
+        provider.assert_called_once_with("q", 10, None, transport="auto")
+
+    def test_unknown_backend_message_is_exact(self) -> None:
+        with pytest.raises(ValueError, match=r"^Unknown backend: 'bogus'$"):
+            search("q", backend=cast(SearchBackends, "".join(("bogus",))))
 
 
 class TestHeadersArg:

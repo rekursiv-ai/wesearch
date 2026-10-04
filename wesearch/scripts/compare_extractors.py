@@ -340,7 +340,7 @@ def cached_html(page: Page, *, cache_dir: Path, refresh: bool = False) -> str:
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     path.write_bytes(body)
-    return body.decode("utf-8", errors="replace")
+    return body.decode(errors="replace")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -421,9 +421,8 @@ def _word_grams(text: str, size: int = 5) -> frozenset[tuple[str, ...]]:
 def _gram_distortion(reference: frozenset[tuple[str, ...]], output: str) -> float:
     """Return ``1 - F1`` of the output's n-grams against the reference's."""
     grams = _word_grams(output)
-    if not reference or not grams:
-        return 1.0
     shared = len(reference & grams)
+
     if not shared:
         return 1.0
     precision, recall = shared / len(grams), shared / len(reference)
@@ -482,7 +481,7 @@ def _print_table(
 
 def _page_label(page: Page) -> str:
     """Return the host, plus a path hint when the host alone is ambiguous."""
-    host = page.url.split("//", 1)[-1].split("/", 1)[0].removeprefix("www.")
+    host = page.url.partition("//")[2].partition("/")[0].removeprefix("www.")
     return host.removesuffix(".com").removesuffix(".org")
 
 
@@ -502,7 +501,11 @@ def _write_samples(
 
 def _parse_args(argv: Sequence[str] | None) -> _Flags:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 2)[2])
+    # pragma: no mutate start -- [2:] holds <=1 item; a newline-free fallback yields none.
+    parser = argparse.ArgumentParser(
+        description="".join((__doc__ or "").split("\n", 2)[2:]),
+    )
+    # pragma: no mutate end
     parser.add_argument(
         "--cache-dir",
         type=Path,

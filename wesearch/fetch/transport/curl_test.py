@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from typing import cast, override
@@ -37,9 +38,16 @@ from wesearch.fetch.testing import (
 )
 from wesearch.fetch.transport import curl
 from wesearch.fetch.transport.curl import (
+    _CurlLoop,
+    _jar_set,
     _registrable_domain,
     _SessionKey,
+    close_curl_session,
+    close_curl_sessions_except,
+    curl_session,
+    fetch_curl,
     seed_session_jar,
+    set_session_cookies,
 )
 from wesearch.lib.custom_json import DictCodec
 from wesearch.types.errors import (
@@ -800,6 +808,568 @@ def _recorded_curl_options(mock_req: Mock) -> dict[object, object]:
 def _recorded_headers(mock_req: Mock) -> dict[str, str]:
     """Return the typed headers mapping recorded by a request mock."""
     return DictCodec.coerce(mock_req.call_args.kwargs["headers"], str)
+
+
+def test_curl_set_cookies_uses_all_set_cookie_headers() -> None:
+    class Headers:
+        def items(self) -> list[tuple[str, str]]:
+            return []
+
+        def get_list(self, name: str) -> list[str]:
+            assert name == "set-cookie"
+            return ["A=1", "B=2"]
+
+    response = Mock(status_code=200, content=b"ok", headers=Headers())
+    with patch("curl_cffi.requests.request", return_value=response):
+        _, session = fetch("https://example.com")
+    assert session.cookies_for("https://example.com/") == {"A": "1", "B": "2"}
+
+
+def test_curl_set_cookies_falls_back_to_one_string() -> None:
+    class Headers:
+        def items(self) -> list[tuple[str, str]]:
+            return []
+
+        def get(self, name: str) -> str:
+            assert name == "set-cookie"
+            return "A=1"
+
+    response = Mock(status_code=200, content=b"ok", headers=Headers())
+    with patch("curl_cffi.requests.request", return_value=response):
+        _, session = fetch("https://example.com")
+    assert session.cookies_for("https://example.com/") == {"A": "1"}
+
+
+def test_curl_set_cookies_ignores_non_string_fallback() -> None:
+    class Headers:
+        def items(self) -> list[tuple[str, str]]:
+            return []
+
+        def get(self, name: str) -> None:
+            assert name == "set-cookie"
+
+    response = Mock(status_code=200, content=b"ok", headers=Headers())
+    with patch("curl_cffi.requests.request", return_value=response):
+        _, session = fetch("https://example.com")
+    assert session.cookies_for("https://example.com/") == {}
+
+
+def test_jar_set_preserves_cookie_prefix_contract() -> None:
+    session: cc_requests.Session[Response] = cc_requests.Session()
+    try:
+        with patch.object(session.cookies, "set") as set_cookie:
+            _jar_set(session, "example.com", "__Host-ID", "host")
+            _jar_set(session, "example.com", "__Secure-ID", "secure")
+            _jar_set(session, "example.com", "ID", "plain")
+        assert set_cookie.call_args_list == [
+            (("__Host-ID", "host"), {"path": "/", "secure": True}),
+            (("__Secure-ID", "secure"), {"domain": "example.com", "secure": True}),
+            (("ID", "plain"), {"domain": "example.com"}),
+        ]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("example.co.uk", "example.co.uk"),
+        ("x.example.co.uk", "example.co.uk"),
+        ("example.com", "example.com"),
+        ("x.example.com", "example.com"),
+        ("a.abcd.co", "abcd.co"),
+        ("a.b", "a.b"),
+    ],
+)
+def test_registrable_domain_boundary(host: str, expected: str) -> None:
+    assert _registrable_domain(host) == expected
+
+
+def test_curl_session_key_includes_every_identity_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: dict[object, object] = {}
+    created: list[dict[str, object]] = []
+
+    class Session:
+        def __init__(self, **kwargs: object) -> None:
+            created.append(kwargs)
+
+    monkeypatch.setattr(curl, "_curl_sessions", sessions)
+    monkeypatch.setattr("curl_cffi.requests.Session", Session)
+    pin = ValidatedHost(host="example.com", ip="192.0.2.1")
+    first = curl_session("egress", "a.example.com", "chrome", pin=pin, port=8443)
+    assert (
+        curl_session("egress", "b.example.com", "chrome", pin=pin, port=8443) is first
+    )
+    assert (
+        curl_session("egress", "a.example.com", "firefox", pin=pin, port=8443)
+        is not first
+    )
+    assert (
+        curl_session("other", "a.example.com", "chrome", pin=pin, port=8443)
+        is not first
+    )
+    assert (
+        curl_session("egress", "a.example.com", "chrome", pin=pin, port=443)
+        is not first
+    )
+    assert len(created) == 4
+    assert created[0]["impersonate"] == "chrome"
+    assert created[0]["curl_options"]
+
+
+def test_close_curl_session_drops_all_pins_and_ports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matching_a = Mock()
+    matching_b = Mock()
+    other = Mock()
+    monkeypatch.setattr(
+        curl,
+        "_curl_sessions",
+        {
+            ("e", "example.com", "chrome", None, 443): matching_a,
+            ("e", "example.com", "chrome", None, 8443): matching_b,
+            ("other", "example.com", "chrome", None, 443): other,
+        },
+    )
+    close_curl_session("e", "www.example.com", "chrome")
+    assert matching_a.close.call_count == 1
+    assert matching_b.close.call_count == 1
+    assert other.close.call_count == 0
+
+
+def test_close_curl_sessions_except_keeps_none_egress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained = Mock()
+    removed = Mock()
+    monkeypatch.setattr(
+        curl,
+        "_curl_sessions",
+        {
+            (None, "example.com", "chrome", None, 443): retained,
+            ("e", "example.com", "chrome", None, 443): removed,
+        },
+    )
+    close_curl_sessions_except(None)
+    assert list(curl._curl_sessions) == [(None, "example.com", "chrome", None, 443)]
+    retained.close.assert_not_called()
+    removed.close.assert_called_once_with()
+
+
+def test_curl_loop_follow_reports_response_and_transforms_redirect() -> None:
+    loop = _CurlLoop(
+        url="https://a.example/submit",
+        method="POST",
+        headers={"Origin": "https://a.example", "Content-Type": "x"},
+        body=b"body",
+        remaining=1,
+    )
+    responses: list[tuple[int, dict[str, str], str]] = []
+    redirects: list[str] = []
+
+    def record_response(
+        status: int,
+        headers: dict[str, str],
+        response_url: str,
+    ) -> None:
+        responses.append((status, headers, response_url))
+
+    assert loop.follow(
+        303,
+        {"location": "https://b.example/result"},
+        on_response=record_response,
+        on_redirect=redirects.append,
+    )
+    assert responses == [
+        (303, {"location": "https://b.example/result"}, "https://a.example/submit"),
+    ]
+    assert redirects == ["https://b.example/result"]
+    assert loop.url == "https://b.example/result"
+    assert loop.method == "GET"
+    assert loop.body is None
+    assert loop.headers["Origin"] == "https://b.example"
+    assert loop.remaining == 0
+
+
+def test_curl_loop_follow_does_not_follow_at_zero() -> None:
+    loop = _CurlLoop(
+        url="https://a.example/",
+        method="GET",
+        headers={},
+        body=None,
+        remaining=0,
+    )
+    assert not loop.follow(
+        302,
+        {"location": "https://b.example/"},
+        on_response=None,
+        on_redirect=None,
+    )
+    assert loop.url == "https://a.example/"
+
+
+def test_fetch_curl_records_one_shot_request_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = Mock(status_code=200, content=b"body", headers={})
+    calls: list[tuple[object, ...]] = []
+
+    def request(*args: object, **kwargs: object) -> Mock:
+        calls.append((args, kwargs))
+        return response
+
+    monkeypatch.setattr("curl_cffi.requests.request", request)
+
+    def pin(*_args: object, **_kwargs: object) -> ValidatedHost:
+        return ValidatedHost(host="example.com", ip="192.0.2.1")
+
+    monkeypatch.setattr(curl, "pinned_host", pin)
+    assert (
+        fetch_curl(
+            "https://example.com/path",
+            method="POST",
+            headers={"X-Test": "yes"},
+            body=b"payload",
+            timeout_sec=9.0,
+            connect_timeout_sec=3.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+        == b"body"
+    )
+    args, kwargs = calls[0]
+    assert args == ("POST", "https://example.com/path")
+    assert kwargs == {
+        "headers": {"X-Test": "yes"},
+        "data": b"payload",
+        "impersonate": "chrome",
+        "timeout": (3.0, 9.0),
+        "allow_redirects": False,
+        "curl_options": {CurlOpt.RESOLVE: ["example.com:443:192.0.2.1"]},
+    }
+
+
+def test_fetch_curl_classifies_status_four_hundred() -> None:
+    response = Mock(status_code=400, content=b"bad", headers={})
+    with (
+        patch("curl_cffi.requests.request", return_value=response),
+        pytest.raises(FetchError) as error,
+    ):
+        fetch_curl(
+            "https://example.com/path",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=1.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+    assert error.value.status == 400
+
+
+def test_fetch_curl_passes_trust_to_each_one_shot_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+    response = Mock(status_code=200, content=b"", headers={})
+
+    def pin(url: str, trust: object) -> ValidatedHost:
+        del url
+        seen.append(trust)
+        return ValidatedHost(host="example.com", ip="192.0.2.1")
+
+    monkeypatch.setattr(curl, "pinned_host", pin)
+
+    def request(*_args: object, **_kwargs: object) -> Mock:
+        return response
+
+    monkeypatch.setattr("curl_cffi.requests.request", request)
+    assert (
+        fetch_curl(
+            "https://example.com/",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=1.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+            trust="internal",
+        )
+        == b""
+    )
+    assert seen == ["internal"]
+
+
+def test_fetch_curl_error_keeps_current_url_and_empty_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = Mock(status_code=400, content=None, headers={})
+
+    def request(*_args: object, **_kwargs: object) -> Mock:
+        return response
+
+    monkeypatch.setattr("curl_cffi.requests.request", request)
+    with pytest.raises(FetchError) as error:
+        fetch_curl(
+            "https://example.com/path",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=1.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+    assert error.value.url == "https://example.com/path"
+    assert error.value.body == b""
+
+
+def test_fetch_curl_pooled_request_uses_session_arguments() -> None:
+    response = Mock(status_code=200, content=b"body", headers={})
+    session: cc_requests.Session[Response] = cc_requests.Session()
+    with patch.object(session, "request", return_value=response) as request:
+        assert (
+            fetch_curl(
+                "https://example.com/path",
+                method="POST",
+                headers={"X-Test": "yes"},
+                body=b"payload",
+                timeout_sec=9.0,
+                connect_timeout_sec=3.0,
+                max_redirects=0,
+                impersonate="chrome",
+                on_redirect=None,
+                on_response=None,
+                session=session,
+            )
+            == b"body"
+        )
+    request.assert_called_once_with(
+        "POST",
+        "https://example.com/path",
+        headers={"X-Test": "yes"},
+        data=b"payload",
+        impersonate="chrome",
+        timeout=(3.0, 9.0),
+        allow_redirects=False,
+    )
+    session.close()
+
+
+def test_seed_and_set_cookies_preserve_domain_and_value() -> None:
+    session: cc_requests.Session[Response] = cc_requests.Session()
+    try:
+        seed_session_jar(session, "example.com", {"A": "one"})
+        set_session_cookies(session, "other.example", {"B": "two"})
+        cookies: set[tuple[str, str, str | None]] = {
+            (cookie.domain, cookie.name, cookie.value)
+            for cookie in cast(CookieJar, session.cookies.jar)
+        }
+        assert ("example.com", "A", "one") in cookies
+        assert ("other.example", "B", "two") in cookies
+    finally:
+        session.close()
+
+
+def test_curl_loop_passes_current_url_to_redirect_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def transform(
+        current_url: str,
+        headers: dict[str, str],
+        method: str,
+        *,
+        body: bytes | None,
+        status: int,
+        redirect_url: str,
+    ) -> tuple[dict[str, str], str, bytes | None]:
+        del headers, method, body, status, redirect_url
+        seen.append(current_url)
+        return {}, "GET", None
+
+    monkeypatch.setattr(curl, "apply_redirect", transform)
+    loop = _CurlLoop(
+        url="https://a.example/start",
+        method="GET",
+        headers={},
+        body=None,
+        remaining=1,
+    )
+    assert loop.follow(
+        302,
+        {"location": "https://a.example/next"},
+        on_response=None,
+        on_redirect=None,
+    )
+    assert seen == ["https://a.example/start"]
+
+
+def test_curl_loop_same_origin_preserves_authorization() -> None:
+    loop = _CurlLoop(
+        url="https://a.example/start",
+        method="GET",
+        headers={"Authorization": "Bearer secret"},
+        body=None,
+        remaining=1,
+    )
+    assert loop.follow(
+        302,
+        {"location": "https://a.example/next"},
+        on_response=None,
+        on_redirect=None,
+    )
+    assert loop.headers == {"Authorization": "Bearer secret"}
+
+
+def test_curl_loop_follow_resolves_relative_location_and_preserves_post() -> None:
+    loop = _CurlLoop(
+        url="https://a.example/base/start",
+        method="POST",
+        headers={"Content-Type": "x"},
+        body=b"body",
+        remaining=1,
+    )
+    assert loop.follow(
+        307,
+        {"location": "next"},
+        on_response=None,
+        on_redirect=None,
+    )
+    assert loop.url == "https://a.example/base/next"
+    assert loop.method == "POST"
+    assert loop.body == b"body"
+
+
+def test_default_trust_is_used_for_omitted_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def pin(url: str, trust: object) -> None:
+        del url
+        seen.append(trust)
+
+    def request(*args: object, **kwargs: object) -> Mock:
+        del args, kwargs
+        return Mock(status_code=200, content=b"ok", headers={})
+
+    monkeypatch.setattr(curl, "pinned_host", pin)
+    monkeypatch.setattr("curl_cffi.requests.request", request)
+    assert (
+        fetch_curl(
+            "https://example.com/",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=1.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+        == b"ok"
+    )
+    assert seen == ["untrusted"]
+
+
+def test_unpinned_one_shot_request_passes_empty_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def request(*_args: object, **kwargs: object) -> Mock:
+        calls.append(kwargs)
+        return Mock(status_code=200, content=b"ok", headers={})
+
+    def pin(url: str, trust: object) -> None:
+        del url, trust
+
+    monkeypatch.setattr(curl, "pinned_host", pin)
+    monkeypatch.setattr("curl_cffi.requests.request", request)
+    fetch_curl(
+        "http://example.com/",
+        method="GET",
+        headers={},
+        body=None,
+        timeout_sec=1.0,
+        max_redirects=0,
+        impersonate="chrome",
+        on_redirect=None,
+        on_response=None,
+    )
+    assert calls[0]["curl_options"] == {}
+
+
+def test_http_one_shot_pin_uses_port_eighty() -> None:
+    response = Mock(status_code=200, content=b"ok", headers={})
+    with (
+        patch.object(
+            curl,
+            "pinned_host",
+            return_value=ValidatedHost(host="example.com", ip="192.0.2.1"),
+        ),
+        patch("curl_cffi.requests.request", return_value=response) as request,
+    ):
+        fetch_curl(
+            "http://example.com/",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=1.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+    assert request.call_args.kwargs["curl_options"] == {
+        CurlOpt.RESOLVE: ["example.com:80:192.0.2.1"],
+    }
+
+
+def test_curl_error_preserves_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_request(*_args: object, **_kwargs: object) -> Mock:
+        raise CurlError("broken")
+
+    monkeypatch.setattr("curl_cffi.requests.request", fail_request)
+    with pytest.raises(FetchError) as error:
+        fetch_curl(
+            "https://example.com/fail",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=1.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+    assert error.value.url == "https://example.com/fail"
+
+
+def test_redirect_target_uses_status_and_source_url() -> None:
+    loop = _CurlLoop(
+        url="https://a.example/base/start",
+        method="POST",
+        headers={},
+        body=b"body",
+        remaining=1,
+    )
+    with pytest.raises(FetchError, match="302"):
+        loop.follow(302, {}, on_response=None, on_redirect=None)
 
 
 if __name__ == "__main__":

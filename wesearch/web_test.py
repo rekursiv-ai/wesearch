@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import cast
 from unittest.mock import patch
 
+from defusedxml import ElementTree
+
 import pytest
 
 from wesearch.fetch import PolicyParams, RequestParams
@@ -14,10 +16,16 @@ from wesearch.web import (
     _KIND_HTML,
     _KIND_MARKDOWN,
     _KIND_RSS,
+    _append_atom_entry,
+    _append_rss_item,
+    _atom_content,
+    _atom_link,
     _extract_text,
     _fetch_body,
     _format_rss,
+    _local_name,
     _parse_rss_cluster,
+    _raise_success_challenge,
     fetch_web,
 )
 
@@ -411,6 +419,37 @@ def test_format_rss_expands_google_news_cluster() -> None:
     assert "- [Sibling two](https://sib.example/2) -- BBC" in out
 
 
+def test_atom_entry_uses_published_when_updated_missing() -> None:
+    entry = ElementTree.fromstring(
+        "<entry><title>T</title><published>2026-01-01</published>"
+        "<link href=' https://example.test/x '/>"
+        "<summary>summary</summary></entry>",
+    )
+    lines: list[str] = []
+    _append_atom_entry(entry, lines)
+    assert lines == ["## T", "2026-01-01", "https://example.test/x", "summary", ""]
+    assert _atom_link(entry) == "https://example.test/x"
+    assert _atom_content(entry) == "summary"
+
+
+def test_atom_entry_caps_content_at_500_characters() -> None:
+    entry = ElementTree.fromstring(
+        "<entry><content>" + "x" * 501 + "</content></entry>",
+    )
+    lines: list[str] = []
+    _append_atom_entry(entry, lines)
+    assert lines == ["x" * 500, ""]
+
+
+def test_rss_item_omits_empty_optional_fields() -> None:
+    item = ElementTree.fromstring(
+        "<item><title>T</title><description>not a cluster</description></item>",
+    )
+    lines: list[str] = []
+    _append_rss_item(item, lines)
+    assert lines == ["## T", ""]
+
+
 def test_format_rss_renders_atom_entries() -> None:
     """Atom ``<entry>`` feeds render the same listing-friendly shape."""
     feed = (
@@ -484,6 +523,189 @@ def test_parse_rss_cluster_optional_source() -> None:
     fragment = '<li><a href="https://example.com/y">Bare title</a></li>'
     entries = _parse_rss_cluster(fragment)
     assert entries == [("Bare title", "https://example.com/y", "")]
+
+
+def test_extract_text_passes_url_and_replaces_invalid_utf8() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def extractor(content: str, *, url: str = "") -> str:
+        seen.append((content, url))
+        return content
+
+    with patch.dict("wesearch.web._EXTRACTORS", {"raw": extractor}):
+        assert (
+            _extract_text(b"ok\xff", kind=_KIND_HTML, url="https://u", extractor="raw")
+            == "ok�"
+        )
+    assert seen == [("ok�", "https://u")]
+
+
+def test_extract_text_json_detection_accepts_leading_whitespace() -> None:
+    assert _extract_text(b" \n[1, 2]", kind=_KIND_HTML) == " \n[1, 2]"
+
+
+def test_fetch_body_forwards_url_policy_and_request_fields() -> None:
+    policy = PolicyParams(transport="stdlib", trust="internal")
+    with patch("wesearch.web.fetch", return_value=(b"ok", None)) as mock_fetch:
+        body, kind = _fetch_body(
+            "https://api.example/x",
+            method="POST",
+            json_body=NO_BODY,
+            form_body={"b": "2"},
+            policy=policy,
+        )
+    request = cast(RequestParams, mock_fetch.call_args.kwargs["request"])
+    assert body == b"ok"
+    assert kind == _KIND_HTML
+    assert mock_fetch.call_args.args == ("https://api.example/x",)
+    assert request.content.method == "POST"
+    assert request.content.json is NO_BODY
+    assert request.content.data == {"b": "2"}
+    assert request.retry.timeout_sec == 15
+    assert request.policy is policy
+
+
+def test_append_rss_item_exactly_formats_metadata_and_cluster() -> None:
+    item = ElementTree.fromstring(
+        "<item><title> T </title><link> https://item </link>"
+        "<source> Source </source><pubDate> Date </pubDate>"
+        '<description><![CDATA[<ol><li><a href="lead">Lead</a></li>'
+        '<li><a href="sibling">Sibling</a><font>Site</font></li></ol>]]></description>'
+        "</item>",
+    )
+    lines: list[str] = []
+    _append_rss_item(item, lines)
+    assert lines == [
+        "## T",
+        "Source -- Date",
+        "https://item",
+        "- [Sibling](sibling) -- Site",
+        "",
+    ]
+
+
+def test_append_rss_item_omits_empty_source_description_and_cluster_source() -> None:
+    item = ElementTree.fromstring(
+        "<item><title>T</title><source></source><description><![CDATA["
+        '<ol><li><a href="lead">Lead</a></li>'
+        '<li><a href="sibling">Sibling</a></li></ol>]]></description></item>',
+    )
+    lines: list[str] = []
+    _append_rss_item(item, lines)
+    assert lines == ["## T", "- [Sibling](sibling)", ""]
+
+
+def test_atom_helpers_exactly_clean_nested_content_and_missing_author() -> None:
+    entry = ElementTree.fromstring(
+        "<entry><author/><content type='xhtml'><div>A <b>B</b></div></content></entry>",
+    )
+    assert _atom_link(entry) == ""
+    assert _atom_content(entry) == "A B"
+    lines: list[str] = []
+    _append_atom_entry(entry, lines)
+    assert lines == ["A B", ""]
+
+
+def test_format_atom_exactly_formats_empty_and_nonempty_titles() -> None:
+    feed = ElementTree.fromstring(
+        "<feed><title> Feed </title><entry><title> E </title></entry></feed>",
+    )
+    assert _format_rss(ElementTree.tostring(feed)) == "# Feed\n\n## E"
+
+
+def test_format_rss_exactly_handles_missing_channel_and_namespaces() -> None:
+    assert _format_rss(b"<rss/>") == "<rss/>"
+    assert _format_rss(b"<root><title>ignored</title></root>") == "# ignored"
+
+
+def test_fetch_body_forwards_provider_urls_and_policies() -> None:
+    policy = PolicyParams(transport="stdlib", trust="internal")
+    with (
+        patch("wesearch.web.google_news.matches", return_value=True),
+        patch(
+            "wesearch.web.google_news.fetch_google_news",
+            return_value=(b"x", "html"),
+        ) as news,
+        patch("wesearch.web._raise_success_challenge"),
+    ):
+        assert _fetch_body(
+            "https://news",
+            method="GET",
+            json_body=NO_BODY,
+            form_body=None,
+            policy=policy,
+        ) == (b"x", _KIND_HTML)
+    assert news.call_args.args == ("https://news",)
+    assert news.call_args.kwargs == {"policy": policy}
+
+    with (
+        patch("wesearch.web.x.matches", return_value=True),
+        patch("wesearch.web.x.fetch_x", return_value=b"md") as x_fetch,
+    ):
+        assert _fetch_body(
+            "https://x",
+            method="GET",
+            json_body=NO_BODY,
+            form_body=None,
+            policy=policy,
+        ) == (b"md", _KIND_MARKDOWN)
+    assert x_fetch.call_args.args == ("https://x",)
+    assert x_fetch.call_args.kwargs == {"policy": policy}
+
+
+def test_local_name_strips_only_namespace_prefix() -> None:
+    assert _local_name("{urn:test}entry") == "entry"
+    assert _local_name("{one}two}three") == "three"
+    assert _local_name("entry}") == ""
+    assert _local_name("entry") == "entry"
+
+
+def test_format_rss_exactly_joins_multiple_entries() -> None:
+    feed = b"<rss><channel><item><title>A</title></item><item><title>B</title></item></channel></rss>"
+    assert _format_rss(feed) == "## A\n\n## B"
+
+
+def test_format_rss_empty_title_and_item_are_omitted() -> None:
+    feed = b"<rss><channel><title></title><item><link>x</link></item></channel></rss>"
+    assert _format_rss(feed) == "x"
+
+
+def test_fetch_web_max_chars_exact_boundary_is_not_truncated() -> None:
+    with (
+        patch(
+            "wesearch.web.fetch_with_reader_fallback",
+            return_value=(b"abc", False),
+        ),
+        patch("wesearch.web._extract_text", return_value="abc"),
+    ):
+        result = fetch_web("https://example.test", max_chars=3)
+    assert result.text == "abc"
+    assert result.truncated is False
+
+
+def test_fetch_web_max_chars_zero_returns_empty_and_truncated() -> None:
+    with (
+        patch(
+            "wesearch.web.fetch_with_reader_fallback",
+            return_value=(b"abc", False),
+        ),
+        patch("wesearch.web._extract_text", return_value="abc"),
+    ):
+        result = fetch_web("https://example.test", max_chars=0)
+    assert result.text == ""
+    assert result.truncated is True
+
+
+def test_raise_success_challenge_passes_url_status_and_body() -> None:
+    error = CloudflareChallengeError
+    with (
+        patch("wesearch.web.classify_challenge", return_value=error),
+        pytest.raises(error) as exc_info,
+    ):
+        _raise_success_challenge("https://blocked", b"body")
+    assert exc_info.value.url == "https://blocked"
+    assert exc_info.value.status == 200
+    assert exc_info.value.body == b"body"
 
 
 if __name__ == "__main__":

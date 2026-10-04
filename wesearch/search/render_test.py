@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from types import MappingProxyType
 
 from wesearch.search.custom_types import (
+    CodeResult,
+    FileResult,
     ImageResult,
     MapResult,
+    MediaResult,
+    PackageResult,
     PaperResult,
     SearchResult,
     TorrentResult,
     VideoResult,
 )
-from wesearch.search.render import format_result, lean_result
+from wesearch.search.render import detail_fields, format_result, lean_result
 
 
 def test_format_paper_result() -> None:
@@ -157,6 +162,194 @@ def test_a_reported_zero_survives_both_renderings() -> None:
 def test_lean_result_drops_empty_fields() -> None:
     lean = lean_result(SearchResult(url="https://w", title="W", snippet=""))
     assert lean == {"url": "https://w", "title": "W"}
+
+
+def test_detail_fields_paper_exact() -> None:
+    assert (
+        detail_fields(
+            PaperResult(url="u", title="t", snippet="s", authors=("A", "B", "C")),
+        )["authors"]
+        == "A, B, C"
+    )
+    result = PaperResult(
+        url="u",
+        title="t",
+        snippet="s",
+        authors=("A", "B", "C", "D"),
+        journal="J",
+        published=datetime(2020, 1, 2, tzinfo=UTC),
+        doi="d",
+        citations=0,
+        pdf_url="p",
+    )
+    assert detail_fields(result) == {
+        "authors": "A, B, C +",
+        "journal": "J",
+        "year": 2020,
+        "doi": "d",
+        "citations": 0,
+        "pdf_url": "p",
+    }
+
+
+def test_detail_fields_category_records_exact() -> None:
+    published = datetime(2020, 1, 2, tzinfo=UTC)
+    cases = [
+        (
+            ImageResult(
+                url="u",
+                title="t",
+                snippet="s",
+                image_url="i",
+                resolution="r",
+                img_format="f",
+                source="src",
+            ),
+            {"image_url": "i", "resolution": "r", "img_format": "f", "source": "src"},
+        ),
+        (
+            VideoResult(
+                url="u",
+                title="t",
+                snippet="s",
+                author="a",
+                length="l",
+                views="v",
+                iframe_url="i",
+            ),
+            {"author": "a", "length": "l", "views": "v", "iframe_url": "i"},
+        ),
+        (
+            MediaResult(
+                url="u",
+                title="t",
+                snippet="s",
+                published=published,
+                length="l",
+                audio_url="a",
+                iframe_url="i",
+            ),
+            {"published": "2020-01-02", "length": "l", "url_media": "a"},
+        ),
+        (
+            MapResult(
+                url="u",
+                title="t",
+                snippet="s",
+                latitude=1.0,
+                longitude=2.0,
+                address=MappingProxyType({"road": "Main", "city": "Paris"}),
+            ),
+            {"coordinates": "1.0,2.0", "address": "Main, Paris"},
+        ),
+        (
+            PackageResult(
+                url="u",
+                title="t",
+                snippet="s",
+                package_name="n",
+                version="v",
+                license_name="l",
+                homepage="h",
+                source_code_url="src",
+            ),
+            {"package_name": "n", "version": "v", "license_name": "l", "homepage": "h"},
+        ),
+        (
+            CodeResult(
+                url="u",
+                title="t",
+                snippet="s",
+                repository="r",
+                filename="f",
+                code_language="py",
+            ),
+            {"repository": "r", "filename": "f", "code_language": "py"},
+        ),
+        (
+            FileResult(
+                url="u",
+                title="t",
+                snippet="s",
+                filename="f",
+                size="z",
+                mimetype="m",
+            ),
+            {"filename": "f", "size": "z", "mimetype": "m"},
+        ),
+        (
+            TorrentResult(
+                url="u",
+                title="t",
+                snippet="s",
+                filesize="z",
+                seed=0,
+                leech=1,
+                magnet_url="m",
+            ),
+            {"filesize": "z", "seed": 0, "leech": 1, "magnet_url": "m"},
+        ),
+    ]
+    for result, expected in cases:
+        assert detail_fields(result) == expected
+
+
+def test_detail_fields_empty_and_fallback_cases() -> None:
+    assert (
+        detail_fields(PaperResult(url="u", title="t", snippet="s", authors=()))[
+            "authors"
+        ]
+        == ""
+    )
+    assert detail_fields(MediaResult(url="u", title="t", snippet="s")) == {
+        "published": "",
+        "length": "",
+        "url_media": "",
+    }
+    assert detail_fields(MapResult(url="u", title="t", snippet="s", latitude=1.0)) == {
+        "coordinates": "",
+        "address": "",
+    }
+    assert (
+        detail_fields(
+            PackageResult(url="u", title="t", snippet="s", source_code_url="src"),
+        )["homepage"]
+        == "src"
+    )
+    assert detail_fields(SearchResult(url="u", title="t", snippet="s")) == {}
+
+
+def test_format_result_exact_detail_and_body_layout() -> None:
+    result = PaperResult(
+        url="u",
+        title="T",
+        snippet="S",
+        doi="d",
+        citations=0,
+        journal="XXXX",
+    )
+    assert format_result(result) == "[T](u)\nS\n  XXXX · doi:d · cites:0"
+
+
+def test_lean_result_exactly_keeps_all_nonempty_category_fields() -> None:
+    result = ImageResult(
+        url="u",
+        title="t",
+        snippet="s",
+        image_url="i",
+        resolution="r",
+        img_format="f",
+        source="src",
+    )
+    assert lean_result(result) == {
+        "url": "u",
+        "title": "t",
+        "snippet": "s",
+        "image_url": "i",
+        "resolution": "r",
+        "img_format": "f",
+        "source": "src",
+    }
 
 
 if __name__ == "__main__":

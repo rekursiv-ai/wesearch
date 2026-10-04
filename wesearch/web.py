@@ -220,7 +220,7 @@ def _extract_text(
     extractor: Extractor = "html2text",
 ) -> str:
     """Extract result text from a response body (unbounded; caller caps)."""
-    content = body.decode("utf-8", errors="replace")
+    content = body.decode(errors="replace")
     if kind == _KIND_RSS:
         return _format_rss(body)
     if kind == _KIND_MARKDOWN:
@@ -263,12 +263,12 @@ def _format_rss(body: bytes) -> str:
     try:
         root = _defused_etree.fromstring(body)
     except (ParseError, _defused_common.DefusedXmlException):
-        return body.decode("utf-8", errors="replace")
+        return body.decode(errors="replace")
     if _local_name(root.tag) == "feed":
         return _format_atom(root).rstrip()
     channel = root.find("channel") if _local_name(root.tag) == "rss" else root
     if channel is None:
-        return body.decode("utf-8", errors="replace")
+        return body.decode()
     lines: list[str] = []
     feed_title = (_child_text(channel, "title") or "").strip()
     if feed_title:
@@ -357,7 +357,9 @@ def _append_rss_item(item: Element[str], lines: list[str]) -> None:
     if link:
         lines.append(link)
     # The first cluster entry duplicates the item title; siblings follow.
+    # pragma: no mutate start -- Empty descriptions and non-matching text parse identically.
     cluster = _parse_rss_cluster(_child_text(item, "description") or "")
+    # pragma: no mutate end
     for sibling_title, sibling_link, sibling_source in cluster[1:]:
         suffix = f" -- {sibling_source}" if sibling_source else ""
         lines.append(f"- [{sibling_title}]({sibling_link}){suffix}")
@@ -366,7 +368,7 @@ def _append_rss_item(item: Element[str], lines: list[str]) -> None:
 
 def _local_name(tag: str) -> str:
     """Return an XML tag without its namespace."""
-    return tag.rsplit("}", 1)[-1]
+    return tag.rpartition("}")[2]
 
 
 def _children(parent: Element[str], name: str) -> list[Element[str]]:

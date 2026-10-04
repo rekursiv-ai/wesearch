@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import gzip
@@ -12,14 +13,22 @@ import brotli
 import pytest
 
 from wesearch.fetch.common import (
+    _netloc,
     apply_redirect,
     bracket_ipv6,
     decompress,
+    decompress_error_body,
+    default_port,
+    host_header,
+    join_headers,
     origin,
+    pinned_host,
     public_host,
+    redirect_target,
     rewrite_origin,
 )
 from wesearch.fetch.testing import zstd_compress
+from wesearch.types.errors import FetchError
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -46,7 +55,7 @@ class TestPublicHost:
             public_host("does-not-exist.invalid")
 
     def test_rejects_a_missing_host(self) -> None:
-        with pytest.raises(ValueError, match="no host"):
+        with pytest.raises(ValueError, match=r"^URL has no host\.$"):
             public_host("")
 
     def test_rejects_loopback(self) -> None:
@@ -85,6 +94,70 @@ class TestPublicHost:
             pytest.raises(ValueError, match="non-public"),
         ):
             public_host("example.com")
+
+    @pytest.mark.parametrize("ip", ["0.0.0." + "0", "224.0.0.1", "192.0.2.1"])
+    def test_rejects_unspecified_multicast_and_reserved_addresses(
+        self,
+        ip: str,
+    ) -> None:
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo(ip)),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("special.example")
+
+    def test_resolution_receives_host_and_unspecified_service(self) -> None:
+        with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")) as resolve:
+            public_host("example.com")
+        resolve.assert_called_once_with("example.com", None)
+
+    def test_rejects_reserved_flag_independently(self) -> None:
+        address = SimpleNamespace(
+            is_loopback=False,
+            is_link_local=False,
+            is_private=False,
+            is_multicast=False,
+            is_reserved=True,
+            is_unspecified=False,
+        )
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")),
+            patch(
+                "wesearch.fetch.common.ipaddress.ip_address",
+                return_value=address,
+            ),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("reserved.example")
+
+    def test_rejects_loopback_flag_independently(self) -> None:
+        address = SimpleNamespace(
+            is_loopback=True,
+            is_link_local=False,
+            is_private=False,
+            is_multicast=False,
+            is_reserved=False,
+            is_unspecified=False,
+        )
+        with (
+            patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")),
+            patch(
+                "wesearch.fetch.common.ipaddress.ip_address",
+                return_value=address,
+            ),
+            pytest.raises(ValueError, match="non-public"),
+        ):
+            public_host("loopback.example")
+
+    def test_rejects_empty_resolution_with_exact_error(self) -> None:
+        with (
+            patch("socket.getaddrinfo", return_value=[]),
+            pytest.raises(
+                ValueError,
+                match=r"^DNS resolution returned no address for 'empty.example'\.$",
+            ),
+        ):
+            public_host("empty.example")
 
     def test_prefers_ipv4_when_resolver_lists_ipv6_first(self) -> None:
         # ``getaddrinfo`` often returns AAAA first, but many networks have no
@@ -128,6 +201,9 @@ class TestOrigin:
     )
     def test_equivalent_urls_share_one_origin(self, url: str) -> None:
         assert origin(url) == "https://example.com"
+
+    def test_hostless_origin_keeps_empty_host(self) -> None:
+        assert origin("") == "://"
 
     def test_a_non_default_port_is_part_of_the_origin(self) -> None:
         assert origin("https://example.com:8443/a") == "https://example.com:8443"
@@ -198,6 +274,18 @@ class TestApplyRedirect:
         assert body is None
         assert not any(k.lower() == "content-type" for k in headers)
 
+    def test_301_downgrades_post_to_get(self) -> None:
+        _headers, method, body = apply_redirect(
+            "https://x/submit",
+            {},
+            "POST",
+            body=b"{}",
+            status=301,
+            redirect_url="https://x/land",
+        )
+        assert method == "GET"
+        assert body is None
+
     def test_302_downgrades_post_to_get(self) -> None:
         _headers, method, body = apply_redirect(
             "https://x/submit",
@@ -265,6 +353,20 @@ class TestApplyRedirect:
 
         assert not any(k.lower() == "authorization" for k in headers)
         assert headers.get("Accept") == "*/*"
+
+    def test_get_methods_are_preserved_for_every_redirect_status(self) -> None:
+        for status in (301, 302, 303):
+            headers, method, body = apply_redirect(
+                "https://a.com/1",
+                {"Origin": "https://a.com"},
+                "GET",
+                body=b"ignored",
+                status=status,
+                redirect_url="https://a.com/2",
+            )
+            assert headers["Origin"] == "https://a.com"
+            assert method == "GET"
+            assert body == b"ignored"
 
     def test_same_origin_keeps_authorization(self) -> None:
         """A same-origin hop is still the origin the credential belongs to."""
@@ -334,6 +436,76 @@ class TestDecompress:
         data = b"hello world"
         chained = gzip.compress(brotli.compress(data))
         assert decompress(chained, "br, gzip") == data
+
+
+class TestSharedHelpers:
+    def test_netloc_handles_port_and_missing_port(self) -> None:
+        assert _netloc("example.com", 8443) == "example.com:8443"
+        assert _netloc("example.com", None) == "example.com"
+
+    def test_default_port_and_host_header_boundaries(self) -> None:
+        assert default_port("https") == 443
+        assert default_port("http") == 80
+        assert host_header("example.com", 443, "https") == "example.com"
+        assert host_header("example.com", 444, "https") == "example.com:444"
+        assert host_header("example.com", None, "https") == "example.com"
+
+    def test_join_headers_folds_regular_and_cookie_duplicates_differently(self) -> None:
+        assert join_headers(
+            [
+                ("X-Test", "a"),
+                ("x-test", "b"),
+                ("Set-Cookie", "a=1, x"),
+                ("set-cookie", "b=2"),
+            ],
+        ) == {"x-test": "a, b", "set-cookie": "a=1, x\nb=2"}
+
+    def test_redirect_target_resolves_relative_location_and_requires_header(
+        self,
+    ) -> None:
+        assert (
+            redirect_target("https://example.com/a/b", 302, {"location": "../c"})
+            == "https://example.com/c"
+        )
+        with pytest.raises(FetchError) as error:
+            redirect_target("https://example.com/a", 301, {})
+        assert error.value.url == "https://example.com/a"
+        assert error.value.status == 301
+        assert error.value.headers == {}
+        assert error.value.body == b"Redirect with no Location header"
+
+    def test_decompress_error_body_falls_back_to_raw_bytes(self) -> None:
+        raw = b"not compressed"
+        assert decompress_error_body(raw, {"content-encoding": "gzip"}) == raw
+        assert decompress_error_body(raw, {}) == raw
+        assert decompress_error_body(b"RAW", {"content-encoding": "IDENTITY"}) == b"RAW"
+        assert (
+            decompress_error_body(gzip.compress(b"ok"), {"content-encoding": "gzip"})
+            == b"ok"
+        )
+
+    def test_decompress_error_body_passes_empty_encoding_to_decompress(self) -> None:
+        with patch(
+            "wesearch.fetch.common.decompress",
+            return_value=b"ok",
+        ) as decode:
+            assert decompress_error_body(b"raw", {}) == b"ok"
+        decode.assert_called_once_with(b"raw", "")
+
+    def test_pinned_host_internal_skips_resolution(self) -> None:
+        with patch("socket.getaddrinfo", side_effect=AssertionError):
+            assert pinned_host("https://example.com", "internal") is None
+
+    def test_pinned_host_untrusted_returns_public_pin(self) -> None:
+        with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")) as resolve:
+            pin = pinned_host("https://example.com", "untrusted")
+        assert pin is not None
+        assert pin.ip == "8.8.8.8"
+        resolve.assert_called_once_with("example.com", None)
+
+    def test_pinned_host_rejects_hostless_untrusted_url(self) -> None:
+        with pytest.raises(ValueError, match="no host"):
+            pinned_host("/relative", "untrusted")
 
 
 class TestIPv6Bracketing:

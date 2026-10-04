@@ -81,7 +81,7 @@ def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
     """Append generated prose to a tool's docstring before the SDK reads it."""
 
     def decorate(fn: F) -> F:
-        fn.__doc__ = f"{(fn.__doc__ or '').rstrip()}\n{extra}\n"
+        fn.__doc__ = f"{(fn.__doc__ or '').rstrip()}\n\n{extra}\n"
         return fn
 
     return decorate
@@ -132,7 +132,8 @@ def paper_search(
 
     Returns:
       result: Dict with "records" (list of papers), "total" (estimated
-        result count), and "complete" (false if a backend was unreachable).
+        result count), and "complete" (false when more matches remain or a
+        backend was lost).
 
     """
     if limit < 1:
@@ -190,8 +191,8 @@ def paper_references(
       source: Search backend (s2 or openalex; openalex DOI-only).
 
     Returns:
-      citations: Dict with "records" (papers this paper cites) and "complete"
-        (false if results were truncated).
+      references: Dict with "records" (papers this paper cites) and "complete"
+        (false when more may exist beyond those returned).
 
     """
     if limit < 1:
@@ -227,7 +228,7 @@ def paper_citations(
 
     Returns:
       citations: Dict with "records" (papers citing this paper) and "complete"
-        (false if results were truncated).
+        (false when more may exist beyond those returned).
 
     """
     if limit < 1:
@@ -318,8 +319,8 @@ def author_papers(
       year_to: Maximum publication year (inclusive), or None for all.
 
     Returns:
-      papers: Dict with "records" (authored papers) and "total" (estimated
-        result count).
+      papers: Dict with "records" (authored papers) and "complete" (false when
+        more may exist beyond those returned).
 
     """
     if limit < 1:
@@ -354,20 +355,20 @@ def web_search(
     package. Pass ``backend="searxng"`` explicitly for a SearXNG instance; it reads
     ``SEARXNG_URL`` and fails without it. ``categories`` selects a SearXNG result tab,
     which selects that backend when none is named and is rejected alongside an explicit
-    non-SearXNG one. ``transport`` picks the retrieval path; see ``web_fetch`` for the
-    values. Category tabs and what each returns:
+    non-SearXNG one. The list at the end describes each parameter, including every
+    tab and what it returns.
 
     Args:
       query: Search terms.
       num_results: Maximum number of results to return.
-      backend: Search provider (DuckDuckGo by default; "searxng" requires
-        SEARXNG_URL environment variable).
-      categories: SearXNG result tab to query (general, news, images, etc.).
-      transport: HTTP method (see web_fetch for details).
+      backend: Search provider; "searxng" requires the SEARXNG_URL environment
+        variable.
+      categories: SearXNG result tab; the tabs are listed at the end.
+      transport: Retrieval path, as for web_fetch; see the list at the end.
 
     Returns:
-      results: List of web search results with url, title, snippet, and
-        category-specific metadata (DOI/authors for science results, etc.).
+      results: One dict per hit with its url, title, and snippet, plus the
+        tab's own fields (a paper's DOI and authors, an image's resolution).
 
     """
     # Deliberately not env-sniffing here: nothing in the dispatch path inspects
@@ -401,20 +402,22 @@ def web_fetch(
 ) -> dict[str, object]:
     """Fetch a page and return its extracted text.
 
-    GET only; ``max_chars`` caps the returned body. Every other knob is
-    described below from the shared spec, so this surface and the sagent tool
+    GET only. ``url``, ``transport``, and ``extractor`` are described in the list at
+    the end, rendered from the spec the sagent tool shares, so the two surfaces
     cannot document the same parameter differently.
 
     Args:
-      url: Page URL to fetch and extract text from.
-      max_chars: Maximum characters of body text to return (capped at 8000).
-      transport: HTTP method ("auto", "get", "post", "browser_http2").
-      extractor: Parser ("html2text" for plain text, "trafilatura" for article
-        mode with title/content separation).
+      url: The page to fetch; see the list at the end.
+      max_chars: Most characters of text to return; at least 1.
+      transport: Retrieval path; see the list at the end.
+      extractor: How the page becomes text; the values are listed at the end.
 
     Returns:
-      page: Dict with "url", "title", "body" (extracted text), "status" (HTTP
-        code), and "elapsed_sec" (fetch time).
+      page: Dict with "url" (the URL as requested), "text" (the extracted text,
+        possibly empty, cut to max_chars), "truncated" (whether that cut removed
+        anything), and "kind" (how the body became text, such as 'html' through
+        the extractor, 'markdown' from the reader proxy as-is, or 'rss' for a
+        feed).
 
     """
     if max_chars < 1:

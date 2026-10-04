@@ -34,7 +34,14 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON, loads
+from wesearch.lib.custom_json import (
+    DictCodec,
+    IntCodec,
+    ListCodec,
+    MutableJSON,
+    StrCodec,
+    loads,
+)
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,
@@ -150,7 +157,10 @@ def references(
     )
     ref_urls = ListCodec.coerce(work.get("referenced_works"), str)
     ids = [_work_id_tail(u) for u in ref_urls]
-    capped = ids if limit is None else ids[:limit]
+    if limit is None:
+        capped = ids
+    else:
+        capped = ids[:limit]
     records = _resolve_works(capped, transport=transport)
     # ``complete`` is evidence-derived, never intent-derived: the ``openalex:``
     # OR-filter silently drops ids it cannot resolve, so a short result must NOT
@@ -221,7 +231,6 @@ def _resolve_work(
         raise BackendError(
             "OpenAlex citation graph resolves DOIs only; arXiv-id resolution is "
             "unreliable. Use the S2 source for an arXiv id, or supply the DOI.",
-            status=0,
         )
     data = _get(
         "/works",
@@ -256,7 +265,9 @@ def _resolve_works(
 
 def _work_id_tail(url_or_id: str) -> str:
     """Return the bare ``W...`` id from an OpenAlex work URL or id."""
-    return url_or_id.rsplit("/", 1)[-1]
+    return url_or_id.rsplit("/", maxsplit=1)[
+        -1
+    ]  # pragma: no mutate -- split limit is irrelevant to the final segment.
 
 
 def _select(extra: str = "") -> str:
@@ -282,7 +293,7 @@ def _select(extra: str = "") -> str:
 
 def _headers() -> dict[str, str]:
     """UA with mailto signals the polite pool for better rate limits."""
-    email = os.environ.get("OPENALEX_EMAIL", "")
+    email = os.environ.get("OPENALEX_EMAIL")
     ua = f"loop-paper (mailto:{email})" if email else "loop-paper"
     return {"Accept": "application/json", "User-Agent": ua}
 
@@ -315,6 +326,8 @@ def _paginate_works(
     # OpenAlex pages a filtered /works list with a 1-based page bounded by
     # meta.count, per-page <= 200. The walker owns the clamp and offset math.
     total = 0
+    if limit == 0:
+        return Page(entries=[], complete=True), total
 
     def fetch_page(page_no: int, size: int) -> MutableJSON:
         nonlocal total
@@ -325,7 +338,7 @@ def _paginate_works(
             "per-page": size,
         }
         body = _get("/works", params, transport=transport)
-        total = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"), 0)
+        total = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"))
         return body
 
     cursor = Cursor(
@@ -343,7 +356,7 @@ def _paginate_works(
 def _works_page_advance(body: MutableJSON, page_no: int, size: int) -> int | None:
     """Next 1-based ``/works`` page, or None at the end."""
     rows = ListCodec.coerce(body.get("results"))
-    count = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"), 0)
+    count = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"))
     seen = (page_no - 1) * size + len(rows)
     return page_no + 1 if rows and seen < count else None
 
@@ -361,7 +374,7 @@ def _get(
     """GET an OpenAlex path, gated, with polite UA + optional key; parse JSON."""
     # A premium key raises the daily credit budget far above the anonymous
     # ~1000/day; send it when configured.
-    api_key = os.environ.get("OPENALEX_API_KEY", "")
+    api_key = os.environ.get("OPENALEX_API_KEY")
     if api_key:
         params = {**params, "api_key": api_key}
     try:
@@ -370,7 +383,7 @@ def _get(
         # The gate is a lock file; a filesystem failure here is a backend
         # failure like any other. Left raw it escapes the caller's PaperError
         # handler, and a fused search would abort rather than degrade to S2.
-        raise BackendError(f"OpenAlex rate-limit gate failed: {e}", status=0) from e
+        raise BackendError(f"OpenAlex rate-limit gate failed: {e}") from e
     try:
         raw, _ = fetch(
             url=f"{base}{path}",
@@ -382,24 +395,27 @@ def _get(
         )
     except FetchError as e:
         detail = e.body[:200].decode(errors="replace")
+        # Usually daily-credit-budget exhaustion (free tier ~1000/day, list
+        # search = 10 each), resetting at midnight UTC.
+        rate_limit_message = (
+            "OpenAlex rate limit / daily credit budget exhausted. Set "
+            "OPENALEX_API_KEY for a higher budget, or retry after the reset "
+            f"(midnight UTC). {detail}"
+        )
+        backend = "OpenAlex"
+        # OpenAlex signals real not-found semantically (200 + empty results);
+        # an HTTP 404 here is a bad endpoint -> BackendError, not NotFound.
+        # pragma: no mutate start -- the flag is truth-tested, so False->None is inert.
         raise translate_http_error(
             e,
-            backend="OpenAlex",
-            rate_limit_message=(
-                # Usually daily-credit-budget exhaustion (free tier ~1000/day,
-                # list search = 10 each), resetting at midnight UTC.
-                "OpenAlex rate limit / daily credit budget exhausted. Set "
-                "OPENALEX_API_KEY for a higher budget, or retry after the reset "
-                f"(midnight UTC). {detail}"
-            ),
-            # OpenAlex signals real not-found semantically (200 + empty results);
-            # an HTTP 404 here is a bad endpoint -> BackendError, not NotFound.
+            backend=backend,
+            rate_limit_message=rate_limit_message,
             treat_404_as_missing=False,
         ) from e
+        # pragma: no mutate end
     except (TimeoutError, OSError) as e:
         raise BackendError(
             f"OpenAlex request failed (timeout or connection error): {e}",
-            status=0,
         ) from e
     try:
         body = loads(raw)
@@ -432,7 +448,7 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
     """Convert an OpenAlex work dict into a :class:`PaperRecord`."""
     authorships = ListCodec.mappings(work.get("authorships"))
     authors = tuple(
-        str(DictCodec.coerce(a.get("author")).get("display_name") or "")
+        str(DictCodec.coerce(a.get("author")).get("display_name"))
         for a in authorships
         if DictCodec.coerce(a.get("author")).get("display_name")
     )
@@ -459,8 +475,7 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
             arxiv_raw,
         )
         if m:
-            arxiv_raw = m.group(1)
-            arxiv = arxiv_raw if isinstance(arxiv_raw, str) else None
+            arxiv = StrCodec.coerce(m.group(1))
     if arxiv is None and doi is not None:
         # OpenAlex indexes an arXiv preprint as its own work whose DOI is
         # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
@@ -469,10 +484,11 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         # suffix must go: S2 reports the bare id, so keeping ``v2`` here would
         # yield a key that joins nothing -- the exact failure this recovery
         # exists to prevent.
+        # pragma: no mutate start -- IGNORECASE makes pattern case inert.
         m = re.match(r"10\.48550/arxiv\.(.+?)(?:v\d+)?$", doi, re.IGNORECASE)
+        # pragma: no mutate end
         if m:
-            arxiv_raw = m.group(1)
-            arxiv = arxiv_raw if isinstance(arxiv_raw, str) else None
+            arxiv = StrCodec.coerce(m.group(1))
 
     primary = DictCodec.coerce(work.get("primary_location"))
     source = DictCodec.coerce(primary.get("source"))

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import PolicyParams
+from wesearch.fetch import PolicyParams, RequestParams
 from wesearch.fetch.providers import fallback
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 
@@ -136,6 +136,98 @@ class TestFallback:
             )
         # The primary (403) is surfaced, not the proxy's 401.
         assert exc.value.status == 403
+
+    def test_forwards_url_and_policy_to_both_hops(self) -> None:
+        policy = PolicyParams()
+        calls: list[tuple[str, object]] = []
+
+        def primary(url: str, *, request: object) -> tuple[bytes, None]:
+            calls.append((url, request))
+            raise FetchError(url, 429, {}, b"blocked")
+
+        def proxy(url: str, *, policy: object) -> bytes:
+            calls.append((url, policy))
+            return b"proxy"
+
+        with (
+            patch.object(fallback, "fetch", primary),
+            patch.object(fallback, "fetch_reader_proxy", proxy),
+        ):
+            assert fallback.fetch_with_reader_fallback(
+                "https://s.example/path",
+                policy=policy,
+            ) == (b"proxy", True)
+        assert calls[0][0] == "https://s.example/path"
+        assert calls[1] == ("https://s.example/path", policy)
+        request = calls[0][1]
+        assert isinstance(request, RequestParams)
+        assert request.policy is policy
+
+    def test_bot_wall_proxy_failure_reraises_exact_primary(self) -> None:
+        primary = CloudflareChallengeError(
+            url="https://s.example/",
+            status=403,
+            headers={},
+            body=b"blocked",
+        )
+
+        def primary_fetch(url: str, *, request: object) -> tuple[bytes, None]:
+            del url, request
+            raise primary
+
+        def proxy_fail(url: str, *, policy: object) -> bytes:
+            del url, policy
+            raise FetchError("https://r.jina.ai/", 401, {}, b"auth")
+
+        with (
+            patch.object(fallback, "fetch", primary_fetch),
+            patch.object(fallback, "fetch_reader_proxy", proxy_fail),
+            pytest.raises(CloudflareChallengeError) as raised,
+        ):
+            fallback.fetch_with_reader_fallback(
+                "https://s.example/",
+                policy=PolicyParams(),
+            )
+        assert raised.value is primary
+
+    def test_rate_limit_proxy_failure_reraises_exact_primary(self) -> None:
+        primary = FetchError("https://s.example/", 429, {}, b"blocked")
+
+        def primary_fetch(url: str, *, request: object) -> tuple[bytes, None]:
+            del url, request
+            raise primary
+
+        def proxy_fail(url: str, *, policy: object) -> bytes:
+            del url, policy
+            raise OSError("proxy down")
+
+        with (
+            patch.object(fallback, "fetch", primary_fetch),
+            patch.object(fallback, "fetch_reader_proxy", proxy_fail),
+            pytest.raises(FetchError) as raised,
+        ):
+            fallback.fetch_with_reader_fallback(
+                "https://s.example/",
+                policy=PolicyParams(),
+            )
+        assert raised.value is primary
+
+    def test_non_fallback_fetch_error_preserves_exception(self) -> None:
+        error = FetchError("https://s.example/", 418, {}, b"teapot")
+
+        def primary(url: str, *, request: object) -> tuple[bytes, None]:
+            del url, request
+            raise error
+
+        with (
+            patch.object(fallback, "fetch", primary),
+            pytest.raises(FetchError) as raised,
+        ):
+            fallback.fetch_with_reader_fallback(
+                "https://s.example/",
+                policy=PolicyParams(),
+            )
+        assert raised.value is error
 
 
 if __name__ == "__main__":

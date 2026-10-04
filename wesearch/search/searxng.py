@@ -305,7 +305,9 @@ def _searxng_media(item: dict[str, object]) -> MediaResult:
     )
 
 
-def _searxng_it(item: dict[str, object]) -> PackageResult | CodeResult | SearchResult:
+def _searxng_it(
+    item: dict[str, object],
+) -> PackageResult | CodeResult | SearchResult:
     """Dispatch an ``it`` item by ``template`` to its package/code/web reader."""
     template = StrCodec.coerce(item.get("template"))
     if template == "packages.html":
@@ -521,15 +523,12 @@ def category_parser(
 
 
 def category_gloss() -> str:
-    """Render every tab as one description line; no hand-copied list.
-
-    Returns:
-      result: The str.
-
-    """
+    """Render every tab as one description line; no hand-copied list."""
+    # CATEGORIES, not the alias: the import-time check above makes its keys exactly
+    # the tabs, while ``get_args`` on a PEP 695 alias returns nothing -- which once
+    # rendered this list, and every search tool's tab descriptions, empty.
     return "\n".join(
-        f"  - `{name}` -- {CATEGORIES[name].gloss}."
-        for name in cast(tuple[SearxngCategory, ...], get_args(SearxngCategory))
+        f"  - `{name}` -- {info.gloss}." for name, info in CATEGORIES.items()
     )
 
 

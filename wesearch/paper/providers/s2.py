@@ -301,7 +301,7 @@ def search_paginate(
         nonlocal total
         page_params = {**params, "offset": offset, "limit": size}
         body = get("/paper/search", page_params, transport=transport)
-        total = IntCodec.coerce(body.get("total"), 0)
+        total = IntCodec.coerce(body.get("total"))
         return body
 
     cursor = Cursor(
@@ -340,7 +340,7 @@ def paper_record_from(
     """
     ids = DictCodec.coerce(data.get("externalIds"))
     authors_raw = ListCodec.mappings(data.get("authors"))
-    authors = tuple(str(a.get("name") or "") for a in authors_raw if a.get("name"))
+    authors = tuple(str(a["name"]) for a in authors_raw if a.get("name"))
     oa = DictCodec.coerce(data.get("openAccessPdf"))
     doi = ids.get("DOI")
     arxiv = ids.get("ArXiv")
@@ -442,13 +442,13 @@ def search_total(data: MutableJSON) -> int:
       result: Total number of results in the S2 response, or 0 if missing.
 
     """
-    return IntCodec.coerce(data.get("total"), 0)
+    return IntCodec.coerce(data.get("total"))
 
 
 def _headers() -> dict[str, str]:
     """Build S2 request headers, injecting ``x-api-key`` when present in env."""
     headers: dict[str, str] = {"Accept": "application/json"}
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
     if key:
         headers["x-api-key"] = key
     return headers
@@ -486,7 +486,6 @@ def _attempt(
         except (TimeoutError, OSError) as e:
             raise BackendError(
                 f"Semantic Scholar request failed (timeout or connection error): {e}",
-                status=0,
             ) from e
     raise AssertionError(  # pragma: no cover -- loop either returns or raises
         "_attempt retry loop exited without returning",
@@ -546,7 +545,7 @@ def _search_offset_advance(body: MutableJSON, offset: int, size: int) -> int | N
     del size
     rows = ListCodec.coerce(body.get("data"))
     nxt = offset + len(rows)
-    return nxt if rows and nxt < IntCodec.coerce(body.get("total"), 0) else None
+    return nxt if rows and nxt < IntCodec.coerce(body.get("total")) else None
 
 
 def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:

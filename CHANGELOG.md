@@ -3,7 +3,137 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.1.12 - 2026-10-03
+
+### Added
+
+- `fetch_zendriver` takes `trust` and `max_redirects`, and `BrowserResult`
+  reports `final_url`, where the navigation actually ended. Chrome follows
+  redirects itself, so the requested URL is not where the cookies belong.
+- `searxng` takes `retries`, defaulting to one. The edge in front of an
+  instance throttles a burst with a 429 and a `Retry-After`; the retry
+  waits that out (capped at 30 s) instead of surfacing a hard failure.
+- `wesearch.lib.zstd_compat`, one zstandard interface that uses the
+  standard library's `compression.zstd` on Python 3.14 and the `zstandard`
+  package below it, and `wesearch.lib.absent`, the `ABSENT` sentinel.
+
+### Changed
+
+- **Breaking:** `BrowserUnavailableError` subclasses `OSError` instead of
+  `RuntimeError`. A host with no usable Chrome now surfaces from `search`
+  as a `SearchError`, and a fused paper search loses that one backend
+  rather than aborting after Semantic Scholar had already answered. Code
+  that caught it as `RuntimeError` must catch `OSError` or the class.
+- **Breaking:** `wesearch.lib.custom_json` replaces its loose helpers with
+  per-type codecs, and the old names are gone, not aliased. `str_val`,
+  `int_val`, `float_val`, `bool_val`, `datetime_val`, `dict_val`, and
+  `list_val` become `StrCodec.coerce`, `IntCodec.coerce`,
+  `FloatCodec.coerce`, `BoolCodec.coerce`, `DatetimeCodec.coerce`,
+  `DictCodec.coerce`, and `ListCodec.coerce`; `dicts_val` becomes
+  `ListCodec.mappings`; `dataclass_to_json` and `dataclass_from_json`
+  become `DataclassCodec.to_json` and `DataclassCodec.from_json`. The
+  `JsonCodec` mixin is removed. `decode_or_none` reads a field whose
+  absence matters without collapsing it to a default.
+- **Breaking:** the fetch test doubles (`StubSession`, `StubCookies`,
+  `const_curl_session`, ...) moved from `wesearch.fetch.test_helpers` to
+  `wesearch.fetch.testing`, with no alias.
+- **Breaking:** `wesearch.paper.errors.translate_http_error` renames its
+  `not_found_on_404` keyword to `treat_404_as_missing`.
+- A Cloudflare-fronted error counts as a bot wall only when Cloudflare
+  says so: challenge markup in the body, or a `cf-mitigated: challenge`
+  header. A 403, 429, or 503 that merely carries `server: cloudflare` or
+  `cf-ray` -- an origin's own error, an expired API token, a site's rate
+  limit -- now raises a plain `FetchError`. Read as a challenge, it sent
+  the request to the browser, which wraps a JSON API's answer in HTML, and
+  marked the domain browser-only for good.
+- `fetch_web` falls back to the reader proxy only for a proven bot wall
+  (`BotDetectionError`) or a 429, failures a different egress can clear. A
+  bare 403 or 503 now raises rather than sending the URL to a third party.
+- Each MCP tool's description documents its parameters and the fields it
+  returns, and a test holds both to what the tool actually accepts and
+  sends.
+- The bundled desktop and Android Chrome user-agent pools are refreshed
+  from the upstream dataset.
+- Development: type checking uses a bundled, patched typeshed
+  (`packages/rekursiv-ai-typeshed`), which `uv sync` installs as a path
+  dependency, and the ty and basedpyright floors are raised. Runtime
+  dependencies and the supported Python versions (3.12+) are unchanged.
+
+### Fixed
+
+- The browser transport validates every document request -- the
+  navigation and each redirect hop Chrome follows on its own -- before
+  Chrome connects, under the default `trust="untrusted"`. Only the
+  caller's URL was checked, so a public page could redirect Chrome to
+  loopback or a cloud metadata address. `on_redirect` now fires for each
+  hop before it is followed, so raising from it aborts the hop.
+- A browser fetch follows no more redirect hops than
+  `RetryParams.max_redirects` allows (10 by default), as the other
+  transports do. Chrome applied its own limit whatever the caller set,
+  including 0, which promises no redirects at all.
+- A cross-origin redirect drops `Authorization`, not just `Cookie` and the
+  client hints, on every transport. The browser transport attaches a
+  caller's `Cookie` and `Authorization` only to requests for the original
+  origin; it used to install them tab-wide, so every redirect target
+  received them.
+- One-shot curl requests connect to the address that passed validation,
+  as session requests already did, closing a DNS-rebinding gap.
+- Origins compare in canonical form, so `https://User@EXAMPLE.com:443/` and
+  `https://example.com/` share one cookie jar, and a hop between them no
+  longer reads as cross-origin and loses its credentials.
+- Cookies harvested by a browser fetch that redirected are stored under
+  the domain it landed on, not the one requested.
+- A browser fetch of JSON or plain text returns the payload instead of the
+  viewer page Chrome generates around it, which callers rejected as a
+  malformed response the server never sent.
+- A SearXNG instance answering with something other than JSON raises a
+  `SearchError` that names what answered -- Cloudflare's rate-limit page
+  (error 1015), another HTML page, or an unparseable body -- instead of a
+  bare `JSONDecodeError` at line 1, column 1.
+- `fetch` runs the caller's `body_validator` on `raw_headers` requests too.
+  DuckDuckGo's bot challenge therefore raises `PuzzleChallengeError`
+  instead of parsing to an empty result list, and an empty parse logs
+  whether it was a challenge, no results, or changed markup.
+- Challenge detection reads markers only where a page renders them. A
+  `<script>` or `<style>` body that spells out a CAPTCHA widget, or a link
+  to a path containing `data-sitekey`, no longer marks an ordinary page as
+  a challenge; Cloudflare's marker on a `<script>` tag's own attributes is
+  still found.
+- MCP tools report the library's error to the client as
+  `<ErrorType>: <message>`. The MCP SDK forwards only `ToolError`, so a
+  missing `SEARXNG_URL`, a DuckDuckGo CAPTCHA, and a bad DOI all arrived as
+  "Error executing tool", and a bot wall's recovery guidance never did.
+- A browser fetch that times out while Chrome is still answering no
+  longer leaves the pooled browser deaf to every later fetch; the late
+  reply killed the connection's listener.
+- Browser teardown is bounded. Closing a tab gives up after 5 s, and
+  shutdown at exit spends one 5 s budget across every pooled browser,
+  where a wedged connection used to hang it. A browser that does not stop
+  in time is killed, so it no longer holds its profile lock and fails the
+  next launch. A fetch's whole wait is capped at `timeout_sec` plus 30 s.
+- On macOS the browser transport launches Chrome for Testing when a
+  Puppeteer or Playwright download provides one. Headless stock Chrome
+  registers as the user's Chrome and swallowed every link opened from
+  other applications while a fetch ran. Without one, Chrome resolves as
+  before.
+- `fetch-zendriver` on macOS finds and closes a Chrome another process
+  left running on the fetch profile, as it already did on Linux.
+- A `zstd` response body is decoded across all of its frames rather than
+  only the first, and a truncated frame is a decoding failure.
+- Year filters on author papers and citations no longer read a JSON `true`
+  as the year 1. SearXNG map results report a non-finite coordinate as
+  unknown, and an absurdly long citation count on a science result no
+  longer raises out of the parse.
+- `drive_chrome` passes `--password-store=basic`, so headless Chrome no
+  longer hangs on a locked desktop keyring, and it skips a snap-packaged
+  Chromium, whose confinement ignores the throwaway profile.
+
+### Removed
+
+- **Breaking:** the `mitigation_statuses` keyword of
+  `wesearch.fetch.challenge.classify_http_error`. A challenge is now
+  recognized by Cloudflare's own evidence rather than by status, so there
+  is no status set left to configure.
 
 ## 0.1.11 - 2026-08-19
 

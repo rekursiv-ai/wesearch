@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from http import client
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import socket
 import ssl
@@ -15,6 +16,10 @@ import struct
 import tempfile
 import threading
 import time
+
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 import pytest
 
@@ -42,8 +47,14 @@ class TestHeaderParsing:
         request = "GET / HTTP/1.1\r\nHost: x\r\nCookie: a=1; b=2\r\n\r\n"
         assert _header_lines(request) == ("Host: x", "Cookie: a=1; b=2")
 
+    def test_header_lines_without_terminator_keep_all_header_lines(self) -> None:
+        request = "GET / HTTP/1.1\r\nHost: x\r\nCookie: a=1"
+        assert _header_lines(request) == ("Host: x", "Cookie: a=1")
+
     def test_requests_root_only_for_root_path(self) -> None:
+        assert _requests_root("GET /")
         assert _requests_root("GET / HTTP/1.1\r\n")
+        assert _requests_root("GET / HTTP/1.1\r\nGET /favicon.ico")
         assert not _requests_root("GET /favicon.ico HTTP/1.1\r\n")
         assert not _requests_root("garbage")
 
@@ -53,6 +64,10 @@ class TestHeaderParsing:
         # would defeat the duplicate-cookie checks.
         request = "POST / HTTP/1.1\r\nHost: x\r\n\r\nCookie: forged=1"
         assert _header_lines(request) == ("Host: x",)
+
+    def test_header_name_splits_only_at_first_colon(self) -> None:
+        request = "GET / HTTP/1.1\r\nX: a:b\r\n\r\n"
+        assert _header_names(request) == ("x",)
 
 
 class TestReadHead:
@@ -91,6 +106,55 @@ class TestReadHead:
         head = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
         assert _read_head(_EofAfter(head), max_bytes=4) == ""
 
+    def test_max_bytes_accepts_a_terminated_head_at_the_boundary(self) -> None:
+        head = b"\r\n\r\n"
+        assert _read_head(_EofAfter(head), max_bytes=4) == "\r\n\r\n"
+
+    def test_max_bytes_stops_after_an_unterminated_boundary_length(self) -> None:
+        reader = _EofAfter(b"abcd")
+        assert _read_head(reader, max_bytes=4) == ""
+        assert reader.calls == [4]
+
+    def test_reader_requests_at_most_the_remaining_limit(self) -> None:
+        reader = _EofAfter(b"a" * 5, b"\r\n\r\n")
+        assert _read_head(reader, max_bytes=9) == "a" * 5 + "\r\n\r\n"
+        assert reader.calls == [9, 4]
+
+    def test_reader_caps_each_recv_at_4096_bytes(self) -> None:
+        reader = _EofAfter(b"a" * 5_000, b"\r\n\r\n")
+        _read_head(reader, max_bytes=10_000)
+        assert reader.calls[0] == 4_096
+
+    def test_latin_one_preserves_non_ascii_header_bytes(self) -> None:
+        head = b"GET / HTTP/1.1\r\nX-Byte: \xff\r\n\r\n"
+        assert "ÿ" in _read_head(_EofAfter(head))
+
+    def test_terminated_head_uses_the_first_separator(self) -> None:
+        chunks = (b"GET / HTTP/1.1\r\n\r\nBODY\r\n\r\n",)
+        assert _read_head(_EofAfter(*chunks)) == "GET / HTTP/1.1\r\n\r\n"
+
+    def test_terminated_head_can_arrive_in_multiple_chunks(self) -> None:
+        chunks = (b"GET / HTTP/1.1\r\n", b"Host: x\r\n", b"\r\nBODY")
+        assert _read_head(_EofAfter(*chunks)) == "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+
+    # ``""`` is what ``_read_head`` returns for a head that never terminated; a
+    # ``/`` after the request line (here in a header) is not its target.
+    @pytest.mark.parametrize(
+        "head",
+        [
+            "GET /x HTTP/1.1",
+            "GET  / HTTP/1.1",
+            "garbage\r\nGET /x",
+            "",
+            "GET\r\nX: / y",
+        ],
+    )
+    def test_requests_root_requires_a_well_formed_root_target(
+        self,
+        head: str,
+    ) -> None:
+        assert not _requests_root(head)
+
 
 class _EofAfter:
     """A reader yielding ``chunks``, then a clean EOF forever.
@@ -101,8 +165,10 @@ class _EofAfter:
 
     def __init__(self, *chunks: bytes) -> None:
         self._chunks = list(chunks)
+        self.calls: list[int] = []
 
     def recv(self, bufsize: int, /) -> bytes:
+        self.calls.append(bufsize)
         if not self._chunks:
             return b""
         chunk = self._chunks[0]
@@ -119,8 +185,150 @@ class TestSelfSignedCert:
         assert cert.read_bytes().startswith(b"-----BEGIN CERTIFICATE-----")
         assert b"PRIVATE KEY" in key.read_bytes()
 
+    def test_certificate_has_exact_localhost_identity_and_lifetime(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        cert_path, key_path = tmp_path / "c.pem", tmp_path / "k.pem"
+        self_signed_localhost_cert(cert_path, key_path)
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        now = datetime.now(UTC)
+        assert cert.subject.rfc4514_string() == "CN=localhost"
+        assert cert.issuer.rfc4514_string() == "CN=localhost"
+        public_key = cert.public_key()
+        assert isinstance(public_key, rsa.RSAPublicKey | ec.EllipticCurvePublicKey)
+        assert public_key.key_size == 2048
+        assert cert.not_valid_before_utc >= now - timedelta(days=1, seconds=2)
+        assert cert.not_valid_after_utc <= now + timedelta(days=3650, seconds=2)
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        assert san.critical is False
+        assert san.value.get_values_for_type(x509.DNSName) == ["localhost"]
+        serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+
 
 class TestEchoOracle:
+    def test_default_client_timeout_is_exact(self) -> None:
+        with EchoOracle() as oracle:
+            assert oracle._client_timeout_sec == 10.0
+
+    def test_initialization_exposes_exact_server_identity(self) -> None:
+        with EchoOracle(client_timeout_sec=2.5) as oracle:
+            assert oracle.ca_path.name == "cert.pem"
+            assert sorted(path.name for path in oracle.ca_path.parent.iterdir()) == [
+                "cert.pem",
+                "key.pem",
+            ]
+            assert oracle.url == f"https://localhost:{oracle.port}/"
+            assert oracle._client_timeout_sec == 2.5
+            assert oracle._thread.name == "echo-oracle-accept"
+            assert oracle._thread.daemon is True
+            assert oracle._sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
+
+    def test_initialization_uses_exact_socket_tls_and_thread_settings(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        temporary = MagicMock()
+        temporary.__enter__.return_value = str(tmp_path)
+        context = MagicMock()
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.getsockname.return_value = ("127.0.0.1", 4321)
+        thread = MagicMock()
+        thread.is_alive.return_value = False
+        stack = MagicMock()
+        stack.enter_context.side_effect = [str(tmp_path), sock]
+        with (
+            patch("wesearch.chrome.echo.ExitStack", return_value=stack),
+            patch(
+                "wesearch.chrome.echo.tempfile.TemporaryDirectory",
+                return_value=temporary,
+            ) as temporary_factory,
+            patch("wesearch.chrome.echo.self_signed_localhost_cert"),
+            patch("wesearch.chrome.echo.ssl.SSLContext", return_value=context),
+            patch("wesearch.chrome.echo.socket.socket", return_value=sock),
+            patch(
+                "wesearch.chrome.echo.threading.Thread",
+                return_value=thread,
+            ) as thread_factory,
+        ):
+            oracle = EchoOracle(client_timeout_sec=2.5)
+            oracle.close()
+        temporary_factory.assert_called_once_with(prefix="echo-")
+        stack.callback.assert_called_once_with(oracle._thread.join, timeout=5.0)
+        stack.close.assert_called_once_with()
+        context.set_alpn_protocols.assert_called_once_with(["http/1.1"])
+        sock.setsockopt.assert_called_once_with(
+            socket.SOL_SOCKET,
+            socket.SO_REUSEADDR,
+            1,
+        )
+        sock.bind.assert_called_once_with(("127.0.0.1", 0))
+        sock.listen.assert_called_once_with(8)
+        thread_factory.assert_called_once_with(
+            target=oracle._serve,
+            name="echo-oracle-accept",
+            daemon=True,
+        )
+        thread.start.assert_called_once_with()
+
+    def test_handle_sets_timeout_and_sends_exact_stub_response(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        oracle = object.__new__(EchoOracle)
+        oracle._client_timeout_sec = 3.5
+        context = MagicMock()
+        monkeypatch.setattr(oracle, "_context", context, raising=False)
+        raw = socket.socket()
+        conn = MagicMock()
+        context.wrap_socket.return_value = conn
+        oracle._lock = threading.Lock()
+        oracle._captures = []
+        request = "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+        with patch(
+            "wesearch.chrome.echo._read_head",
+            return_value=request,
+        ):
+            oracle._handle(raw)
+        raw.close()
+        context.wrap_socket.assert_called_once_with(raw, server_side=True)
+        conn.sendall.assert_called_once_with(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+            b"Content-Length: 15\r\nConnection: close\r\n\r\n<html>ok</html>",
+        )
+        conn.close.assert_called_once_with()
+        assert oracle._captures == [(("host",), ("Host: x",))]
+
+    def test_serve_starts_exact_daemon_handler_for_each_connection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        oracle = object.__new__(EchoOracle)
+        raw = MagicMock()
+        sock = MagicMock()
+        sock.accept.side_effect = [(raw, object()), OSError("closed")]
+        monkeypatch.setattr(oracle, "_sock", sock, raising=False)
+        oracle._stopped = threading.Event()
+        handlers: list[threading.Thread] = []
+        monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
+        handle = MagicMock()
+        monkeypatch.setattr(oracle, "_handle", handle, raising=False)
+        handler = MagicMock()
+        with patch(
+            "wesearch.chrome.echo.threading.Thread",
+            return_value=handler,
+        ) as factory:
+            oracle._serve()
+        factory.assert_called_once_with(
+            target=handle,
+            args=(raw,),
+            name="echo-oracle-handler",
+            daemon=True,
+        )
+        assert handlers == [handler]
+        handler.start.assert_called_once_with()
+
     def test_captures_ordered_headers_of_a_live_request(self) -> None:
         with EchoOracle() as oracle:
             context = ssl.create_default_context(cafile=str(oracle.ca_path))
@@ -134,8 +342,10 @@ class TestEchoOracle:
             conn.getresponse().read()
             conn.close()
             names = oracle.captured()
+            lines = oracle.captured_lines()
         assert "user-agent" in names
         assert names.index("host") < names.index("user-agent")
+        assert any(line.startswith("User-Agent: probe") for line in lines)
 
     def test_ignores_non_root_requests(self) -> None:
         with EchoOracle() as oracle:
@@ -150,6 +360,7 @@ class TestEchoOracle:
             conn.getresponse().read()
             conn.close()
             assert oracle.captured() == ()
+            assert oracle.captured_lines() == ()
 
 
 class TestEchoOracleResilience:
@@ -223,6 +434,38 @@ class TestEchoOracleResilience:
 
 class TestEchoOracleCleanup:
     """Every resource the oracle acquires must be released by ``close()``."""
+
+    def test_close_uses_exact_shutdown_and_join_timeouts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        oracle = object.__new__(EchoOracle)
+        oracle._client_timeout_sec = 10.0
+        sock = MagicMock()
+        sock.shutdown.side_effect = OSError("already closed")
+        monkeypatch.setattr(oracle, "_sock", sock, raising=False)
+        oracle.port = 4321
+        thread = MagicMock()
+        thread.is_alive.return_value = True
+        monkeypatch.setattr(oracle, "_thread", thread, raising=False)
+        handlers = [MagicMock()]
+        monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
+        oracle._stopped = threading.Event()
+        stack = MagicMock()
+        monkeypatch.setattr(oracle, "_stack", stack, raising=False)
+        wake = MagicMock()
+        with patch(
+            "wesearch.chrome.echo.socket.create_connection",
+            return_value=wake,
+        ) as connect:
+            oracle.close()
+        sock.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+        assert oracle._stopped.is_set()
+        connect.assert_called_once_with(("127.0.0.1", 4321), timeout=1.0)
+        wake.close.assert_called_once_with()
+        thread.join.assert_called_once_with(timeout=1.0)
+        handlers[0].join.assert_called_once_with(timeout=11.0)
+        stack.close.assert_called_once_with()
 
     def test_close_removes_the_certificate_directory(self) -> None:
         oracle = EchoOracle()

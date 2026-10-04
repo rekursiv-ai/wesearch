@@ -82,11 +82,22 @@ def const_curl_session(stub: object) -> Callable[..., object]:
 
 
 class StubCookie:
-    """A minimal jar entry: just a name/value, enough for the pooled-path tests."""
+    """A minimal jar entry for the pooled-path tests."""
 
-    def __init__(self, name: str, value: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        value: str,
+        *,
+        domain: str,
+        path: str,
+        secure: bool,
+    ) -> None:
         self.name = name
         self.value = value
+        self.domain = domain
+        self.path = path
+        self.secure = secure
 
 
 class StubCookies:
@@ -105,9 +116,10 @@ class StubCookies:
         secure: bool = False,
     ) -> None:
         """Set a stub response."""
-        del domain, path, secure
         self.jar = [c for c in self.jar if getattr(c, "name", None) != name]
-        self.jar.append(StubCookie(name, value))
+        self.jar.append(
+            StubCookie(name, value, domain=domain, path=path, secure=secure),
+        )
 
 
 class StubSession:

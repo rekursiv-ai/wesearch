@@ -121,7 +121,7 @@ def paginate(
             body = cursor.fetch(position, page_size)
         except BackendError as e:
             if cursor.is_depth_ceiling(e) and kept:
-                return Page(entries=_cap(kept, limit), complete=False)
+                return Page(entries=kept, complete=False)
             raise
         kept.extend(row for row in cursor.rows(body) if keep(row))
         nxt = cursor.advance(body, position, page_size)
@@ -132,7 +132,7 @@ def paginate(
         # ``advance`` returned a real next position; guard a non-advancing
         # cursor (a server regression) against looping forever.
         if nxt <= position:
-            return Page(entries=_cap(kept, limit), complete=False)
+            return Page(entries=kept, complete=False)
         position = nxt
 
 

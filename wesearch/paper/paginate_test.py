@@ -9,7 +9,7 @@ import pytest
 
 from wesearch.lib.custom_json import IntCodec, MutableJSON, MutableJSONValue
 from wesearch.paper.errors import BackendError
-from wesearch.paper.paginate import Cursor, paginate
+from wesearch.paper.paginate import Cursor, _cap, paginate
 
 
 def _rows(body: MutableJSON) -> list[MutableJSON]:
@@ -46,6 +46,10 @@ def _offset_cursor(
 
 
 class TestPaginate:
+    def test_cap_none_preserves_list_identity(self) -> None:
+        entries: list[MutableJSON] = [{"n": 1}]
+        assert _cap(entries, None) is entries
+
     def test_single_page_under_limit_is_complete(self) -> None:
         cursor = _offset_cursor([[{"n": 1}, {"n": 2}]], page_size_max=10)
         page = paginate(cursor, limit=None)
@@ -103,6 +107,29 @@ class TestPaginate:
         # reflects the cursor (full page -> more), not the filtered count.
         assert not page.complete
 
+    def test_zero_limit_returns_empty_page(self) -> None:
+        cursor = _offset_cursor([[{"n": 1}]], page_size_max=10)
+        page = paginate(cursor, limit=0)
+        assert page.entries == []
+        assert page.complete is False
+
+    def test_depth_ceiling_caps_overlong_backend_page(self) -> None:
+        def do_fetch(offset: int, size: int) -> MutableJSON:
+            if offset == 0:
+                return {"data": [{"n": i} for i in range(size + 100)]}
+            raise BackendError("too deep", status=400)
+
+        cursor = Cursor(
+            fetch=MagicMock(side_effect=do_fetch),
+            rows=_rows,
+            advance=lambda _b, pos, _s: pos + 1,
+            page_size_max=200,
+            is_depth_ceiling=lambda e: e.status == 400,
+        )
+        page = paginate(cursor, limit=500)
+        assert len(page.entries) == 300
+        assert page.complete is False
+
     def test_depth_ceiling_stops_incomplete_with_results(self) -> None:
         def do_fetch(offset: int, size: int) -> MutableJSON:
             if offset == 0:
@@ -118,7 +145,7 @@ class TestPaginate:
         )
         page = paginate(cursor, limit=1000)
         assert len(page.entries) == 200
-        assert not page.complete  # Ceiling hit -> more may exist.
+        assert page.complete is False  # Ceiling hit -> more may exist.
 
     def test_depth_ceiling_without_results_reraises(self) -> None:
         def do_fetch(offset: int, size: int) -> MutableJSON:
@@ -145,6 +172,17 @@ class TestPaginate:
         with pytest.raises(BackendError):
             paginate(cursor, limit=None)
 
+    def test_non_advancing_cursor_caps_overlong_page(self) -> None:
+        cursor = Cursor(
+            fetch=MagicMock(return_value={"data": [{"n": 0}] * 300}),
+            rows=_rows,
+            advance=lambda _b, _pos, _s: 0,
+            page_size_max=200,
+        )
+        page = paginate(cursor, limit=500)
+        assert len(page.entries) == 300
+        assert page.complete is False
+
     def test_non_advancing_cursor_terminates(self) -> None:
         # Advance returns a position <= current -> stop, do not loop forever.
         cursor = Cursor(
@@ -155,7 +193,7 @@ class TestPaginate:
         )
         page = paginate(cursor, limit=1000)
         assert len(page.entries) == 200
-        assert not page.complete
+        assert page.complete is False
 
     def test_start_position_respected(self) -> None:
         seen: list[int] = []

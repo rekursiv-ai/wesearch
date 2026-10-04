@@ -289,7 +289,7 @@ def _command_flag(command: str, marker: str) -> str | None:
     _, found, suffix = command.partition(marker)
     if not found:
         return None
-    return suffix.split(" --", 1)[0].strip()
+    return suffix.partition(" --")[0].strip()
 
 
 def _close_orphan_browser(profile_dir: Path) -> None:
@@ -695,8 +695,10 @@ def _devtools_port(
     if _command_flag(command, "--user-data-dir=") != str(profile_dir.resolve()):
         return None
     try:
-        port_text = _command_flag(command, "--remote-debugging-port=") or ""
-        port = int(port_text.split(maxsplit=1)[0])
+        port_text = _command_flag(command, "--remote-debugging-port=")
+        if not port_text:
+            return None
+        port = int(port_text.split()[0])
         if port:
             return port
         return int((profile_dir / "DevToolsActivePort").read_text().splitlines()[0])
@@ -829,7 +831,7 @@ async def _stopped(browser: zendriver.Browser, *, budget_sec: float = 30.0) -> N
     except Exception:
         logger.warning(
             "browser stop failed; killing the browser process",
-            exc_info=True,
+            exc_info=sys.exc_info(),
         )
         _kill_browser_process(browser)
 
@@ -915,7 +917,7 @@ async def _closed(tab: zendriver.Tab, *, budget_sec: float = 5.0) -> None:
         await asyncio.gather(asyncio.shield(task), return_exceptions=True)
         logger.debug("tab close timed out; abandoning the tab")
     except Exception:
-        logger.debug("tab close failed; abandoning the tab", exc_info=True)
+        logger.debug("tab close failed; abandoning the tab", exc_info=sys.exc_info())
 
 
 # The header transports re-validate each redirect hop (``curl.py`` and ``stdlib.py``
@@ -948,9 +950,7 @@ async def _guard_requests(
     headers: dict[str, str] | None = None,
 ) -> None:
     """Validate every DOCUMENT request this tab makes BEFORE Chrome connects."""
-    # Fragment stripped: it never reaches the wire, so the initial request would
-    # compare unequal and read as a redirect.
-    origin_url = urlunsplit(urlsplit(url)._replace(fragment=""))
+    origin_url = url
     # Captured here, where a running loop is guaranteed: zendriver invokes the
     # handler from its own connection thread, which has no running loop of its
     # own, so a ``get_running_loop`` inside the callback raises.
@@ -1040,7 +1040,9 @@ async def _guard_requests(
 def _wire_url(url: str) -> str:
     """Return ``url`` as it goes on the wire: no fragment, path never empty."""
     parts = urlsplit(url)
+    # pragma: no mutate start -- ``None`` and ``""`` serialize identically here.
     return urlunsplit(parts._replace(fragment="", path=parts.path or "/"))
+    # pragma: no mutate end
 
 
 def _fail(request_id: object) -> object:
@@ -1374,7 +1376,7 @@ async def _domain_cookies(browser: zendriver.Browser, url: str) -> dict[str, str
     host = urlparse(url).hostname or ""
     jar: dict[str, str] = {}
     for cookie in await browser.cookies.get_all():
-        domain = (cookie.domain or "").lstrip(".")
+        domain = cookie.domain.removeprefix(".")
         if domain and (host == domain or host.endswith(f".{domain}")):
             jar[cookie.name] = cookie.value or ""
     return jar
