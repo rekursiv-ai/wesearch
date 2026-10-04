@@ -5,11 +5,21 @@ from __future__ import annotations
 from dataclasses import fields
 
 from wesearch.paper.custom_types import PaperRecord
-from wesearch.paper.fuse import fuse
+from wesearch.paper.fuse import _find, fuse, normalize_title
 
 
 def _rec(title: str, *, doi: str | None = None, source: str = "s2") -> PaperRecord:
     return PaperRecord(title=title, doi=doi, sources=(source,))
+
+
+def test_normalize_title_exactly_lowercases_punctuation_and_whitespace() -> None:
+    assert normalize_title(" A\tB--C! ") == "a b c"
+
+
+def test_find_compresses_a_multi_level_path() -> None:
+    parent = {0: 0, 1: 0, 2: 1}
+    assert _find(parent, 2) == 0
+    assert parent[2] == 0
 
 
 class TestMergeCompleteness:
@@ -55,6 +65,48 @@ class TestFuse:
         oa = [_rec("deep  learning", source="openalex")]
         out = fuse(s2, oa)
         assert len(out) == 1
+
+    def test_identifiers_match_case_insensitively(self) -> None:
+        out = fuse(
+            [PaperRecord(title="T", doi="10.1/X", arxiv_id="2106.ABC")],
+            [
+                PaperRecord(
+                    title="T",
+                    doi="10.1/x",
+                    arxiv_id="2106.abc",
+                    sources=("openalex",),
+                ),
+            ],
+        )
+        assert len(out) == 1
+
+    def test_arxiv_identity_without_doi(self) -> None:
+        out = fuse(
+            [PaperRecord(title="one", arxiv_id="2106.00001")],
+            [PaperRecord(title="other", arxiv_id="2106.00002", sources=("openalex",))],
+        )
+        assert len(out) == 2
+
+    def test_transitive_identity_group(self) -> None:
+        out = fuse(
+            [
+                PaperRecord(title="a", doi="10.1/a"),
+                PaperRecord(title="b", doi="10.1/b", arxiv_id="2106.00001"),
+                PaperRecord(title="c", doi="10.1/a", arxiv_id="2106.00001"),
+            ],
+            [],
+        )
+        assert len(out) == 1
+
+    def test_fusion_consumes_every_ranked_record(self) -> None:
+        out = fuse(
+            [_rec("a", doi="10.1/a"), _rec("b", doi="10.1/b"), _rec("c", doi="10.1/c")],
+            [
+                _rec("d", doi="10.1/d", source="openalex"),
+                _rec("e", doi="10.1/e", source="openalex"),
+            ],
+        )
+        assert [record.title for record in out] == ["a", "b", "c", "d", "e"]
 
     def test_dedup_by_arxiv_id_across_differing_dois(self) -> None:
         # A preprint and its published version are ONE paper carrying two DOIs
@@ -115,6 +167,13 @@ class TestFuse:
             [_rec("oatop", doi="10.1/o", source="openalex")],
         )
         assert out[0].doi == "10.1/s"
+
+    def test_rank_offset_changes_a_boundary_ordering(self) -> None:
+        s2_hits = [_rec(f"s{i}", doi=f"10.1/s{i}") for i in range(1, 6)]
+        s2_hits.append(_rec("s6", doi="10.1/s6"))
+        oa_hits = [_rec("o1", doi="10.1/o1", source="openalex")]
+        out = fuse(s2_hits, oa_hits)
+        assert [record.title for record in out[-2:]] == ["o1", "s6"]
 
 
 class TestAMissingTitleIsNotIdentity:

@@ -139,7 +139,7 @@ def duckduckgo(
             policy=PolicyParams(transport=transport),
         ),
     )
-    return _duckduckgo_parse(body.decode("utf-8"), num_results)
+    return _duckduckgo_parse(body.decode(), num_results)
 
 
 def _duckduckgo_quote_bangs(query: str) -> str:
@@ -151,7 +151,7 @@ def _duckduckgo_quote_bangs(query: str) -> str:
 
 def _duckduckgo_validate_body(body: bytes) -> None:
     """Reject a DuckDuckGo success body that is really its challenge page."""
-    _duckduckgo_check_captcha(body.decode("utf-8", "replace"))
+    _duckduckgo_check_captcha(body.decode(errors="replace"))
 
 
 # One predicate, shared by the validator that rejects the page and the diagnostic that
@@ -175,11 +175,13 @@ def _duckduckgo_extract_url(href: str) -> str | None:
         return None
     url = f"https:{href}" if href.startswith("//") else href
     parsed = urlparse(url)
-    hostname = parsed.hostname or ""
+    hostname = parsed.hostname
     if (
-        hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com")
-    ) and parsed.path == "/l/":
-        wrapped = parse_qs(parsed.query).get("uddg", [])
+        hostname is not None
+        and (hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"))
+        and parsed.path == "/l/"
+    ):
+        wrapped = parse_qs(parsed.query).get("uddg")
         if wrapped:
             return wrapped[0]
     if parsed.scheme in {"http", "https"}:
@@ -198,10 +200,12 @@ def _duckduckgo_parse(
     strip_scripts(soup)
     results: list[SearchResult] = []
     for container in soup.select("div#links > div.web-result"):
-        link = container.select_one("h2 a[href]")
+        link = container.select_one(
+            "h2 a[href]",  # pragma: no mutate -- HTML CSS selectors ignore case.
+        )
         if link is None:
             continue
-        href = link.get("href", "")
+        href = link.get("href")
         if not isinstance(href, str):
             continue
         url = _duckduckgo_extract_url(href)

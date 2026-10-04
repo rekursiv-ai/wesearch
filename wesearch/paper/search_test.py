@@ -11,6 +11,7 @@ from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.paper import search
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
+from wesearch.paper.paginate import Page
 from wesearch.paper.providers import (
     openalex,
     s2,
@@ -158,9 +159,18 @@ class TestFusedSearch:
                 side_effect=PaperError("s2 down"),
             ),
             patch.object(openalex, "search", side_effect=PaperError("oa down")),
-            pytest.raises(PaperError),
+            pytest.raises(PaperError, match=r"^S2: s2 down; OpenAlex: oa down$"),
         ):
             search.search("q")
+
+    def test_zero_total_preserved_when_other_backend_fails(self) -> None:
+        with (
+            patch.object(search, "_s2_search", side_effect=PaperError("s2 down")),
+            patch.object(openalex, "search", return_value=([], 0, True)),
+        ):
+            result = search.search("q")
+        assert result.total == 0
+        assert result.complete is False
 
     def test_fused_records_honor_limit(self) -> None:
         # Each backend returns up to ``limit`` rows, so a fused set of disjoint
@@ -310,6 +320,150 @@ class TestS2SearchParams:
             result = search.search("q", source="s2", limit=200)
         assert len(result.records) == 200
         assert result.total == 250
+
+
+def test_fused_forwards_all_options_and_computes_partial_completeness() -> None:
+    s2_result = ([_rec("s", "s2")], 4, False)
+    oa_result = ([_rec("o", "openalex")], 8, True)
+    with (
+        patch.object(search, "_s2_search", return_value=s2_result) as s2_search,
+        patch.object(openalex, "search", return_value=oa_result) as oa_search,
+    ):
+        result = search.search(
+            "query",
+            limit=3,
+            year_from=2000,
+            year_to=2020,
+            open_access_only=True,
+            transport="stdlib",
+        )
+    expected = {
+        "limit": 3,
+        "year_from": 2000,
+        "year_to": 2020,
+        "open_access_only": True,
+        "transport": "stdlib",
+    }
+    assert s2_search.call_args.args == ("query",)
+    assert s2_search.call_args.kwargs == expected
+    assert oa_search.call_args.args == ("query",)
+    assert oa_search.call_args.kwargs == expected
+    assert result.complete is False
+    assert result.total == 8
+
+
+def test_search_default_options_are_forwarded_to_fused() -> None:
+    with patch.object(
+        search,
+        "_fused",
+        return_value=search.SearchResult(records=[], total=0, complete=True),
+    ) as fused:
+        search.search("query")
+    assert fused.call_args.args == ("query",)
+    assert fused.call_args.kwargs == {
+        "limit": None,
+        "year_from": None,
+        "year_to": None,
+        "open_access_only": False,
+        "transport": "auto",
+    }
+
+
+def test_single_backend_forwards_all_options() -> None:
+    result_value = ([_rec("o", "openalex")], 2, True)
+    with patch.object(openalex, "search", return_value=result_value) as provider:
+        result = search.search(
+            "query",
+            source="openalex",
+            limit=4,
+            year_from=2001,
+            year_to=2002,
+            open_access_only=True,
+            transport="stdlib",
+        )
+    assert provider.call_args.args == ("query",)
+    assert provider.call_args.kwargs == {
+        "limit": 4,
+        "year_from": 2001,
+        "year_to": 2002,
+        "open_access_only": True,
+        "transport": "stdlib",
+    }
+    assert result == search.SearchResult(
+        records=list(result_value[0]),
+        total=2,
+        complete=True,
+    )
+
+
+def test_s2_search_passes_exact_params_to_provider() -> None:
+
+    page = Page(entries=[{"title": "s"}], complete=False)
+    with patch.object(s2, "search_paginate", return_value=(page, 7)) as provider:
+        records, total, complete = search._s2_search(
+            "query",
+            limit=4,
+            year_from=2001,
+            year_to=2002,
+            open_access_only=True,
+            transport="stdlib",
+        )
+    assert provider.call_args.args == (
+        {
+            "query": "query",
+            "fields": s2.S2_PAPER_FIELDS_STR,
+            "year": "2001-2002",
+            "openAccessPdf": "",
+        },
+    )
+    assert provider.call_args.kwargs == {"limit": 4, "transport": "stdlib"}
+    assert len(records) == 1
+    assert total == 7
+    assert complete is False
+
+
+def test_s2_search_default_transport_is_auto() -> None:
+
+    with patch.object(
+        s2,
+        "search_paginate",
+        return_value=(Page(entries=[], complete=True), 0),
+    ) as provider:
+        search._s2_search(
+            "query",
+            limit=None,
+            year_from=None,
+            year_to=None,
+            open_access_only=False,
+        )
+    assert provider.call_args.kwargs["transport"] == "auto"
+
+
+def test_fused_default_transport_is_auto() -> None:
+    with (
+        patch.object(search, "_s2_search", return_value=([], 0, True)) as s2_search,
+        patch.object(openalex, "search", return_value=([], 0, True)) as oa_search,
+    ):
+        search._fused(
+            "query",
+            limit=None,
+            year_from=None,
+            year_to=None,
+            open_access_only=False,
+        )
+    assert s2_search.call_args.kwargs["transport"] == "auto"
+    assert oa_search.call_args.kwargs["transport"] == "auto"
+
+
+def test_s2_year_param_boundaries() -> None:
+    assert search._s2_year_param(None, None) is None
+    assert search._s2_year_param(2001, None) == "2001-"
+    assert search._s2_year_param(None, 2002) == "-2002"
+
+
+def test_single_backend_dispatches_every_public_source() -> None:
+    assert search._single_backend("s2") is search._s2_search
+    assert search._single_backend("openalex") is openalex.search
 
 
 if __name__ == "__main__":

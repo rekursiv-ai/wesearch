@@ -105,10 +105,10 @@ def _identity_of(doi: str) -> set[str]:
     """Keys a bare DOI string contributes under the shipped identity rule."""
     if not doi:
         return set()
-    keys = {f"doi:{doi.lower()}"}
+    keys = {f"doi:{str.casefold(doi)}"}
     match = _ARXIV_DOI_RE.match(doi)
     if match:
-        keys.add(f"arxiv:{match.group(1).lower()}")
+        keys.add(f"arxiv:{str.casefold(match.group(1))}")
     return keys
 
 
@@ -151,24 +151,24 @@ def _raw_mag_openalex(query: str) -> dict[str, str]:
         mag = StrCodec.coerce(DictCodec.coerce(work_obj.get("ids")).get("mag"))
         if mag:
             doi = StrCodec.coerce(work_obj.get("doi"))
-            out[mag.rsplit("/", 1)[-1]] = doi.rsplit("doi.org/", 1)[-1]
+            out[mag.rpartition("/")[2]] = doi.rpartition("doi.org/")[2] or doi
     return out
 
 
 def _doi_keys(rec: PaperRecord) -> list[str]:
     """Today's identity: DOI only (fuse falls back to title when absent)."""
-    return [f"doi:{rec.doi.lower()}"] if rec.doi else []
+    return [f"doi:{str.casefold(rec.doi)}"] if rec.doi else []
 
 
 def _arxiv_keys(rec: PaperRecord) -> list[str]:
     """DOI plus arXiv id, including one recovered from a 10.48550 DOI."""
     keys = _doi_keys(rec)
     arxiv = rec.arxiv_id
-    if arxiv is None:
-        match = _ARXIV_DOI_RE.match(rec.doi or "")
+    if arxiv is None and rec.doi:
+        match = _ARXIV_DOI_RE.match(rec.doi)
         arxiv = match.group(1) if match else None
     if arxiv:
-        keys.append(f"arxiv:{arxiv.lower()}")
+        keys.append(f"arxiv:{str.casefold(arxiv)}")
     return keys
 
 

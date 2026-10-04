@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -59,6 +60,39 @@ def test_extracts_article_prose() -> None:
 def test_empty_document_yields_no_text() -> None:
     """A document with no article yields empty text, not ``None``."""
     assert extract_trafilatura("") == ""
+
+
+def test_omitted_url_reaches_trafilatura_as_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Mock()
+    backend.extract.return_value = None
+    monkeypatch.setattr(
+        "wesearch.fetch.extractor.trafilatura.trafilatura",
+        backend,
+    )
+    assert extract_trafilatura("<p>x</p>") == ""
+    assert backend.extract.call_args.kwargs["url"] is None
+
+
+def test_passes_all_article_options_to_trafilatura(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Mock()
+    backend.extract.return_value = "article"
+    monkeypatch.setattr(
+        "wesearch.fetch.extractor.trafilatura.trafilatura",
+        backend,
+    )
+    assert extract_trafilatura("<p>x</p>", url="https://example.com") == "article"
+    backend.extract.assert_called_once_with(
+        "<p>x</p>",
+        url="https://example.com",
+        output_format="markdown",
+        include_links=True,
+        include_tables=True,
+        with_metadata=True,
+    )
 
 
 if __name__ == "__main__":

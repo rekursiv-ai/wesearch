@@ -67,8 +67,6 @@ def _rewrite(url: str) -> str | None:
     """Return the RSS-equivalent URL, or None for paths left unrewritten."""
     parsed = urlparse(url)
     path = parsed.path.rstrip("/")
-    if path.startswith("/rss"):
-        return None
     if path in _TOP_PATHS:
         return parsed._replace(path="/rss").geturl()
     if path == "/search":

@@ -46,7 +46,9 @@ def matches(url: str) -> bool:
       result: The bool.
 
     """
-    hostname = urlparse(url).hostname or ""
+    hostname = urlparse(url).hostname
+    if hostname is None:
+        return False
     return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
 
@@ -88,5 +90,6 @@ def rss_url(raw_url: str) -> str:
     parsed = urlparse(raw_url)
     if parsed.path.endswith(".rss"):
         return raw_url
-    path = re.sub(r"/?\.json$", "", parsed.path).rstrip("/")
+    path = re.sub(r"/?\.json$", "", parsed.path)
+    path = re.sub(r"/+$", "", path)
     return parsed._replace(path=f"{path}/.rss").geturl()

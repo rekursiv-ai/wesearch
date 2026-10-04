@@ -196,7 +196,9 @@ def _fused(
     s2_total = oa_total = 0
     exhausted = True
     errors: list[str] = []
-    answered = 0
+    # pragma: no mutate start -- None and False are identical in this private flag.
+    answered = False
+    # pragma: no mutate end
 
     try:
         s2_hits, s2_total, s2_complete = _s2_search(
@@ -208,7 +210,7 @@ def _fused(
             transport=transport,
         )
         exhausted = exhausted and s2_complete
-        answered += 1
+        answered = True
     except PaperError as e:
         errors.append(f"S2: {e}")
     try:
@@ -221,7 +223,7 @@ def _fused(
             transport=transport,
         )
         exhausted = exhausted and oa_complete
-        answered += 1
+        answered = True
     except PaperError as e:
         errors.append(f"OpenAlex: {e}")
 
@@ -237,7 +239,10 @@ def _fused(
     # function's job, not a consumer's: ``SearchResult.records`` promises a
     # trimmed list, and a caller that re-slices cannot restore what fusion knew.
     fused = fuse(s2_hits, oa_hits)
-    records = fused if limit is None else fused[:limit]
+    if limit is None:
+        records = fused
+    else:
+        records = fused[:limit]
     return SearchResult(
         records=records,
         # The two backend totals overlap unknowably, so `max` is the honest

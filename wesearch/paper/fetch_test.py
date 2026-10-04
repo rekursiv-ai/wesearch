@@ -33,6 +33,15 @@ class TestLooksLikePdf:
     def test_valid_magic_and_size(self) -> None:
         assert fetch.looks_like_pdf(_PDF)
 
+    def test_default_size_boundary(self) -> None:
+        assert fetch.looks_like_pdf(b"%PDF-" + b"0" * 123)
+        assert not fetch.looks_like_pdf(b"%PDF-" + b"0" * 122)
+
+    def test_custom_size_boundary(self) -> None:
+        body = b"MAGIC" + b"0" * 3
+        assert fetch.looks_like_pdf(body, min_pdf_bytes=8, pdf_magic=b"MAGIC")
+        assert not fetch.looks_like_pdf(body[:-1], min_pdf_bytes=8, pdf_magic=b"MAGIC")
+
     def test_too_short_rejected(self) -> None:
         assert not fetch.looks_like_pdf(b"%PDF-")
 
@@ -66,9 +75,18 @@ class TestBatchOaUrls:
             None,
             {"openAccessPdf": {"url": "http://c/pdf"}},
         ]
-        with patch.object(s2, "batch", return_value=papers):
+        with patch.object(s2, "batch", return_value=papers) as batch:
             out = fetch.batch_oa_urls(["DOI:1", "DOI:2", "DOI:3"])
         assert out == ["http://a/pdf", None, "http://c/pdf"]
+        assert batch.call_args.args == (["DOI:1", "DOI:2", "DOI:3"], "openAccessPdf")
+
+    def test_batch_empty_result_is_empty(self) -> None:
+        with patch.object(s2, "batch", return_value=[]):
+            assert fetch.batch_oa_urls([]) == []
+
+    def test_batch_preserves_none_from_missing_record(self) -> None:
+        with patch.object(s2, "batch", return_value=[None]):
+            assert fetch.batch_oa_urls(["DOI:1"]) == [None]
 
     def test_batch_failure_returns_none(self) -> None:
         with patch.object(s2, "batch", side_effect=RuntimeError("down")):
@@ -81,6 +99,11 @@ class TestDownload:
             body, source = fetch.download("arxiv", "1706.03762")
         assert body == _PDF
         assert source == "arxiv"
+
+    def test_arxiv_success_forwards_canonical(self) -> None:
+        with patch.object(fetch, "_fetch_arxiv", return_value=_PDF) as arxiv:
+            assert fetch.download("arxiv", "1706.03762") == (_PDF, "arxiv")
+        arxiv.assert_called_once_with("1706.03762")
 
     def test_arxiv_fails_then_open_access(self) -> None:
         # arXiv GET returns non-PDF (rejected); the supplied OA URL then wins.

@@ -57,7 +57,10 @@ def search_authors(query: str, *, limit: int | None) -> AuthorSearchResult:
     total = s2.search_total(data)
     entries = cast(list[MutableJSON], data.get("data") or [])
     records = [s2.author_record_from(e) for e in entries]
-    records.sort(key=lambda r: r.h_index if r.h_index is not None else -1, reverse=True)
+    known = [record for record in records if record.h_index is not None]
+    unknown = [record for record in records if record.h_index is None]
+    known.sort(key=lambda record: record.h_index or 0, reverse=True)
+    records = known + unknown
     if limit is not None:
         records = records[:limit]
     return AuthorSearchResult(records=records, total=total)

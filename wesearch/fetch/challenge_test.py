@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from wesearch.fetch.challenge import classify_challenge, classify_http_error
+from wesearch.fetch.challenge import (
+    _is_widget_occurrence,
+    _occurrences,
+    _tags,
+    _text,
+    classify_challenge,
+    classify_http_error,
+)
 from wesearch.types.errors import (
     BotDetectionError,
     CloudflareChallengeError,
@@ -229,6 +236,98 @@ def test_http_error_preserves_plain_failure() -> None:
     error = classify_http_error("https://x.com", 404, {"server": "nginx"}, b"Not found")
     assert type(error) is FetchError
     assert not isinstance(error, BotDetectionError)
+    assert error.url == "https://x.com"
+    assert error.status == 404
+    assert error.headers == {"server": "nginx"}
+    assert error.body == b"Not found"
+
+
+def test_http_error_challenge_preserves_all_error_fields() -> None:
+    error = classify_http_error(
+        "https://x.com",
+        403,
+        {"cf-mitigated": "challenge"},
+        b"body",
+    )
+    assert isinstance(error, CloudflareChallengeError)
+    assert error.url == "https://x.com"
+    assert error.status == 403
+    assert error.headers == {"cf-mitigated": "challenge"}
+    assert error.body == b"body"
+
+
+def test_mitigation_header_requires_exact_trimmed_case_insensitive_value() -> None:
+    assert isinstance(
+        classify_http_error(
+            "https://x.com",
+            403,
+            {"CF-MITIGATED": " Challenge "},
+            b"x",
+        ),
+        CloudflareChallengeError,
+    )
+    assert type(classify_http_error("https://x.com", 403, {}, b"x")) is FetchError
+    assert (
+        type(
+            classify_http_error(
+                "https://x.com",
+                403,
+                {"cf-mitigated": "challenged"},
+                b"x",
+            ),
+        )
+        is FetchError
+    )
+
+
+def test_text_decodes_invalid_bytes_with_replacement_and_lowercases() -> None:
+    assert _text(bytes([65, 66, 67, 255])) == "abc�"
+    assert _text("ABC") == "abc"
+
+
+def test_tags_preserve_opening_attributes_but_remove_script_body() -> None:
+    assert _tags('<script id="trk_jschal_js">fake <div></script><div id="x">') == [
+        '<script id="trk_jschal_js">',
+        "</script>",
+        '<div id="x">',
+    ]
+
+
+def test_occurrences_returns_every_overlapping_start_in_order() -> None:
+    assert _occurrences("aaaa", "aa") == [0, 1, 2]
+    assert _occurrences('<div data-sitekey="x">', "data-sitekey") == [5]
+
+
+@pytest.mark.parametrize(
+    ("tag", "marker", "expected"),
+    [
+        ('<div class="h-captcha">', "h-captcha", True),
+        ('<div id="h-captcha">', "h-captcha", True),
+        ('<div data-sitekey="x">', "data-sitekey", True),
+        ('<a href="/data-sitekey">', "data-sitekey", False),
+        ('<div data-sitekeyish="x">', "data-sitekey", False),
+        ('<div class="x">', "data-sitekey", False),
+    ],
+)
+def test_widget_occurrence_requires_identity_attribute_position(
+    tag: str,
+    marker: str,
+    expected: bool,
+) -> None:
+    index = tag.find(marker)
+    assert _is_widget_occurrence(tag, marker, index) is expected
+
+
+def test_data_attribute_boundary_characters_are_all_supported() -> None:
+    marker = "data-sitekey"
+    assert _is_widget_occurrence(f" {marker}=x", marker, 1)
+    assert _is_widget_occurrence(f" {marker} x", marker, 1)
+    assert _is_widget_occurrence(f" {marker}", marker, 1)
+    assert _is_widget_occurrence(f" {marker}>", marker, 1)
+    assert not _is_widget_occurrence(f"{marker}=x", marker, 0)
+    assert _is_widget_occurrence(f"{marker} ", marker, 0) is False
+    assert not _is_widget_occurrence(f"x{marker}=x", marker, 1)
+    assert not _is_widget_occurrence(f" {marker}?", marker, 1)
 
 
 def test_cloudflare_rate_limit_is_not_a_challenge() -> None:

@@ -61,7 +61,9 @@ def format_result(result: SearchResult) -> str:
     ]
     detail = "  " + " · ".join(p for p in kept if p) if any(kept) else ""
     body = "\n".join(part for part in (result.snippet, detail) if part)
-    return f"{head}\n{body}" if body else head
+    if body:
+        return f"{head}\n{body}"
+    return head
 
 
 def lean_result(result: SearchResult) -> dict[str, object]:
@@ -116,7 +118,7 @@ def detail_fields(result: SearchResult) -> Mapping[str, object]:
             " +" if len(result.authors) > 3 else ""
         )
         return {
-            "authors": authors if result.authors else "",
+            "authors": authors,
             "journal": result.journal,
             "year": result.published.year if result.published else None,
             "doi": result.doi,

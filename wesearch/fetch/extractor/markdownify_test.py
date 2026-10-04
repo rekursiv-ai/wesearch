@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from wesearch.fetch.extractor.markdownify import extract_markdownify
 
 
@@ -46,6 +48,10 @@ def test_keeps_text_an_article_scorer_would_discard() -> None:
 def test_empty_document_yields_no_text() -> None:
     """An empty document yields empty text, not an exception."""
     assert extract_markdownify("").strip() == ""
+
+
+def test_url_default_is_empty_string() -> None:
+    assert "url: 'str' = ''" in str(inspect.signature(extract_markdownify))
 
 
 if __name__ == "__main__":

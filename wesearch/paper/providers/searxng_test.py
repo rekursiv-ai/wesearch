@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -59,6 +59,22 @@ class TestSearch:
         assert records[0].arxiv_id == "1706.03762"
         assert complete  # Nothing filtered or capped away.
 
+    def test_default_transport_and_fetch_arguments_are_exact(self) -> None:
+        with patch(_TARGET, return_value=[]) as mock:
+            searxng.search(
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
+            )
+        assert mock.call_args.args == ("q",)
+        assert mock.call_args.kwargs == {
+            "num_results": 20,
+            "categories": "science",
+            "transport": "auto",
+        }
+
     def test_default_fetch_when_limit_none(self) -> None:
         with patch(_TARGET, return_value=[]) as mock:
             searxng.search(
@@ -83,7 +99,7 @@ class TestSearch:
 
     def test_year_filter_keeps_in_range(self) -> None:
         hits = [
-            _result(title="old", published=datetime(2000, 1, 1)),  # noqa: DTZ001 -- The fixture intentionally models a year-only publication date.
+            _result(title="old", published=datetime(2000, 1, 1, tzinfo=UTC)),
             _result(title="mid", published=datetime(2015, 1, 1)),  # noqa: DTZ001 -- The fixture intentionally models a year-only publication date.
             _result(title="new", published=datetime(2025, 1, 1)),  # noqa: DTZ001 -- The fixture intentionally models a year-only publication date.
         ]
@@ -222,6 +238,119 @@ class TestYearInRange:
 
     def test_no_bounds_true(self) -> None:
         assert searxng._year_in_range(2010, None, None)
+
+
+class TestExactInternals:
+    def test_year_boundaries_are_inclusive(self) -> None:
+        assert searxng._year_in_range(2000, 2000, 2020)
+        assert searxng._year_in_range(2020, 2000, 2020)
+        assert not searxng._year_in_range(1999, 2000, 2020)
+        assert not searxng._year_in_range(2021, 2000, 2020)
+        assert searxng._year_in_range(2000, None, 2020)
+        assert searxng._year_in_range(2020, 2000, None)
+
+    def test_search_forwards_exact_query_options(self) -> None:
+        with patch(_TARGET, return_value=[]) as search_mock:
+            searxng.search(
+                "q",
+                limit=3,
+                year_from=2000,
+                year_to=2020,
+                open_access_only=False,
+                transport="curl",
+            )
+        search_mock.assert_called_once_with(
+            "q",
+            num_results=3,
+            categories="science",
+            transport="curl",
+        )
+
+    def test_year_lower_only_filter_is_applied(self) -> None:
+        hits = [
+            _result(title="old", published=datetime(1999, 1, 1, tzinfo=UTC)),
+            _result(title="new", published=datetime(2000, 1, 1, tzinfo=UTC)),
+        ]
+        with patch(_TARGET, return_value=hits):
+            records, total, complete = searxng.search(
+                "q",
+                limit=None,
+                year_from=2000,
+                year_to=None,
+                open_access_only=False,
+            )
+        assert [r.title for r in records] == ["new"]
+        assert total == 1
+        assert not complete
+
+    def test_year_upper_only_filter_is_applied(self) -> None:
+        hits = [
+            _result(title="old", published=datetime(2000, 1, 1, tzinfo=UTC)),
+            _result(title="new", published=datetime(2001, 1, 1, tzinfo=UTC)),
+        ]
+        with patch(_TARGET, return_value=hits):
+            records, total, complete = searxng.search(
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=2000,
+                open_access_only=False,
+            )
+        assert [r.title for r in records] == ["old"]
+        assert total == 1
+        assert not complete
+
+    def test_search_limit_zero_still_forwards_zero_and_caps(self) -> None:
+        with patch(_TARGET, return_value=[_result()]) as search_mock:
+            records, total, complete = searxng.search(
+                "q",
+                limit=0,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
+            )
+        assert search_mock.call_args.kwargs["num_results"] == 0
+        assert records == []
+        assert total == 0
+        assert not complete
+
+    def test_to_record_preserves_exact_fields(self) -> None:
+        rec = searxng._to_record(
+            _result(
+                url="https://arxiv.org/abs/1234.56789",
+                title="t",
+                snippet="s",
+                authors=("a",),
+                journal="j",
+                doi="10.1234/x",
+                pdf_url="p",
+                published=datetime(2020, 1, 1, tzinfo=UTC),
+                citations=5,
+            ),
+        )
+        assert (
+            rec.title,
+            rec.authors,
+            rec.year,
+            rec.venue,
+            rec.doi,
+            rec.arxiv_id,
+            rec.abstract,
+            rec.citation_count,
+            rec.open_access_pdf,
+            rec.sources,
+        ) == (
+            "t",
+            ("a",),
+            2020,
+            "j",
+            "10.1234/x",
+            "1234.56789",
+            "s",
+            5,
+            "p",
+            ("searxng",),
+        )
 
 
 if __name__ == "__main__":

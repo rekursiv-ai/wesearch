@@ -104,7 +104,7 @@ _UA_OS: Final[dict[ChromePlatform, str]] = {
 }
 
 
-def chrome_user_agent(major: int, platform: ChromePlatform = "macOS") -> str:
+def chrome_user_agent(major: int, platform: str = "macOS") -> str:
     """Return the User-Agent string a Chrome of this major/platform presents.
 
     Args:
@@ -115,11 +115,12 @@ def chrome_user_agent(major: int, platform: ChromePlatform = "macOS") -> str:
       result: User-Agent header value for this Chrome version and platform.
 
     """
-    if platform not in _UA_OS:
+    os_name = _UA_OS.get(platform)
+    if os_name is None:
         raise ValueError(f"Unsupported platform {platform!r}.")
     tail = "Mobile Safari/537.36" if platform == "Android" else "Safari/537.36"
     return (
-        f"Mozilla/5.0 ({_UA_OS[platform]}) AppleWebKit/537.36 "
+        f"Mozilla/5.0 ({os_name}) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Chrome/{major}.0.0.0 {tail}"
     )
 
@@ -258,7 +259,9 @@ def is_google_property(host: str) -> bool:
       is_google: True when ``host`` is a Google-owned property.
 
     """
-    host = host.casefold().rstrip(".")
+    host = host.casefold()
+    while host.endswith("."):
+        host = host[:-1]
     return any(
         host == suffix or host.endswith(f".{suffix}")
         for suffix in _GOOGLE_HOST_SUFFIXES

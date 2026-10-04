@@ -219,7 +219,7 @@ def decompress_error_body(body: bytes, headers: dict[str, str]) -> bytes:
     # and a caller cannot tell a challenge from a genuine 404. This must NOT
     # raise: an undecodable body must still surface the original HTTP error, so
     # a decompression failure returns the raw bytes rather than mask the status.
-    encoding = headers.get("content-encoding", "identity")
+    encoding = headers.get("content-encoding") or ""
     try:
         return decompress(body, encoding)
     except ValueError:

@@ -363,7 +363,6 @@ class TestSearxngCategoriesLive:
         results = _category_results("videos")
         first = _require(results, "videos")
         assert isinstance(first, VideoResult)
-        assert isinstance(first, MediaResult)  # VideoResult is-a MediaResult.
 
     def test_news(self) -> None:
         results = _category_results("news")

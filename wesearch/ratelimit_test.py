@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 from unittest.mock import patch
 
 import asyncio
@@ -24,10 +24,15 @@ from wesearch.ratelimit import (
     RandomUniformPacer,
     RateLimiter,
     SlidingWindowRateLimiter,
+    SystemClock,
     TokenBucketRateLimiter,
     clear_domain_cooldowns,
     cross_process_limiter,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class FakeClock:
@@ -90,6 +95,21 @@ class _FixedRng:
         return self.value
 
 
+class _RecordingStore:
+    """Store stub exposing every state committed by a transaction."""
+
+    def __init__(self, state: tuple[float, float] | None = None) -> None:
+        self.state = state
+        self.commits: list[tuple[float, float]] = []
+
+    def transact(
+        self,
+        update: Callable[[tuple[float, float] | None], tuple[float, float]],
+    ) -> None:
+        self.state = update(self.state)
+        self.commits.append(self.state)
+
+
 def test_pacer_satisfies_protocols() -> None:
     pacer = RandomUniformPacer(6.0, 12.0)
     sync: RateLimiter = pacer
@@ -98,9 +118,52 @@ def test_pacer_satisfies_protocols() -> None:
     assert callable(asyncy.acquire_async)
 
 
+def test_pacer_default_clock_is_system_clock() -> None:
+    assert isinstance(RandomUniformPacer(0.0, 1.0)._clock, SystemClock)
+
+
+def test_system_clock_uses_injected_source_and_sleepers() -> None:
+    clock = SystemClock(source=lambda: 3.5)
+    assert clock.time() == 3.5
+    with patch("wesearch.ratelimit.time.sleep") as sleep:
+        clock.sleep(2.0)
+    sleep.assert_called_once_with(2.0)
+    with patch(
+        "wesearch.ratelimit.asyncio.sleep",
+        return_value=None,
+    ) as sleep_async:
+        asyncio.run(clock.sleep_async(2.0))
+    sleep_async.assert_called_once_with(2.0)
+
+
 def test_pacer_rejects_negative_low() -> None:
-    with pytest.raises(ValueError, match="low"):
+    with pytest.raises(ValueError, match=r"low must be >= 0, got -1.0"):
         RandomUniformPacer(-1.0, 12.0)
+
+
+def test_pacer_accepts_equal_bounds() -> None:
+    pacer = RandomUniformPacer(2.0, 2.0, clock=FakeClock())
+    assert pacer._low == 2.0
+    assert pacer._high == 2.0
+
+
+def test_pacer_uses_injected_clock_and_rng() -> None:
+    clock = FakeClock()
+    rng = _FixedRng(2.0)
+    pacer = RandomUniformPacer(1.0, 3.0, clock=clock, rng=cast(random.Random, rng))
+    pacer.acquire()
+    pacer.acquire()
+    assert rng.calls == [(1.0, 3.0)]
+    assert clock.sleeps == [2.0]
+
+
+def test_pacer_zero_low_accepts_subsecond_wait() -> None:
+    clock = FakeClock()
+    rng = _FixedRng(0.5)
+    pacer = RandomUniformPacer(0.0, 1.0, clock=clock, rng=cast(random.Random, rng))
+    pacer.acquire()
+    pacer.acquire()
+    assert clock.sleeps == [0.5]
 
 
 def test_pacer_rejects_high_below_low() -> None:
@@ -149,6 +212,15 @@ def test_pacer_async_first_free_then_paces() -> None:
     assert clock.sleeps == [9.0]
 
 
+def test_pacer_async_sleeps_subsecond_wait() -> None:
+    clock = FakeClock()
+    rng = _FixedRng(0.5)
+    pacer = RandomUniformPacer(0.0, 1.0, clock=clock, rng=cast(random.Random, rng))
+    asyncio.run(pacer.acquire_async())
+    asyncio.run(pacer.acquire_async())
+    assert clock.sleeps == [0.5]
+
+
 def test_pacer_draws_stay_within_bounds_across_many_acquires() -> None:
     # Real RNG, no work between calls: every PACED sleep (call 2+) is the full
     # draw and must fall in [low, high]. The first call is free (no sleep).
@@ -163,6 +235,21 @@ def test_pacer_draws_stay_within_bounds_across_many_acquires() -> None:
 
 
 # -- SlidingWindowRateLimiter ------------------------------------------------
+
+
+def test_sliding_rejects_invalid_configuration() -> None:
+    with pytest.raises(ValueError, match=r"max_calls must be >= 1, got 0"):
+        SlidingWindowRateLimiter(0)
+    with pytest.raises(ValueError, match=r"per_seconds must be > 0, got 0.0"):
+        SlidingWindowRateLimiter(1, 0.0)
+
+
+def test_sliding_default_window_is_one_second() -> None:
+    clock = FakeClock()
+    limiter = SlidingWindowRateLimiter(1, clock=clock)
+    limiter.acquire()
+    limiter.acquire()
+    assert clock.sleeps == [1.0]
 
 
 def test_sliding_allows_burst_up_to_max_without_sleeping() -> None:
@@ -226,6 +313,24 @@ def test_sliding_no_double_rate_across_window_boundary() -> None:
     assert clock.now >= 1.9
 
 
+def test_sliding_expiry_boundary_is_evicted() -> None:
+    clock = FakeClock()
+    limiter = SlidingWindowRateLimiter(max_calls=1, per_seconds=1.0, clock=clock)
+    limiter.acquire()
+    clock.now = 1.0
+    assert limiter._reserve() == 0.0
+    assert list(limiter._calls) == [1.0]
+
+
+def test_sliding_wait_is_relative_to_nonzero_now() -> None:
+    clock = FakeClock()
+    clock.now = 10.0
+    limiter = SlidingWindowRateLimiter(max_calls=1, per_seconds=1.0, clock=clock)
+    limiter.acquire()
+    limiter.acquire()
+    assert clock.sleeps == [1.0]
+
+
 def test_sliding_aged_out_calls_are_evicted() -> None:
     clock = FakeClock()
     limiter = SlidingWindowRateLimiter(max_calls=1, per_seconds=1.0, clock=clock)
@@ -236,6 +341,26 @@ def test_sliding_aged_out_calls_are_evicted() -> None:
 
 
 # -- TokenBucketRateLimiter --------------------------------------------------
+
+
+def test_bucket_rejects_invalid_configuration() -> None:
+    with pytest.raises(ValueError, match=r"max_calls must be >= 1, got 0"):
+        TokenBucketRateLimiter(0)
+    with pytest.raises(ValueError, match=r"per_seconds must be > 0, got 0.0"):
+        TokenBucketRateLimiter(1, 0.0)
+
+
+def test_bucket_default_clock_is_system_clock() -> None:
+    assert isinstance(TokenBucketRateLimiter(1)._clock, SystemClock)
+
+
+def test_bucket_default_refill_is_one_second() -> None:
+    clock = FakeClock()
+    limiter = TokenBucketRateLimiter(1, clock=clock)
+    assert limiter._clock is clock
+    limiter.acquire()
+    limiter.acquire()
+    assert clock.sleeps == [1.0]
 
 
 def test_bucket_allows_initial_burst_up_to_capacity() -> None:
@@ -259,12 +384,28 @@ def test_bucket_paces_after_capacity_drained() -> None:
 def test_bucket_refills_proportionally_over_time() -> None:
     clock = FakeClock()
     limiter = TokenBucketRateLimiter(max_calls=4, per_seconds=2.0, clock=clock)
+    assert limiter._refill_per_sec == 2.0
     for _ in range(4):
         limiter.acquire()  # Drain.
     clock.now = 1.0  # 1s at 2 tokens/sec => 2 tokens refilled.
     limiter.acquire()
     limiter.acquire()
     assert clock.sleeps == []  # Two refilled tokens cover these.
+
+
+def test_bucket_reservation_commits_spent_tokens_and_deadline() -> None:
+    clock = FakeClock()
+    store = _RecordingStore()
+    limiter = TokenBucketRateLimiter(
+        max_calls=4,
+        per_seconds=2.0,
+        clock=clock,
+        store=store,
+    )
+    for _ in range(5):
+        limiter.acquire()
+    assert store.state == (0.0, 0.5)
+    assert clock.sleeps == [0.5]
 
 
 def test_bucket_never_exceeds_capacity_on_long_idle() -> None:
@@ -400,6 +541,16 @@ def test_file_store_serializes_concurrent_threads(tmp_path: Path) -> None:
     assert tokens == 800.0  # No lost updates.
 
 
+def test_file_store_opens_private_close_on_exec_file(tmp_path: Path) -> None:
+    store = FileStore(tmp_path / "nested" / "rl.bin")
+    with patch("wesearch.ratelimit.os.open", wraps=os.open) as open_file:
+        store.transact(lambda _state: (1.0, 2.0))
+    flags = cast(int, open_file.call_args.args[1])
+    mode = cast(int, open_file.call_args.args[2])
+    assert flags & os.O_CLOEXEC
+    assert mode == 0o600
+
+
 def test_file_store_holds_no_descriptor_between_transactions(tmp_path: Path) -> None:
     """A store must not own an fd across calls: ephemeral stores would leak one each.
 
@@ -500,9 +651,43 @@ def test_sliding_is_thread_safe_under_contention() -> None:
     assert count == 400
 
 
+def test_cooldown_error_has_exact_message() -> None:
+    error = CooldownActiveError(3600.4)
+    assert str(error) == (
+        "cooldown active for 3600s more; "
+        "not waiting -- retry later or change identity (IP / key)"
+    )
+    assert error.remaining_sec == 3600.4
+
+
+def test_cooldown_default_clock_is_system_clock() -> None:
+    assert isinstance(CooldownGate()._clock, SystemClock)
+
+
 def test_cooldown_inactive_by_default() -> None:
     gate = CooldownGate(clock=FakeClock())
     assert gate.remaining() == 0.0
+
+
+def test_cooldown_remaining_reads_empty_state_as_zero() -> None:
+    store = _RecordingStore()
+    gate = CooldownGate(store=store, clock=FakeClock())
+    assert gate.remaining() == 0.0
+    assert store.commits == [(0.0, 0.0)]
+
+
+def test_cooldown_clear_writes_empty_state() -> None:
+    clock = FakeClock()
+    gate = CooldownGate(clock=clock)
+    gate.trigger(5.0)
+    gate.clear()
+    assert gate.remaining() == 0.0
+
+
+def test_cooldown_clear_resets_padding_slot() -> None:
+    store = _RecordingStore((9.0, 7.0))
+    CooldownGate(store=store, clock=FakeClock()).clear()
+    assert store.commits == [(0.0, 0.0)]
 
 
 def test_cooldown_trigger_opens_window() -> None:
@@ -510,6 +695,12 @@ def test_cooldown_trigger_opens_window() -> None:
     gate = CooldownGate(clock=clock)
     gate.trigger(8.0)
     assert gate.remaining() == 8.0
+
+
+def test_cooldown_trigger_initializes_empty_state() -> None:
+    store = _RecordingStore()
+    CooldownGate(store=store, clock=FakeClock()).trigger(0.0)
+    assert store.commits == [(0.0, 0.0)]
 
 
 def test_cooldown_trigger_only_grows_window() -> None:
@@ -529,6 +720,28 @@ def test_cooldown_elapses_as_clock_advances() -> None:
     assert gate.remaining() == 0.0
 
 
+def test_cooldown_wait_async_inactive_does_not_sleep() -> None:
+    clock = FakeClock()
+    asyncio.run(CooldownGate(clock=clock).wait_async())
+    assert clock.sleeps == []
+
+
+def test_cooldown_wait_equal_maximum_is_allowed() -> None:
+    clock = FakeClock()
+    gate = CooldownGate(clock=clock)
+    gate.trigger(5.0)
+    gate.wait(5.0)
+    assert clock.sleeps == [5.0]
+
+
+def test_cooldown_waits_subsecond_remaining() -> None:
+    clock = FakeClock()
+    gate = CooldownGate(clock=clock)
+    gate.trigger(0.5)
+    gate.wait()
+    assert clock.sleeps == [0.5]
+
+
 def test_cooldown_wait_async_sleeps_remaining() -> None:
     clock = FakeClock()
     gate = CooldownGate(clock=clock)
@@ -536,6 +749,14 @@ def test_cooldown_wait_async_sleeps_remaining() -> None:
     asyncio.run(gate.wait_async())
     assert clock.sleeps == [3.0]
     assert gate.remaining() == 0.0
+
+
+def test_cooldown_wait_async_sleeps_subsecond_remaining() -> None:
+    clock = FakeClock()
+    gate = CooldownGate(clock=clock)
+    gate.trigger(0.5)
+    asyncio.run(gate.wait_async())
+    assert clock.sleeps == [0.5]
 
 
 def test_cooldown_shared_across_instances_via_filestore(tmp_path: Path) -> None:
@@ -547,6 +768,29 @@ def test_cooldown_shared_across_instances_via_filestore(tmp_path: Path) -> None:
     b = CooldownGate(store=FileStore(store_path), clock=FakeClock())
     a.trigger(7.0)
     assert b.remaining() == 7.0
+
+
+def test_clear_domain_cooldowns_rejects_path_separators(tmp_path: Path) -> None:
+    for domain in ("", "bad/domain", "bad\\domain"):
+        with pytest.raises(ValueError, match="Invalid cooldown domain"):
+            clear_domain_cooldowns(domain, state_dir=tmp_path)
+
+
+def test_clear_domain_cooldowns_missing_base_returns_zero(tmp_path: Path) -> None:
+    assert clear_domain_cooldowns("example.com", state_dir=tmp_path / "missing") == 0
+
+
+def test_clear_domain_cooldowns_uses_default_namespace(tmp_path: Path) -> None:
+    base = tmp_path / "rekursiv-ai" / "wesearch" / "ratelimit"
+    base.mkdir(parents=True)
+    gate = CooldownGate(
+        store=FileStore(base / "example.com:ip_cooldown.lock"),
+        clock=FakeClock(),
+    )
+    gate.trigger(5.0)
+    with patch("wesearch.ratelimit.data_dir", return_value=tmp_path):
+        assert clear_domain_cooldowns("EXAMPLE.COM") == 1
+    assert gate.remaining() == 0.0
 
 
 def test_clear_domain_cooldowns_only_resets_matching_domain(tmp_path: Path) -> None:
@@ -579,6 +823,17 @@ def test_cooldown_rate_limiter_spends_one_token_per_acquire() -> None:
     limiter.acquire()  # `first` token is free (bucket starts full)
     limiter.acquire()  # Drained -> waits for one refill.
     assert clock.sleeps == [1.0]
+
+
+def test_cooldown_rate_limiter_default_cooldown_is_120_seconds() -> None:
+    clock = FakeClock()
+    limiter = CooldownRateLimiter(
+        limiter=TokenBucketRateLimiter(10, clock=clock),
+        cooldown=CooldownGate(clock=clock),
+    )
+    limiter.trigger_cooldown()
+    assert clock.sleeps == []
+    assert limiter._cooldown.remaining() == 120.0
 
 
 def test_cooldown_rate_limiter_honors_cooldown_before_granting() -> None:

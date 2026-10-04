@@ -49,6 +49,20 @@ class TestCitations:
             listing = citations("doi", "10.1/x", limit=None, year_from=2020)
         assert [r.title for r in listing.records] == ["new"]
 
+    def test_year_filter_includes_the_boundary_year(self) -> None:
+        entry: MutableJSON = {
+            "isInfluential": True,
+            "citingPaper": {"title": "boundary", "year": 2020},
+        }
+        with patch.object(
+            s2,
+            "paginate",
+            return_value=Page(entries=[entry], complete=True),
+        ):
+            listing = citations("doi", "10.1/x", limit=None, year_from=2020)
+
+        assert [r.title for r in listing.records] == ["boundary"]
+
     def test_year_filter_excludes_a_bool_year(self) -> None:
         # ``isinstance(True, int)`` is true, so a JSON ``true`` year passed the
         # filter and was compared as the value 1.
@@ -92,6 +106,45 @@ class TestCitations:
         assert [r.title for r in listing.records] == ["keep"]
         assert not listing.complete  # Cursor not exhausted -> more may exist.
 
+    def test_s2_requests_exact_citation_path_params_and_options(self) -> None:
+        page = Page(entries=[], complete=True)
+        with patch.object(s2, "paginate", return_value=page) as paginate:
+            citations(
+                "doi",
+                "10.1/x",
+                limit=7,
+                influential_only=True,
+                year_from=2020,
+            )
+
+        assert paginate.call_args.args == (
+            "/paper/DOI:10.1/x/citations",
+            {
+                "fields": ",".join(
+                    (
+                        "isInfluential",
+                        *(f"citingPaper.{field}" for field in s2.S2_PAPER_FIELDS),
+                    ),
+                ),
+            },
+        )
+        assert paginate.call_args.kwargs["limit"] == 7
+        keep = paginate.call_args.kwargs["keep"]
+        assert callable(keep)
+        assert keep({"isInfluential": True, "citingPaper": {"year": 2020}})
+
+    def test_openalex_citations_forwards_every_argument(self) -> None:
+        records = [PaperRecord(title="citer", sources=("openalex",))]
+        with patch.object(
+            openalex,
+            "citations",
+            return_value=(records, 1, True),
+        ) as citations_call:
+            citations("doi", "10.1/x", limit=7, source="openalex", year_from=2020)
+
+        assert citations_call.call_args.args == ("doi", "10.1/x")
+        assert citations_call.call_args.kwargs == {"limit": 7, "year_from": 2020}
+
 
 class TestMetadata:
     def test_single(self) -> None:
@@ -101,12 +154,29 @@ class TestMetadata:
         assert rec.title == "T"
         assert get.call_args.args[0] == "/paper/DOI:10.1/x"
 
+    def test_single_requests_full_s2_fields(self) -> None:
+        payload: MutableJSON = {"title": "T"}
+        with patch.object(s2, "get", return_value=payload) as get:
+            metadata("arxiv", "2312.00000")
+
+        assert get.call_args.args == (
+            "/paper/ARXIV:2312.00000",
+            {"fields": s2.S2_PAPER_FIELDS_STR},
+        )
+
     def test_batch_aligns_and_nulls(self) -> None:
         with patch.object(s2, "batch", return_value=[{"title": "A"}, None]):
             recs = metadata_batch(["DOI:1", "DOI:2"])
         assert recs[0] is not None
         assert recs[0].title == "A"
         assert recs[1] is None
+
+    def test_batch_requests_exact_ids_fields_and_endpoint(self) -> None:
+        with patch.object(s2, "batch", return_value=[]) as batch:
+            metadata_batch(["DOI:1", "ARXIV:2"])
+
+        assert batch.call_args.args == (["DOI:1", "ARXIV:2"], s2.S2_PAPER_FIELDS_STR)
+        assert batch.call_args.kwargs == {"endpoint": "paper"}
 
 
 class TestReferences:
@@ -116,11 +186,21 @@ class TestReferences:
             complete=True,
         )
         with patch.object(s2, "paginate", return_value=page) as paginate:
-            listing = references("arxiv", "1706.03762", limit=None)
+            listing = references("doi", "10.1/x", limit=7)
         assert [r.title for r in listing.records] == ["cited"]
         assert listing.records[0].is_influential is True
-        # References endpoint path + citedPaper.* fields.
-        assert paginate.call_args.args[0] == "/paper/ARXIV:1706.03762/references"
+        assert paginate.call_args.args == (
+            "/paper/DOI:10.1/x/references",
+            {
+                "fields": ",".join(
+                    (
+                        "isInfluential",
+                        *(f"citedPaper.{field}" for field in s2.S2_PAPER_FIELDS),
+                    ),
+                ),
+            },
+        )
+        assert paginate.call_args.kwargs == {"limit": 7}
 
     def test_skips_empty_inner_edge(self) -> None:
         # An edge row with no inner paper object is skipped, not mapped to a stub.
@@ -132,15 +212,24 @@ class TestReferences:
             listing = references("doi", "10.1/x", limit=None)
         assert [r.title for r in listing.records] == ["real"]
 
+    def test_preserves_incomplete_page(self) -> None:
+        page = Page(entries=[{"citedPaper": {"title": "real"}}], complete=False)
+        with patch.object(s2, "paginate", return_value=page):
+            listing = references("doi", "10.1/x", limit=None)
+
+        assert [r.title for r in listing.records] == ["real"]
+        assert listing.complete is False
+
 
 class TestOpenAlexGraphSource:
     def test_references_dispatches_to_openalex(self) -> None:
         recs = [PaperRecord(title="ref", sources=("openalex",))]
         with patch.object(openalex, "references", return_value=(recs, True)) as oa_refs:
-            listing = references("doi", "10.1/x", limit=None, source="openalex")
+            listing = references("doi", "10.1/x", limit=7, source="openalex")
         assert [r.title for r in listing.records] == ["ref"]
         assert listing.complete
         assert oa_refs.call_args.args == ("doi", "10.1/x")
+        assert oa_refs.call_args.kwargs == {"limit": 7}
 
     def test_citations_dispatches_to_openalex(self) -> None:
         recs = [PaperRecord(title="citer", sources=("openalex",))]
@@ -152,7 +241,8 @@ class TestOpenAlexGraphSource:
             listing = citations("doi", "10.1/x", limit=1, source="openalex")
         assert [r.title for r in listing.records] == ["citer"]
         assert not listing.complete  # Total 500 > 1 returned.
-        assert oa_cites.call_args.kwargs["year_from"] is None
+        assert oa_cites.call_args.args == ("doi", "10.1/x")
+        assert oa_cites.call_args.kwargs == {"limit": 1, "year_from": None}
 
     def test_openalex_citations_complete_when_all_returned(self) -> None:
         recs = [PaperRecord(title="c", sources=("openalex",))]
@@ -183,7 +273,10 @@ class TestOpenAlexGraphSource:
                 )
 
     def test_influential_only_rejected_for_openalex(self) -> None:
-        with pytest.raises(PaperError, match="S2-only"):
+        with pytest.raises(
+            PaperError,
+            match=r"^'influential_only' is S2-only; OpenAlex has no influence flag\.$",
+        ):
             citations(
                 "doi",
                 "10.1/x",

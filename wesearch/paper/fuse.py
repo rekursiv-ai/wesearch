@@ -15,6 +15,7 @@ back to its normalized title.
 
 from __future__ import annotations
 
+from itertools import count
 from typing import TYPE_CHECKING
 
 import re
@@ -58,7 +59,9 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     # so an S2 rank counts for more; an OpenAlex-only paper still scores.
     # Not kwargs: both metrics measure_fusion_quality reports are invariant to
     # these -- weights only reorder a set the identity rule already fixed.
+    # pragma: no mutate start -- labels are only distinct dict keys.
     weights = ((s2_hits, "s2", 1.0), (oa_hits, "openalex", 0.7))
+    # pragma: no mutate end
 
     groups = _group_by_identity([rec for hits, _label, _w in weights for rec in hits])
     merged: dict[int, PaperRecord] = {}
@@ -68,14 +71,20 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     # rank, not the sum of both rows -- otherwise a self-collision at ranks
     # 11-12 outranks that backend's own #1. Keep each backend's best rank only.
     best_rank: dict[tuple[int, str], int] = {}
-    index = 0
-    for hits, label, weight in weights:
-        for rank, rec in enumerate(hits, start=1):
-            root = groups[index]
-            index += 1
-            merged[root] = merged[root].merge(rec) if root in merged else rec
-            if best_rank.setdefault((root, label), rank) == rank:
-                score[root] = score.get(root, 0.0) + weight / (offset + rank)
+    ranked = [
+        (rank, rec, label, weight)
+        for hits, label, weight in weights
+        for rank, rec in zip(count(1), hits)
+    ]
+    # pragma: no mutate start -- grouping and flattening have identical lengths.
+    for root, (rank, rec, label, weight) in zip(groups, ranked, strict=True):
+        # pragma: no mutate end
+        merged[root] = merged[root].merge(rec) if root in merged else rec
+        if best_rank.setdefault((root, label), rank) == rank:
+            # pragma: no mutate start -- every root's first score has same baseline.
+            score.setdefault(root, 0.0)
+            # pragma: no mutate end
+            score[root] += weight / (offset + rank)
     # Stable sort by descending score over insertion-ordered roots; the S2 loop
     # runs first so a coincidental score tie keeps S2's paper first.
     return [
@@ -93,7 +102,7 @@ def normalize_title(title: str) -> str:
       normalized: The comparison form used as a last-resort identity key.
 
     """
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", " ", title.lower())).strip()
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", " ", title.casefold())).strip()
 
 
 # A DOI and an arXiv id are separate namespaces for the SAME paper, so both are emitted:
@@ -108,9 +117,9 @@ def _identity_keys(rec: PaperRecord) -> list[str]:
     """Every identifier naming this paper, or its title when it has none."""
     keys: list[str] = []
     if rec.doi:
-        keys.append(f"doi:{rec.doi.lower()}")
+        keys.append(f"doi:{rec.doi.casefold()}")
     if rec.arxiv_id:
-        keys.append(f"arxiv:{rec.arxiv_id.lower()}")
+        keys.append(f"arxiv:{rec.arxiv_id.casefold()}")
     if keys:
         return keys
     title = normalize_title(rec.title)

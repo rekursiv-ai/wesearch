@@ -561,7 +561,7 @@ def _split_userinfo(url: str) -> tuple[str, str | None]:
         return url, None
     user = unquote(parsed.username or "")
     password = unquote(parsed.password or "")
-    credentials = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    credentials = base64.b64encode(f"{user}:{password}".encode()).decode()
     netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
     return parsed._replace(netloc=netloc).geturl(), f"Basic {credentials}"
 
@@ -623,7 +623,8 @@ def _fetch_once(
         merged["Cookie"] = "; ".join(cookie_parts)
     method = params.content.method
     backend = fetch_curl if params.policy.transport == "curl" else fetch_stdlib
-    for attempt in range(1 + params.retry.retries):
+    attempt = 0
+    while True:
         try:
             return backend(
                 url,
@@ -655,6 +656,7 @@ def _fetch_once(
                 e.status,
                 delay_sec,
             )
+            attempt += 1
             time.sleep(delay_sec)
         except (OSError, TimeoutError) as e:
             if attempt == params.retry.retries:
@@ -666,10 +668,8 @@ def _fetch_once(
                 e,
                 delay_sec,
             )
+            attempt += 1
             time.sleep(delay_sec)
-    # The loop returns on success and re-raises on the final attempt, so this
-    # is unreachable; it exists only to satisfy the type checker.
-    raise AssertionError("retry loop exited without returning or raising")
 
 
 # On the high-level curl transport, curl_cffi's ``impersonate`` supplies the coherent
@@ -939,7 +939,7 @@ def _fetch_with_identity(
         if profile is None:
             raise  # First contact burned: no known identity to discard or retry.
         if egress is None:  # A profile only loads once egress resolved.
-            raise ValueError("Expected egress is not None.") from None
+            raise ValueError from None
         store.discard(egress, domain)
         close_curl_session(egress, domain, request.session.impersonate)
         # The burn may be a VPN rotation: re-resolve live before the fresh retry.
@@ -1022,7 +1022,7 @@ def _send_as(
         seeded_cookies = {**jar, **(caller_cookies or {})}
     body = request.send(
         headers=seeded_headers,
-        cookies=seeded_cookies or None,
+        cookies=seeded_cookies,
         raw_headers=False,
         on_response=capture,
         curl=curl,
@@ -1084,6 +1084,7 @@ def _send_via_zendriver(
         headers=headers,
         cookies=cookies,
         trust=request.params.policy.trust,
+        max_redirects=request.params.retry.max_redirects,
         on_redirect=request.params.observe.on_redirect,
     )
     # Everything below is scoped to where the navigation LANDED, not to what the

@@ -15,8 +15,11 @@ import time
 
 import pytest
 
+from wesearch.chrome import capture
 from wesearch.chrome.capture import (
+    _chrome_binary,
     _kill_group,
+    _load_libc,
     chrome_available,
     die_with_parent,
     drive_chrome,
@@ -44,6 +47,44 @@ def _fresh_popen_mock(*args: object, **kwargs: object) -> MagicMock:
     """Return a new stub per ``Popen`` call, for tests that drive Chrome twice."""
     del args, kwargs
     return _popen_mock()
+
+
+class TestKillGroup:
+    def test_ignores_missing_or_inaccessible_process_groups(self) -> None:
+        process = subprocess.Popen([sys.executable, "-c", ""], stdout=subprocess.PIPE)
+        try:
+            for error in (ProcessLookupError(), PermissionError()):
+                with patch("os.killpg", side_effect=error) as killpg:
+                    _kill_group(process)
+                killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+        finally:
+            process.wait()
+
+
+class TestDieWithParent:
+    def test_arms_process_group_and_parent_death_signal(self) -> None:
+        libc = MagicMock()
+        with (
+            patch.object(capture, "_libc", libc),
+            patch.object(os, "setpgid") as setpgid,
+        ):
+            die_with_parent()
+        setpgid.assert_called_once_with(0, 0)
+        libc.prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
+
+    def test_ignores_process_group_and_libc_errors(self) -> None:
+        libc = MagicMock()
+        with (
+            patch.object(capture, "_libc", libc),
+            patch.object(os, "setpgid", side_effect=OSError),
+        ):
+            libc.prctl.side_effect = OSError
+            die_with_parent()
+        libc.prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
+
+    def test_skips_parent_death_signal_when_libc_is_unavailable(self) -> None:
+        with patch.object(capture, "_libc", None), patch.object(os, "setpgid"):
+            die_with_parent()
 
 
 class TestDriveChrome:
@@ -119,7 +160,7 @@ class TestDriveChrome:
     def test_missing_binary_raises(self) -> None:
         with (
             patch("wesearch.chrome.capture._chrome_binary", return_value=None),
-            pytest.raises(RuntimeError, match="No Chrome binary"),
+            pytest.raises(RuntimeError, match=r"^No Chrome binary found on PATH\.$"),
         ):
             drive_chrome("https://localhost:1/")
 
@@ -155,6 +196,69 @@ class TestDriveChrome:
             drive_chrome("https://example.com/", disable_sandbox=True)
             argv = cast(list[str], run.call_args.args[0])
             assert "--no-sandbox" in argv
+
+    def test_default_timeouts_streams_and_profile_prefix_are_exact(self) -> None:
+        process = _popen_mock()
+        with (
+            patch("subprocess.Popen", return_value=process) as run,
+            patch("wesearch.chrome.capture._chrome_binary", return_value="chrome"),
+        ):
+            assert drive_chrome("https://example.test/") is False
+        run.assert_called_once()
+        assert run.call_args.kwargs["stdout"] is subprocess.PIPE
+        assert run.call_args.kwargs["stderr"] is subprocess.PIPE
+        argv = cast(list[str], run.call_args.args[0])
+        assert argv[4].startswith("--user-data-dir=")
+        assert Path(argv[4].split("=", 1)[1]).name.startswith("chrome-capture-")
+        process.communicate.assert_called_once_with(timeout=40.0)
+
+    def test_default_reap_timeout_and_suppression_are_exact(self) -> None:
+        process = MagicMock()
+        process.pid = 4321
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="chrome", timeout=40.0),
+            subprocess.TimeoutExpired(cmd="chrome", timeout=10.0),
+        ]
+        with (
+            patch("subprocess.Popen", return_value=process),
+            patch("os.killpg"),
+            patch("wesearch.chrome.capture._chrome_binary", return_value="chrome"),
+        ):
+            assert drive_chrome("https://example.test/") is True
+        assert process.communicate.call_args_list[1].kwargs == {"timeout": 10.0}
+
+    def test_all_chrome_flags_and_timeouts_are_forwarded(self) -> None:
+        process = _popen_mock(timeout=True)
+        with (
+            patch("subprocess.Popen", return_value=process) as run,
+            patch("os.killpg"),
+            patch(
+                "wesearch.chrome.capture._chrome_binary",
+                return_value="chrome",
+            ),
+        ):
+            assert drive_chrome(
+                "https://example.test/",
+                timeout_sec=2,
+                reap_timeout_sec=3,
+                ignore_certificate_errors=True,
+                disable_sandbox=True,
+            )
+        argv = cast(list[str], run.call_args.args[0])
+        assert argv == [
+            "chrome",
+            "--headless=new",
+            "--disable-gpu",
+            "--incognito",
+            argv[4],
+            "--password-store=basic",
+            "--no-sandbox",
+            "--ignore-certificate-errors",
+            "--dump-dom",
+            "https://example.test/",
+        ]
+        assert process.communicate.call_args_list[0].kwargs == {"timeout": 2}
+        assert process.communicate.call_args_list[1].kwargs == {"timeout": 3}
 
 
 @pytest.mark.cli_git
@@ -252,6 +356,47 @@ def _alive(pid: int) -> bool:
 
 
 class TestChromeAvailable:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "google-chrome-stable",
+            "google-chrome",
+            "chromium-browser",
+            "chromium",
+            "chrome",
+        ],
+    )
+    def test_binary_search_order_and_names(self, name: str) -> None:
+        def only(name_to_find: str) -> str | None:
+            return "/bin/native" if name_to_find == name else None
+
+        with patch.object(shutil, "which", only):
+            assert _chrome_binary() == name
+
+    def test_no_binary_returns_none(self) -> None:
+        with patch.object(shutil, "which", return_value=None):
+            assert _chrome_binary() is None
+
+    def test_load_libc_returns_none_off_linux(self) -> None:
+        with patch.object(sys, "platform", "darwin"):
+            assert _load_libc() is None
+
+    def test_load_libc_handles_missing_library(self) -> None:
+        with (
+            patch.object(sys, "platform", "linux"),
+            patch("ctypes.CDLL", side_effect=OSError),
+        ):
+            assert _load_libc() is None
+
+    def test_load_libc_uses_exact_linux_loader_arguments(self) -> None:
+        libc = object()
+        with (
+            patch.object(sys, "platform", "linux-gnu"),
+            patch("ctypes.CDLL", return_value=libc) as cdll,
+        ):
+            assert _load_libc() is libc
+        cdll.assert_called_once_with("libc.so.6", use_errno=True)
+
     def test_finds_the_debian_chromium_browser_binary(self) -> None:
         # chromium-browser is the binary name Debian/Ubuntu install, so a host
         # carrying only that one skipped the whole parity suite as "no Chrome".
@@ -289,6 +434,30 @@ class TestChromeAvailable:
 
         with patch.object(shutil, "which", only_wrapper):
             assert not chrome_available()
+
+    def test_snap_wrapper_marker_at_read_limit_is_detected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        wrapper = tmp_path / "chromium"
+        wrapper.write_bytes(b"x" * (4_096 - len(b"/snap/bin/") + 1) + b"/snap/bin/")
+        assert not capture._snap_confined(str(wrapper))
+
+    def test_snap_run_marker_is_case_sensitive(self, tmp_path: Path) -> None:
+        wrapper = tmp_path / "chromium"
+        wrapper.write_bytes(b"x" * 100 + b"snap run")
+        assert capture._snap_confined(str(wrapper))
+        wrapper.write_bytes(b"x" * 100 + b"SNAP RUN")
+        assert not capture._snap_confined(str(wrapper))
+
+    def test_snap_path_check_uses_exact_prefix(self, tmp_path: Path) -> None:
+        resolved = MagicMock()
+        resolved.name = "chromium"
+        resolved.is_relative_to.return_value = False
+        resolved.read_bytes.return_value = b"native"
+        with patch.object(Path, "resolve", return_value=resolved):
+            assert not capture._snap_confined(str(tmp_path / "chromium"))
+        resolved.is_relative_to.assert_called_once_with("/snap")
 
     def test_a_native_binary_counts(self, tmp_path: Path) -> None:
         # Positive control for the byte scan: an ordinary executable is kept.

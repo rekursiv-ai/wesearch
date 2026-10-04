@@ -19,7 +19,10 @@ class TestMatches:
     def test_matches_reddit_hosts(self, url: str) -> None:
         assert reddit.matches(url)
 
-    @pytest.mark.parametrize("url", ["https://example.com", "https://notreddit.com"])
+    @pytest.mark.parametrize(
+        "url",
+        ["https://example.com", "https://notreddit.com", "not a url"],
+    )
     def test_rejects_non_reddit(self, url: str) -> None:
         assert not reddit.matches(url)
 
@@ -31,6 +34,11 @@ class TestRssUrl:
     def test_preserves_query(self) -> None:
         got = reddit.rss_url("https://reddit.com/r/x?limit=100")
         assert got == "https://reddit.com/r/x/.rss?limit=100"
+
+    def test_removes_all_trailing_slashes_before_rss(self) -> None:
+        assert reddit.rss_url("https://reddit.com/r/x///") == (
+            "https://reddit.com/r/x/.rss"
+        )
 
     def test_strips_trailing_json(self) -> None:
         assert reddit.rss_url("https://reddit.com/r/x/.json") == (

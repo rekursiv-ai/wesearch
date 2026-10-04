@@ -23,6 +23,21 @@ class TestNormalizeId:
     def test_doi_dx_prefix(self) -> None:
         assert normalize_id("https://dx.doi.org/10.1234/x") == ("doi", "10.1234/x")
 
+    def test_doi_prefix_preserves_uppercase_suffix(self) -> None:
+        assert normalize_id("HTTPS://DOI.ORG/10.1234/X") == ("doi", "10.1234/X")
+
+    def test_all_http_doi_prefixes(self) -> None:
+        assert normalize_id("http://doi.org/10.1234/x") == ("doi", "10.1234/x")
+        assert normalize_id("http://dx.doi.org/10.1234/x") == ("doi", "10.1234/x")
+        assert normalize_id("HTTP://DOI.ORG/10.1234/x") == ("doi", "10.1234/x")
+
+    def test_doi_prefix_error_message_is_exact(self) -> None:
+        with pytest.raises(
+            InvalidIdError,
+            match=r"^Unrecognized identifier shape: 'doi:2106\.15928'\.",
+        ):
+            normalize_id("doi:2106.15928")
+
     def test_doi_short_prefix(self) -> None:
         assert normalize_id("doi:10.1234/x") == ("doi", "10.1234/x")
 
@@ -44,6 +59,17 @@ class TestNormalizeId:
             "2106.15928",
         )
 
+    def test_all_arxiv_url_prefixes(self) -> None:
+        for raw in (
+            "http://arxiv.org/abs/2106.15928",
+            "HTTP://ARXIV.ORG/ABS/2106.15928",
+            "http://arxiv.org/pdf/2106.15928",
+            "HTTP://ARXIV.ORG/PDF/2106.15928.PDF",
+            "arxiv.org/abs/2106.15928",
+            "ARXIV.ORG/ABS/2106.15928",
+        ):
+            assert normalize_id(raw) == ("arxiv", "2106.15928")
+
     def test_arxiv_pdf_url_strips_pdf(self) -> None:
         assert normalize_id("https://arxiv.org/pdf/2106.15928.pdf") == (
             "arxiv",
@@ -55,17 +81,27 @@ class TestNormalizeId:
         with pytest.raises(InvalidIdError):
             normalize_id("arxiv:not-an-id")
 
+    def test_arxiv_prefix_cannot_become_doi(self) -> None:
+        with pytest.raises(InvalidIdError):
+            normalize_id("http://arxiv.org/abs/10.1234/x")
+
+    def test_old_style_subject_suffix_accepts_uppercase_archive(self) -> None:
+        assert normalize_id("foo.BR/1234567") == ("arxiv", "foo.BR/1234567")
+
     def test_doi_prefix_pins_family(self) -> None:
         # A ``doi:``-prefixed arXiv-shaped value must not be re-read as arXiv.
         with pytest.raises(InvalidIdError):
             normalize_id("doi:2106.15928")
 
     def test_empty_rejected(self) -> None:
-        with pytest.raises(InvalidIdError):
+        with pytest.raises(InvalidIdError, match=r"^Empty identifier\.$"):
             normalize_id("   ")
 
     def test_garbage_rejected(self) -> None:
-        with pytest.raises(InvalidIdError):
+        with pytest.raises(
+            InvalidIdError,
+            match=r"^Unrecognized identifier shape: 'not-an-identifier'\. Expected DOI \(10\.xxxx/yyy\) or arXiv id \(NNNN\.NNNNN, arXiv:NNNN\.NNNNN, or hep-th/NNNNNNN\)\.$",
+        ):
             normalize_id("not-an-identifier")
 
 
@@ -89,6 +125,9 @@ class TestWireAndSlug:
 
     def test_slug_sanitizes(self) -> None:
         assert id_slug("doi", "10.1/a b") == "doi_10.1_a_b"
+
+    def test_slug_preserves_both_letter_cases(self) -> None:
+        assert id_slug("doi", "10.1/Az") == "doi_10.1_Az"
 
     def test_slug_arxiv(self) -> None:
         assert id_slug("arxiv", "hep-th/9901001") == "arxiv_hep-th_9901001"

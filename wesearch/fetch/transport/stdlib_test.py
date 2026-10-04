@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from http import client
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import base64
 import gzip
 import socket
+import ssl
 
 import pytest
 
@@ -19,8 +20,14 @@ from wesearch.fetch import (
     RetryParams,
     fetch,
 )
+from wesearch.fetch.common import ValidatedHost
 from wesearch.fetch.testing import zstd_compress
-from wesearch.fetch.transport.stdlib import _open_connection
+from wesearch.fetch.transport.stdlib import (
+    _open_connection,
+    _ValidatedHTTPSConnection,
+    _widen_after_connect,
+    fetch_stdlib,
+)
 from wesearch.lib.custom_json import DictCodec
 from wesearch.types.errors import (
     FetchError,
@@ -898,6 +905,574 @@ class TestOpenConnection:
             )
         assert body == b"stdlib"
         curl_request.assert_not_called()
+
+    def test_open_connection_http_arguments(self) -> None:
+        with patch(
+            "wesearch.fetch.transport.stdlib.client.HTTPConnection",
+        ) as ctor:
+            result = _open_connection(
+                "http",
+                "example.com",
+                timeout_sec=30,
+                connect_timeout_sec=7,
+                port=8080,
+                resolved_ip="192.0.2.1",
+            )
+        assert result is ctor.return_value
+        ctor.assert_called_once_with("192.0.2.1", port=8080, timeout=7)
+
+    def test_open_connection_https_arguments_without_pin(self) -> None:
+        with (
+            patch(
+                "wesearch.fetch.transport.stdlib.ssl.create_default_context",
+            ) as tls,
+            patch(
+                "wesearch.fetch.transport.stdlib.client.HTTPSConnection",
+            ) as ctor,
+        ):
+            result = _open_connection(
+                "https",
+                "example.com",
+                timeout_sec=30,
+                port=8443,
+            )
+        assert result is ctor.return_value
+        context = tls.return_value
+        tls.assert_called_once_with()
+        ctor.assert_called_once_with(
+            "example.com",
+            port=8443,
+            timeout=30,
+            context=context,
+        )
+
+    def test_open_connection_https_arguments_with_pin(self) -> None:
+        with (
+            patch(
+                "wesearch.fetch.transport.stdlib.ssl.create_default_context",
+            ) as tls,
+            patch(
+                "wesearch.fetch.transport.stdlib._ValidatedHTTPSConnection",
+            ) as ctor,
+        ):
+            result = _open_connection(
+                "https",
+                "example.com",
+                timeout_sec=30,
+                connect_timeout_sec=7,
+                port=8443,
+                resolved_ip="2001:db8::1",
+            )
+        assert result is ctor.return_value
+        ctor.assert_called_once_with(
+            "[2001:db8::1]",
+            port=8443,
+            server_hostname="example.com",
+            timeout=7,
+            context=tls.return_value,
+        )
+
+    def test_validated_https_connection_wraps_socket(self) -> None:
+        context = ssl.create_default_context()
+        raw_socket = socket.socket()
+        wrapped_socket = Mock()
+        connection = _ValidatedHTTPSConnection(
+            "192.0.2.1",
+            port=443,
+            server_hostname="example.com",
+            timeout=7,
+            context=context,
+        )
+        try:
+            connection.sock = raw_socket
+            with (
+                patch.object(client.HTTPConnection, "connect"),
+                patch.object(
+                    context,
+                    "wrap_socket",
+                    return_value=wrapped_socket,
+                ) as wrap,
+            ):
+                connection.connect()
+            wrap.assert_called_once_with(
+                raw_socket,
+                server_hostname="example.com",
+            )
+        finally:
+            raw_socket.close()
+
+    def test_widen_after_connect_sets_socket_timeout(self) -> None:
+        connection = client.HTTPConnection("example.com")
+        sock = socket.socket()
+        connection.sock = sock
+        try:
+            _widen_after_connect(connection, 12)
+            assert sock.gettimeout() == 12
+        finally:
+            sock.close()
+
+    def test_widen_after_connect_without_socket_is_noop(self) -> None:
+        connection = client.HTTPConnection("example.com")
+        _widen_after_connect(connection, 12)
+
+
+def test_fetch_stdlib_records_exact_initial_request_arguments() -> None:
+    response = Mock(spec=client.HTTPResponse)
+    response.status = 200
+    response.read.return_value = b"raw"
+    response.getheaders.return_value = [("x-test", "yes")]
+    connection = Mock()
+    connection.getresponse.return_value = response
+    pin = ValidatedHost(host="example.com", ip="192.0.2.1")
+    observed: list[tuple[int, dict[str, str], str]] = []
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib.pinned_host",
+            return_value=pin,
+        ) as validate,
+        patch(
+            "wesearch.fetch.transport.stdlib._open_connection",
+            return_value=connection,
+        ) as open_connection,
+        patch(
+            "wesearch.fetch.transport.stdlib._widen_after_connect",
+        ) as widen,
+        patch(
+            "wesearch.fetch.transport.stdlib.decompress",
+            return_value=b"decoded",
+        ) as decode,
+    ):
+        result = fetch_stdlib(
+            "https://example.com:80/path?q=1",
+            method="POST",
+            headers={"X-Test": "yes"},
+            body=b"payload",
+            timeout_sec=30.0,
+            connect_timeout_sec=7.0,
+            max_redirects=2,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=lambda status, headers, url: observed.append(
+                (status, headers, url),
+            ),
+        )
+
+    assert result == b"decoded"
+    validate.assert_called_once_with("https://example.com:80/path?q=1", "untrusted")
+    open_connection.assert_called_once_with(
+        "https",
+        "example.com",
+        30.0,
+        connect_timeout_sec=7.0,
+        port=80,
+        resolved_ip="192.0.2.1",
+    )
+    connection.request.assert_called_once_with(
+        "POST",
+        "/path?q=1",
+        body=b"payload",
+        headers={"Host": "example.com:80", "X-Test": "yes"},
+    )
+    widen.assert_called_once_with(connection, 30.0)
+    decode.assert_called_once_with(b"raw", "identity")
+    assert observed == [(200, {"x-test": "yes"}, "https://example.com:80/path?q=1")]
+
+
+def test_fetch_stdlib_records_exact_cross_origin_redirect_arguments() -> None:
+    redirect = Mock(spec=client.HTTPResponse)
+    redirect.status = 307
+    redirect.read.return_value = b"redirect"
+    redirect.getheaders.return_value = [("location", "http://other.test/new?q=2")]
+    result_response = Mock(spec=client.HTTPResponse)
+    result_response.status = 200
+    result_response.read.return_value = b"done"
+    result_response.getheaders.return_value = []
+    first_connection = Mock()
+    first_connection.getresponse.return_value = redirect
+    second_connection = Mock()
+    second_connection.getresponse.return_value = result_response
+    first_pin = ValidatedHost(host="example.com", ip="192.0.2.1")
+    second_pin = ValidatedHost(host="other.test", ip="192.0.2.2")
+    observed: list[str] = []
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib.pinned_host",
+            side_effect=[first_pin, second_pin],
+        ) as validate,
+        patch(
+            "wesearch.fetch.transport.stdlib._open_connection",
+            side_effect=[first_connection, second_connection],
+        ) as open_connection,
+        patch(
+            "wesearch.fetch.transport.stdlib.apply_redirect",
+            return_value=(
+                {"Host": "other.test", "Origin": "http://other.test"},
+                "POST",
+                b"payload",
+            ),
+        ) as apply,
+    ):
+        assert (
+            fetch_stdlib(
+                "https://example.com/old",
+                method="POST",
+                headers={"Host": "example.com"},
+                body=b"payload",
+                timeout_sec=20.0,
+                connect_timeout_sec=4.0,
+                max_redirects=1,
+                impersonate="chrome",
+                on_redirect=None,
+                on_response=lambda _status, _headers, url: observed.append(url),
+                trust="internal",
+            )
+            == b"done"
+        )
+
+    validate.assert_any_call("https://example.com/old", "internal")
+    validate.assert_any_call("http://other.test/new?q=2", "internal")
+    apply.assert_called_once_with(
+        "https://example.com/old",
+        {"Host": "example.com"},
+        "POST",
+        body=b"payload",
+        status=307,
+        redirect_url="http://other.test/new?q=2",
+    )
+    assert observed == [
+        "https://example.com/old",
+        "http://other.test/new?q=2",
+    ]
+    assert open_connection.call_args_list == [
+        call(
+            "https",
+            "example.com",
+            20.0,
+            connect_timeout_sec=4.0,
+            port=None,
+            resolved_ip="192.0.2.1",
+        ),
+        call(
+            "http",
+            "other.test",
+            20.0,
+            connect_timeout_sec=4.0,
+            port=None,
+            resolved_ip="192.0.2.2",
+        ),
+    ]
+    second_connection.request.assert_called_once_with(
+        "POST",
+        "/new?q=2",
+        body=b"payload",
+        headers={"Host": "other.test", "Origin": "http://other.test"},
+    )
+
+
+def test_fetch_stdlib_classifies_status_400_with_exact_error_inputs() -> None:
+    response = Mock(spec=client.HTTPResponse)
+    response.status = 400
+    response.read.return_value = b"compressed"
+    response.getheaders.return_value = [("content-encoding", "gzip")]
+    connection = Mock()
+    connection.getresponse.return_value = response
+    error = RuntimeError("classified")
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib._open_connection",
+            return_value=connection,
+        ),
+        patch(
+            "wesearch.fetch.transport.stdlib.decompress_error_body",
+            return_value=b"decoded error",
+        ) as decode,
+        patch(
+            "wesearch.fetch.transport.stdlib.classify_http_error",
+            side_effect=error,
+        ) as classify,
+        pytest.raises(RuntimeError, match="classified"),
+    ):
+        fetch_stdlib(
+            "https://example.com/fail",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=10.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+    decode.assert_called_once_with(b"compressed", {"content-encoding": "gzip"})
+    classify.assert_called_once_with(
+        "https://example.com/fail",
+        400,
+        {"content-encoding": "gzip"},
+        b"decoded error",
+    )
+
+
+def test_validated_https_connection_passes_all_constructor_arguments() -> None:
+    context = ssl.create_default_context()
+    with patch.object(client.HTTPSConnection, "__init__", return_value=None) as init:
+        _ValidatedHTTPSConnection(
+            "192.0.2.1",
+            port=8443,
+            server_hostname="example.com",
+            timeout=7.0,
+            context=context,
+        )
+    init.assert_called_once_with(
+        "192.0.2.1",
+        port=8443,
+        timeout=7.0,
+        context=context,
+    )
+
+
+def test_fetch_stdlib_uses_root_path_for_query_only_url() -> None:
+    response = Mock(spec=client.HTTPResponse)
+    response.status = 200
+    response.read.return_value = b"ok"
+    response.getheaders.return_value = []
+    connection = Mock()
+    connection.getresponse.return_value = response
+    with patch(
+        "wesearch.fetch.transport.stdlib._open_connection",
+        return_value=connection,
+    ):
+        fetch_stdlib(
+            "https://example.com?query=yes",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=10.0,
+            max_redirects=0,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+        )
+    assert connection.request.call_args.args[1] == "/?query=yes"
+
+
+def test_fetch_stdlib_reopens_for_redirect_port_and_scheme_changes() -> None:
+    first = Mock(spec=client.HTTPResponse)
+    first.status = 302
+    first.read.return_value = b"redirect"
+    first.getheaders.return_value = [("location", "http://example.com:8080/new")]
+    second = Mock(spec=client.HTTPResponse)
+    second.status = 302
+    second.read.return_value = b"redirect again"
+    second.getheaders.return_value = [
+        ("location", "https://example.com:8080/final"),
+    ]
+    third = Mock(spec=client.HTTPResponse)
+    third.status = 200
+    third.read.return_value = b"ok"
+    third.getheaders.return_value = []
+    first_connection = Mock()
+    first_connection.getresponse.return_value = first
+    second_connection = Mock()
+    second_connection.getresponse.return_value = second
+    third_connection = Mock()
+    third_connection.getresponse.return_value = third
+    pin = ValidatedHost(host="example.com", ip="192.0.2.1")
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib._open_connection",
+            side_effect=[first_connection, second_connection, third_connection],
+        ) as open_connection,
+        patch(
+            "wesearch.fetch.transport.stdlib.pinned_host",
+            return_value=pin,
+        ),
+    ):
+        assert (
+            fetch_stdlib(
+                "http://example.com/start",
+                method="GET",
+                headers={},
+                body=None,
+                timeout_sec=10.0,
+                max_redirects=2,
+                impersonate="chrome",
+                on_redirect=None,
+                on_response=None,
+                trust="internal",
+            )
+            == b"ok"
+        )
+    assert open_connection.call_args_list == [
+        call(
+            "http",
+            "example.com",
+            10.0,
+            connect_timeout_sec=None,
+            port=None,
+            resolved_ip="192.0.2.1",
+        ),
+        call(
+            "http",
+            "example.com",
+            10.0,
+            connect_timeout_sec=None,
+            port=8080,
+            resolved_ip="192.0.2.1",
+        ),
+        call(
+            "https",
+            "example.com",
+            10.0,
+            connect_timeout_sec=None,
+            port=8080,
+            resolved_ip="192.0.2.1",
+        ),
+    ]
+    assert second_connection.request.call_args == call(
+        "GET",
+        "/new",
+        body=None,
+        headers={"Host": "example.com:8080"},
+    )
+    assert third_connection.request.call_args == call(
+        "GET",
+        "/final",
+        body=None,
+        headers={"Host": "example.com:8080"},
+    )
+
+
+def test_fetch_stdlib_redirect_host_header_uses_redirect_scheme() -> None:
+    redirect = Mock(spec=client.HTTPResponse)
+    redirect.status = 302
+    redirect.read.return_value = b"redirect"
+    redirect.getheaders.return_value = [
+        ("location", "https://other.test:80/final"),
+    ]
+    result = Mock(spec=client.HTTPResponse)
+    result.status = 200
+    result.read.return_value = b"ok"
+    result.getheaders.return_value = []
+    first_connection = Mock()
+    first_connection.getresponse.return_value = redirect
+    second_connection = Mock()
+    second_connection.getresponse.return_value = result
+    pin = ValidatedHost(host="other.test", ip="192.0.2.2")
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib._open_connection",
+            side_effect=[first_connection, second_connection],
+        ),
+        patch(
+            "wesearch.fetch.transport.stdlib.pinned_host",
+            return_value=pin,
+        ),
+    ):
+        fetch_stdlib(
+            "https://example.com/start",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=10.0,
+            max_redirects=1,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+            trust="internal",
+        )
+    assert second_connection.request.call_args == call(
+        "GET",
+        "/final",
+        body=None,
+        headers={"Host": "other.test:80"},
+    )
+
+
+def test_fetch_stdlib_unpinned_cross_origin_redirect_uses_empty_resolution() -> None:
+    first = Mock(spec=client.HTTPResponse)
+    first.status = 302
+    first.read.return_value = b"redirect"
+    first.getheaders.return_value = [("location", "https://other.test")]
+    second = Mock(spec=client.HTTPResponse)
+    second.status = 200
+    second.read.return_value = b"ok"
+    second.getheaders.return_value = []
+    first_connection = Mock()
+    first_connection.getresponse.return_value = first
+    second_connection = Mock()
+    second_connection.getresponse.return_value = second
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib._open_connection",
+            side_effect=[first_connection, second_connection],
+        ) as open_connection,
+        patch(
+            "wesearch.fetch.transport.stdlib.pinned_host",
+            return_value=None,
+        ),
+    ):
+        fetch_stdlib(
+            "https://example.com/start",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=10.0,
+            max_redirects=1,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+            trust="internal",
+        )
+    assert open_connection.call_args_list == [
+        call(
+            "https",
+            "example.com",
+            10.0,
+            connect_timeout_sec=None,
+            port=None,
+            resolved_ip="",
+        ),
+        call(
+            "https",
+            "other.test",
+            10.0,
+            connect_timeout_sec=None,
+            port=None,
+            resolved_ip="",
+        ),
+    ]
+    assert second_connection.request.call_args.args[1] == "/"
+
+
+def test_fetch_stdlib_redirect_budget_stops_after_one_hop() -> None:
+    first = Mock(spec=client.HTTPResponse)
+    first.status = 302
+    first.read.return_value = b"redirect"
+    first.getheaders.return_value = [("location", "https://example.com/one")]
+    second = Mock(spec=client.HTTPResponse)
+    second.status = 302
+    second.read.return_value = b"cap"
+    second.getheaders.return_value = [("location", "https://example.com/two")]
+    connection = Mock()
+    connection.getresponse.side_effect = [first, second]
+    with patch(
+        "wesearch.fetch.transport.stdlib._open_connection",
+        return_value=connection,
+    ):
+        result = fetch_stdlib(
+            "https://example.com/start",
+            method="GET",
+            headers={},
+            body=None,
+            timeout_sec=10.0,
+            max_redirects=1,
+            impersonate="chrome",
+            on_redirect=None,
+            on_response=None,
+            trust="internal",
+        )
+    assert result == b"cap"
+    assert connection.request.call_count == 2
 
 
 def _recorded_headers(mock_conn: Mock) -> dict[str, str]:

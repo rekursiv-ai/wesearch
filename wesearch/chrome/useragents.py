@@ -166,27 +166,25 @@ def _download_records() -> list[object]:
         url,
         headers={"User-Agent": _refresh_user_agent("chrome_desktop")},
     )
-    body = b""
-    for attempt in range(3):
+    attempt = 0
+    while True:
         try:
             body = _read_response(dataset_request)
             break
         except error.HTTPError as http_error:
-            if (
-                http_error.code != 429 and http_error.code < 500
-            ) or http_error.code >= 600:
-                raise
-            if attempt == 2:
+            retryable = http_error.code == 429 or 500 <= http_error.code < 600
+            if not retryable or attempt == 2:
                 raise
         except (TimeoutError, error.URLError):
             if attempt == 2:
                 raise
+        attempt += 1
     parsed = loads(gzip.decompress(body))
     if not isinstance(parsed, list):
         raise RuntimeError(  # noqa: TRY004 -- Dataset shape is a downloader contract error.
             "expected JSON array",
         )
-    return ListCodec.coerce(parsed, object)
+    return ListCodec.coerce(parsed)
 
 
 def _read_response(dataset_request: request.Request) -> bytes:
@@ -222,8 +220,6 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
         device = record.get("deviceCategory")
         if not isinstance(ua, str):
             continue
-        if not isinstance(device, str):
-            device = ""
         # A UA must occupy exactly one pool-file line.
         if not ua or ua != ua.strip() or not ua.isprintable():
             continue

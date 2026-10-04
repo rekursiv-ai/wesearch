@@ -6,11 +6,13 @@ from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http import client
 from typing import TYPE_CHECKING, Protocol, cast
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import base64
 import importlib
 import math
+
+from curl_cffi import requests as cc_requests
 
 import pytest
 
@@ -24,12 +26,24 @@ from wesearch.fetch import (
     RetryParams,
 )
 from wesearch.fetch.fetch import (
+    _accept_ch_hints,
+    _build_headers,
+    _curl_structural_headers,
+    _fetch_once,
+    _fetch_with_identity,
+    _google_headers,
+    _is_valid_ip_address,
     _Request,
+    _reseat,
+    _ResponseLearner,
     _send_as,
+    _send_via_zendriver,
     _split_userinfo,
     _url_with_params,
+    _validated_body,
     egress_ip,
     last_known_egress_ip,
+    on_egress_rotation,
     resolve_transport,
     set_last_egress_ip,
 )
@@ -55,6 +69,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    import logging
+    import types
+
 
 fetch_mod = cast("_FetchModule", importlib.import_module("wesearch.fetch.fetch"))
 
@@ -67,6 +84,228 @@ def test_fetch_uses_transport_package_layout() -> None:
         importlib.import_module(f"wesearch.fetch.{module}")
     for module in ("curl", "stdlib", "zendriver", "transport_routing"):
         importlib.import_module(f"wesearch.fetch.transport.{module}")
+
+
+def test_accept_ch_hints_keeps_only_known_hints() -> None:
+    assert _accept_ch_hints({"accept-ch": "Sec-CH-UA-Arch, unknown"}) == frozenset(
+        {"sec-ch-ua-arch"},
+    )
+    assert _accept_ch_hints({}) == frozenset()
+
+
+def test_split_userinfo_unquotes_credentials_and_strips_userinfo() -> None:
+    assert _split_userinfo("https://u%40ser:p%40ss@example.com/path") == (
+        "https://example.com/path",
+        "Basic dUBzZXI6cEBzcw==",
+    )
+    assert _split_userinfo("https://:pass@example.com/path")[1] == "Basic OnBhc3M="
+    assert _split_userinfo("https://u:p@ss@example.com/path")[0] == (
+        "https://example.com/path"
+    )
+    assert _split_userinfo("https://example.com/path") == (
+        "https://example.com/path",
+        None,
+    )
+
+
+def test_ip_family_validation_is_exact() -> None:
+    assert _is_valid_ip_address("192.0.2.1", ipv6=False)
+    assert not _is_valid_ip_address("2001:db8::1", ipv6=False)
+    assert _is_valid_ip_address("2001:db8::1", ipv6=True)
+    assert not _is_valid_ip_address("invalid", ipv6=True)
+
+
+def test_build_headers_raw_returns_only_explicit_headers() -> None:
+    assert _build_headers(
+        method="GET",
+        url="https://example.com",
+        content_type=None,
+        extra={"X-Test": "yes"},
+        raw_headers=True,
+        impersonate="chrome",
+        use_curl=False,
+        accept_ch={},
+    ) == {"X-Test": "yes"}
+
+
+def test_curl_structural_headers_adds_post_fields_and_extras() -> None:
+    with patch.object(fetch_mod, "_google_headers", return_value={"X-Google": "yes"}):
+        assert _curl_structural_headers(
+            method="POST",
+            url="https://example.com/path",
+            content_type="application/json",
+            extra={"X-Test": "yes"},
+            impersonate="chrome",
+            accept_ch={},
+        ) == {
+            "Content-Type": "application/json",
+            "Origin": "https://example.com",
+            "X-Google": "yes",
+            "X-Test": "yes",
+        }
+
+
+def test_google_headers_are_empty_off_google() -> None:
+    assert _google_headers("https://example.com", "chrome") == {}
+
+
+def test_request_fetch_passes_raw_header_mode_and_seeded_cookies() -> None:
+    request = _Request(
+        url="https://example.com/path",
+        session=FetchSession(cookies={"https://example.com": {"old": "1"}}),
+        params=RequestParams(
+            content=ContentParams(
+                headers={"X-Test": "yes"},
+                cookies={"new": "2"},
+                raw_headers=True,
+            ),
+        ),
+    )
+    with patch.object(_Request, "send", return_value=b"ok") as send:
+        assert request.fetch() == (b"ok", request.session)
+    send.assert_called_once_with(
+        headers={"X-Test": "yes"},
+        cookies={"old": "1", "new": "2"},
+        raw_headers=True,
+    )
+
+
+def test_request_send_forwards_every_transport_argument() -> None:
+    request = _Request(
+        url="https://example.com/path",
+        session=FetchSession(impersonate="chrome146"),
+        params=RequestParams(),
+    )
+    observer = Mock()
+    Mock()
+    reseat = Mock()
+    with patch.object(fetch_mod, "_fetch_once", return_value=b"ok") as send:
+        assert (
+            request.send(
+                headers={"X": "1"},
+                cookies={"c": "2"},
+                raw_headers=True,
+                on_response=observer,
+                curl=None,
+                reseat=reseat,
+            )
+            == b"ok"
+        )
+    send.assert_called_once_with(
+        "https://example.com/path",
+        request.params,
+        headers={"X": "1"},
+        cookies={"c": "2"},
+        raw_headers=True,
+        impersonate="chrome146",
+        accept_ch=request.session.accept_ch,
+        on_response=observer,
+        session=None,
+        reseat=reseat,
+    )
+
+
+def test_request_send_uses_stored_observer_when_argument_is_none() -> None:
+    observer = Mock()
+    request = _Request(
+        url="https://example.com/path",
+        session=FetchSession(),
+        params=RequestParams(),
+        observer=observer,
+    )
+    with patch.object(fetch_mod, "_fetch_once", return_value=b"ok") as send:
+        request.send(headers=None, cookies=None, raw_headers=False)
+    assert send.call_args.kwargs["on_response"] is observer
+
+
+def test_request_fetch_resolves_auto_using_the_http_method() -> None:
+    request = _Request(
+        url="https://example.com/path",
+        session=FetchSession(),
+        params=RequestParams(content=ContentParams(method="POST")),
+    )
+    with (
+        patch.object(_Request, "send", return_value=b"ok"),
+        patch.object(
+            fetch_mod,
+            "resolve_transport",
+            wraps=resolve_transport,
+        ) as resolve,
+    ):
+        request.fetch()
+    resolve.assert_called_once_with(
+        "auto",
+        method="POST",
+        raw_headers=False,
+        has_body=False,
+    )
+
+
+def test_reseat_skips_when_no_egress_is_known() -> None:
+    request = _Request(
+        url="https://example.com",
+        session=FetchSession(),
+        params=RequestParams(),
+    )
+    assert _reseat(request, None, "chrome", "https://other.example") is None
+
+
+def test_reseat_builds_a_pinned_session_for_redirect_target() -> None:
+    request = _Request(
+        url="https://example.com",
+        session=FetchSession(),
+        params=RequestParams(),
+    )
+    pin = Mock(host="other.example", ip="203.0.113.9")
+    session = Mock()
+    with (
+        patch.object(fetch_mod, "pinned_host", return_value=pin) as validate,
+        patch.object(fetch_mod, "curl_session", return_value=session) as build,
+    ):
+        assert (
+            _reseat(
+                request,
+                "198.51.100.4",
+                "chrome",
+                "https://other.example:8443/path",
+            )
+            is session
+        )
+    validate.assert_called_once_with("https://other.example:8443/path", "untrusted")
+    build.assert_called_once_with(
+        "198.51.100.4",
+        "other.example",
+        "chrome",
+        pin=pin,
+        port=8443,
+    )
+
+
+def test_reseat_preserves_empty_host_and_https_default_port() -> None:
+    request = _Request(
+        url="https://example.com",
+        session=FetchSession(),
+        params=RequestParams(),
+    )
+    with (
+        patch.object(fetch_mod, "pinned_host", return_value=None),
+        patch.object(fetch_mod, "curl_session", return_value=Mock()) as build,
+    ):
+        _reseat(request, "198.51.100.4", "chrome", "https:///path")
+    assert build.call_args.args[1] == ""
+    assert build.call_args.kwargs["port"] == 443
+
+
+def test_egress_rotation_callbacks_receive_the_new_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fetch_mod, "_on_egress_rotation", [])
+    monkeypatch.setattr(fetch_mod, "_last_egress_ip", None)
+    callback = Mock()
+    on_egress_rotation(callback)
+    with patch.object(fetch_mod, "close_curl_sessions_except"):
+        set_last_egress_ip("203.0.113.10")
+    callback.assert_called_once_with("203.0.113.10")
 
 
 class TestUrlWithParams:
@@ -833,6 +1072,42 @@ class TestFetchSession:
         assert restored.cookies_for("https://a.example/") == {"SID": "s"}
         assert restored.cookies_for("https://b.example/") == {}
 
+    def test_serialize_emits_exact_session_shape(self) -> None:
+        session = FetchSession(
+            impersonate="chrome146",
+            cookies={"https://a.example": {"SID": "s"}},
+            accept_ch={
+                "https://a.example": frozenset({"sec-ch-ua-bitness", "sec-ch-ua-arch"}),
+            },
+        )
+        assert session.serialize() == {
+            "impersonate": "chrome146",
+            "cookies": {"https://a.example": {"SID": "s"}},
+            "accept_ch": {
+                "https://a.example": ["sec-ch-ua-arch", "sec-ch-ua-bitness"],
+            },
+        }
+
+    def test_deserialize_rebuilds_every_session_field_and_defaults(self) -> None:
+        assert FetchSession.deserialize(
+            {
+                "impersonate": "chrome146",
+                "cookies": {"https://a.example": {"SID": "s"}},
+                "accept_ch": {"https://a.example": ["sec-ch-ua-arch"]},
+            },
+        ) == FetchSession(
+            impersonate="chrome146",
+            cookies={"https://a.example": {"SID": "s"}},
+            accept_ch={"https://a.example": frozenset({"sec-ch-ua-arch"})},
+        )
+        assert FetchSession.deserialize({}) == FetchSession()
+
+    def test_with_accept_ch_ignores_empty_and_duplicate_hints(self) -> None:
+        session = FetchSession()
+        assert session.with_accept_ch("https://x.com", frozenset()) is session
+        warmed = session.with_accept_ch("https://x.com", frozenset({"x"}))
+        assert warmed.with_accept_ch("https://x.com", frozenset({"x"})) is warmed
+
     def test_with_accept_ch_records_origin_opt_in(self) -> None:
         session = FetchSession().with_accept_ch(
             "https://x.com",
@@ -1464,6 +1739,59 @@ class TestEgressIp:
     def test_first_echo_returned(self) -> None:
         assert self._probe(Mock(return_value=b" 203.0.113.7\n")) == "203.0.113.7"
 
+    def test_probe_builds_exact_raw_echo_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        echo = Mock(return_value=(b"203.0.113.7", FetchSession()))
+        monkeypatch.setattr(fetch_mod, "fetch", echo)
+        monkeypatch.setattr(fetch_mod, "set_last_egress_ip", Mock())
+        assert (
+            egress_ip(
+                cache=False,
+                v4_echoes=("https://echo.example",),
+                timeout_sec=7.0,
+            )
+            == "203.0.113.7"
+        )
+        request = echo.call_args.kwargs["request"]
+        assert isinstance(request, RequestParams)
+        assert request.content.headers == {}
+        assert request.content.raw_headers is True
+        assert request.retry.timeout_sec == 7.0
+
+    def test_probe_default_timeout_is_five_seconds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        echo = Mock(return_value=(b"203.0.113.7", FetchSession()))
+        monkeypatch.setattr(fetch_mod, "fetch", echo)
+        monkeypatch.setattr(fetch_mod, "set_last_egress_ip", Mock())
+        assert (
+            egress_ip(cache=False, v4_echoes=("https://echo.example",)) == "203.0.113.7"
+        )
+        request = echo.call_args.kwargs["request"]
+        assert isinstance(request, RequestParams)
+        assert request.retry.timeout_sec == 5.0
+
+    def test_probe_selects_v4_echoes_when_ipv6_is_false(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        echo = Mock(return_value=(b"203.0.113.7", FetchSession()))
+        monkeypatch.setattr(fetch_mod, "fetch", echo)
+        monkeypatch.setattr(fetch_mod, "set_last_egress_ip", Mock())
+        assert (
+            egress_ip(
+                cache=False,
+                ipv6=False,
+                v4_echoes=("https://v4.example",),
+                v6_echoes=("https://v6.example",),
+            )
+            == "203.0.113.7"
+        )
+        assert echo.call_args.args[0] == "https://v4.example"
+
     def test_non_v4_reply_falls_through(self) -> None:
         assert self._probe(Mock(side_effect=[b"2001:db8::1", b"198.51.100.9"])) == (
             "198.51.100.9"
@@ -1542,7 +1870,10 @@ class TestEgressIp:
     def test_set_last_egress_ip_injects_without_probing(self) -> None:
         # A caller who knows the egress (e.g. just rolled the VPN) can set it;
         # a cached read then returns it with no network.
-        set_last_egress_ip("5.5.5.5")
+        close = Mock()
+        with patch.object(fetch_mod, "close_curl_sessions_except", close):
+            set_last_egress_ip("5.5.5.5")
+        close.assert_called_once_with("5.5.5.5")
         echo = Mock()
         with patch.object(fetch_mod, "fetch", echo):
             assert egress_ip() == "5.5.5.5"
@@ -1671,6 +2002,26 @@ class TestBrowserBackend:
             "CONSENT": "YES+",
         }
         assert "resolve_host" not in via.call_args.kwargs
+
+    def test_browser_fetch_forwards_the_redirect_budget(self) -> None:
+        # The header transports receive RetryParams.max_redirects; the browser leg
+        # did not, so Chrome followed its own default of 10 hops whatever the caller
+        # set -- including 0, which RetryParams documents as "no redirects".
+        with (
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch(
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
+                return_value=BrowserResult(body=b"ok", cookies={}, final_url=""),
+            ) as via,
+        ):
+            fetch.fetch(
+                "https://walled.example/x",
+                request=RequestParams(
+                    retry=RetryParams(max_redirects=0),
+                    policy=PolicyParams(transport="zendriver"),
+                ),
+            )
+        assert via.call_args.kwargs.get("max_redirects") == 0
 
     def test_browser_fetch_returns_body_and_warms_session(self) -> None:
         # A browser fetch must return the rendered bytes AND fold the browser's
@@ -1944,14 +2295,22 @@ class TestCurlThenZendriverBackend:
         via.assert_not_called()
 
 
+class _ZendriverModule(Protocol):
+    fetch_zendriver: object
+
+
 class _FetchModule(Protocol):
     """Patchable attributes imported from the fetch implementation module."""
 
+    _Request: type[_Request]
+    _fetch_once: object
+    _send_as: object
     curl_session: object
     egress_ip: object
     fetch: object
-    _fetch_once: object
-    _send_as: object
+    logger: logging.Logger
+    time: types.ModuleType
+    zendriver: _ZendriverModule
 
 
 def _recorded_headers(mock: Mock, *, index: int = 0) -> dict[str, str]:
@@ -1994,6 +2353,1266 @@ def _shared(store: ProfileStore) -> Callable[[type[ProfileStore]], ProfileStore]
         return store
 
     return shared
+
+
+def _identity_body(request: _Request, body: bytes) -> bytes:
+    del request
+    return body
+
+
+def _hint_value(*, major: int, **_kwargs: object) -> dict[str, str]:
+    return {f"hint-{major}": "v"}
+
+
+def _captured_response(**kwargs: object) -> bytes:
+    callback = kwargs["on_response"]
+    assert callable(callback)
+    callback(200, {"set-cookie": "new=3"}, "https://x.example:8443/path")
+    return b"ok"
+
+
+def _egress_value(*, cache: bool) -> str:
+    return "old" if cache else "new"
+
+
+class TestFetchCoreMutationCoverage:
+    def test_fetch_once_builds_exact_request_and_forwards_all_options(self) -> None:
+        params = RequestParams(
+            content=ContentParams(
+                method="POST",
+                params={"q": "a b"},
+                data={"x": "y"},
+                headers={"Cookie": "from-header"},
+            ),
+            policy=PolicyParams(transport="curl", trust="internal"),
+            retry=RetryParams(
+                retries=0,
+                timeout_sec=7.0,
+                connect_timeout_sec=2.0,
+                max_redirects=3,
+            ),
+        )
+        response = Mock(return_value=b"body")
+        on_response = Mock()
+        StubSession()
+        reseat = Mock()
+        with patch.object(fetch_mod, "fetch_curl", response):
+            got = _fetch_once(
+                "https://u:p@example.com/path#frag",
+                params,
+                headers={"X-Test": "yes", "Cookie": "from-header"},
+                cookies={"sid": "cookie"},
+                raw_headers=False,
+                impersonate="chrome133",
+                accept_ch={},
+                on_response=on_response,
+                session=None,
+                reseat=reseat,
+            )
+        assert got == b"body"
+        response.assert_called_once_with(
+            "https://example.com/path?q=a+b#frag",
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://example.com",
+                "X-Test": "yes",
+                "Authorization": "Basic dTpw",
+                "Cookie": "from-header; sid=cookie",
+            },
+            body=b"x=y",
+            timeout_sec=7.0,
+            connect_timeout_sec=2.0,
+            max_redirects=3,
+            impersonate="chrome133",
+            on_redirect=None,
+            on_response=on_response,
+            trust="internal",
+            session=None,
+            reseat=reseat,
+        )
+
+    def test_fetch_once_retries_status_zero_and_logs_exactly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=1),
+        )
+        err = FetchError("https://x/", 0, {}, b"down")
+        backend = Mock(side_effect=[err, b"ok"])
+        sleeps = Mock()
+        monkeypatch.setattr(fetch_mod.time, "sleep", sleeps)
+        caplog.set_level("DEBUG", logger=fetch_mod.logger.name)
+        with (
+            patch("wesearch.types.params.random.uniform", return_value=0.0),
+            patch.object(fetch_mod, "fetch_curl", backend),
+        ):
+            assert (
+                _fetch_once(
+                    "https://x/",
+                    params,
+                    headers=None,
+                    cookies=None,
+                    raw_headers=False,
+                    impersonate="chrome",
+                    accept_ch={},
+                    on_response=None,
+                    session=None,
+                )
+                == b"ok"
+            )
+        assert backend.call_count == 2
+        assert sleeps.call_args_list == [((1.0,), {})]
+        assert [r.getMessage() for r in caplog.records] == [
+            "fetch https://x/ → 0, retry in 1.0s",
+        ]
+
+    def test_fetch_once_json_body_and_case_insensitive_cookies(self) -> None:
+        params = RequestParams(
+            content=ContentParams(
+                method="POST",
+                json={"a": 1},
+                headers={"cookie": "a=header", "COOKIE": "b=header"},
+            ),
+            policy=PolicyParams(transport="curl"),
+        )
+        backend = Mock(return_value=b"ok")
+        with patch.object(fetch_mod, "fetch_curl", backend):
+            _fetch_once(
+                "https://x/",
+                params,
+                headers={"cookie": "a=header", "COOKIE": "b=header"},
+                cookies={"c": "param"},
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert backend.call_args.kwargs["body"] == b'{"a": 1}'
+        headers = _recorded_headers(backend)
+        assert headers["Cookie"] == "a=header; b=header; c=param"
+        assert set(headers) == {
+            "Content-Type",
+            "Cookie",
+            "Origin",
+        }
+
+
+class TestResponseLearnerMutationCoverage:
+    def test_observe_and_merge_preserve_exact_origin_state(self) -> None:
+        caller = Mock()
+        learner = _ResponseLearner(caller=caller)
+        learner.observe(
+            302,
+            {"set-cookie": "a=1; Path=/\nb=2", "accept-ch": "Sec-CH-UA-Arch"},
+            "https://a.example/redirect",
+        )
+        session = learner.merge_into(FetchSession())
+        assert session.cookies == {"https://a.example": {"a": "1", "b": "2"}}
+        assert session.accept_ch == {"https://a.example": frozenset({"sec-ch-ua-arch"})}
+        caller.assert_called_once_with(
+            302,
+            {"set-cookie": "a=1; Path=/\nb=2", "accept-ch": "Sec-CH-UA-Arch"},
+        )
+
+    def test_validated_body_returns_body_after_callback(self) -> None:
+        seen = Mock()
+        request = _Request(
+            url="https://x/",
+            session=FetchSession(),
+            params=RequestParams(observe=ObserveParams(body_validator=seen)),
+        )
+        assert _validated_body(request, b"exact") == b"exact"
+        seen.assert_called_once_with(b"exact")
+
+
+class TestIdentityMutationCoverage:
+    def test_domainless_identity_sends_and_validates(self) -> None:
+        request = _Request(
+            url="/relative",
+            session=FetchSession(),
+            params=RequestParams(),
+        )
+        with (
+            patch.object(fetch_mod, "_send_as", return_value=b"body") as send,
+            patch.object(
+                fetch_mod,
+                "_validated_body",
+                side_effect=_identity_body,
+            ) as validate,
+        ):
+            assert (
+                _fetch_with_identity(
+                    request,
+                    caller_headers={"X": "1"},
+                    caller_cookies={"c": "2"},
+                )
+                == b"body"
+            )
+        send.assert_called_once_with(request, None, None, {"X": "1"}, {"c": "2"})
+        validate.assert_called_once_with(request, b"body")
+
+    def test_send_via_zendriver_forwards_exact_arguments_and_observes_landing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        request = _Request(
+            url="https://a.example/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(
+                content=ContentParams(params={"q": "x y"}),
+                retry=RetryParams(timeout_sec=11.0),
+                observe=ObserveParams(on_redirect=Mock()),
+            ),
+        )
+        result = BrowserResult(
+            body=b"rendered",
+            cookies={"sid": "1", "token": "2"},
+            final_url="https://b.example/landed",
+        )
+        observer = Mock()
+        request = request.__class__(
+            url=request.url,
+            session=request.session,
+            params=request.params,
+            observer=observer,
+        )
+        store = Mock()
+        store.load.return_value = None
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None) as pin,
+            patch.object(
+                fetch_mod,
+                "egress_ip",
+                side_effect=["198.51.100.8"],
+            ) as egress,
+            patch.object(
+                fetch_mod.zendriver,
+                "fetch_zendriver",
+                return_value=result,
+            ) as browser,
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(
+                fetch_mod,
+                "data_dir",
+                return_value=tmp_path,
+            ),
+        ):
+            assert (
+                _send_via_zendriver(
+                    request,
+                    headers={"X": "h"},
+                    cookies={"c": "v"},
+                )
+                == b"rendered"
+            )
+        pin.assert_called_once_with("https://a.example/path", "untrusted")
+        egress.assert_called_once_with(cache=True)
+        browser.assert_called_once()
+        assert browser.call_args.args[0] == "https://a.example/path?q=x+y"
+        assert browser.call_args.kwargs["egress"] == "198.51.100.8"
+        assert browser.call_args.kwargs["timeout_sec"] == 11.0
+        assert browser.call_args.kwargs["headers"] == {"X": "h"}
+        assert browser.call_args.kwargs["cookies"] == {"c": "v"}
+        assert observer.call_args.args == (
+            200,
+            {"set-cookie": "sid=1\ntoken=2"},
+            "https://b.example/landed",
+        )
+        store.save.assert_called_once()
+
+
+class TestHeaderMutationCoverage:
+    def test_accept_ch_uses_version_one_hint_catalog(self) -> None:
+        with patch.object(
+            fetch_mod,
+            "chrome_client_hints",
+            side_effect=_hint_value,
+        ) as hints:
+            assert _accept_ch_hints({"accept-ch": "hint-1, hint-2"}) == {"hint-1"}
+        hints.assert_called_once_with(major=1)
+
+    def test_google_headers_forward_exact_identity(self) -> None:
+        with (
+            patch.object(
+                fetch_mod,
+                "impersonate_version_platform",
+                return_value=(133, "linux"),
+            ) as identity,
+            patch.object(
+                fetch_mod,
+                "chrome_headers_for_google",
+                return_value={"X": "google"},
+            ) as google,
+        ):
+            assert _google_headers("https://www.google.com/search", "chrome133") == {
+                "X": "google",
+            }
+        identity.assert_called_once_with("chrome133")
+        google.assert_called_once_with(major=133, platform="linux")
+
+    def test_build_headers_forwards_stdlib_identity_and_http_version(self) -> None:
+        nav = Mock(return_value={"A": "b"})
+        with (
+            patch.object(fetch_mod, "chrome_navigation_headers", nav),
+            patch.object(fetch_mod, "_google_headers", return_value={"G": "h"}),
+            patch.object(
+                fetch_mod,
+                "impersonate_version_platform",
+                return_value=(133, "linux"),
+            ),
+        ):
+            assert _build_headers(
+                method="GET",
+                url="https://x.example/path",
+                content_type=None,
+                extra={"E": "f"},
+                raw_headers=False,
+                impersonate="chrome133",
+                use_curl=False,
+                accept_ch={},
+            ) == {"A": "b", "G": "h", "E": "f"}
+        nav.assert_called_once_with(
+            major=133,
+            platform="linux",
+            method="GET",
+            content_type="",
+            origin="https://x.example",
+            http2=False,
+        )
+
+    def test_curl_structural_headers_distinguish_get_head_and_post(self) -> None:
+        with patch.object(fetch_mod, "_google_headers", return_value={}):
+            assert (
+                _curl_structural_headers(
+                    method="GET",
+                    url="https://x.example/p",
+                    content_type="text/plain",
+                    extra=None,
+                    impersonate="chrome",
+                    accept_ch={},
+                )
+                == {}
+            )
+            assert (
+                _curl_structural_headers(
+                    method="HEAD",
+                    url="https://x.example/p",
+                    content_type="text/plain",
+                    extra=None,
+                    impersonate="chrome",
+                    accept_ch={},
+                )
+                == {}
+            )
+            assert _curl_structural_headers(
+                method="POST",
+                url="https://x.example/p",
+                content_type="text/plain",
+                extra=None,
+                impersonate="chrome",
+                accept_ch={},
+            ) == {"Content-Type": "text/plain", "Origin": "https://x.example"}
+
+
+class TestSendAsMutationCoverage:
+    def test_stdlib_send_saves_captured_cookie_with_exact_arguments(self) -> None:
+        request = _Request(
+            url="https://x.example:8443/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(policy=PolicyParams(transport="stdlib")),
+        )
+        store = Mock()
+        request_send = Mock(side_effect=_captured_response)
+        request = request.__class__(
+            url=request.url,
+            session=request.session,
+            params=request.params,
+            observer=Mock(),
+        )
+        profile = Profile(ua="stored", cookies={"old": "1"})
+        with (
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", return_value="198.51.100.7"),
+            patch.object(fetch_mod, "draw_user_agent", return_value="drawn"),
+            patch.object(fetch_mod._Request, "send", request_send),
+        ):
+            assert (
+                _send_as(request, profile, "198.51.100.7", {"H": "v"}, {"new": "2"})
+                == b"ok"
+            )
+        request_send.assert_called_once()
+        assert request_send.call_args.kwargs["headers"] == {"H": "v"}
+        assert request_send.call_args.kwargs["cookies"] == {"old": "1", "new": "2"}
+        assert request_send.call_args.kwargs["raw_headers"] is False
+        store.update_cookies.assert_called_once_with(
+            "198.51.100.7",
+            "x.example",
+            {"new": "3"},
+        )
+
+    def test_curl_send_seeds_jar_and_supplies_reseat(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(policy=PolicyParams(transport="curl")),
+        )
+        curl = Mock()
+        store = Mock()
+        with (
+            patch.object(fetch_mod, "curl_session", return_value=curl) as make,
+            patch.object(fetch_mod, "seed_session_jar") as seed,
+            patch.object(fetch_mod, "set_session_cookies") as set_cookies,
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(
+                fetch_mod._Request,
+                "send",
+                return_value=b"ok",
+            ) as send,
+        ):
+            assert (
+                _send_as(
+                    request,
+                    Profile(ua="u", cookies={"old": "1"}),
+                    "198.51.100.7",
+                    None,
+                    {"new": "2"},
+                )
+                == b"ok"
+            )
+        make.assert_called_once_with(
+            "198.51.100.7",
+            "x.example",
+            "chrome133",
+            pin=None,
+            port=443,
+        )
+        seed.assert_called_once_with(curl, "x.example", {"old": "1"})
+        set_cookies.assert_called_once_with(curl, "x.example", {"new": "2"})
+        assert send.call_args.kwargs["curl"] is curl
+        assert send.call_args.kwargs["cookies"] is None
+        assert send.call_args.kwargs["raw_headers"] is False
+        assert send.call_args.kwargs["reseat"] is not None
+
+
+class TestFetchWithIdentityMutationCoverage:
+    def test_missing_profile_uses_cached_then_live_egress(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(),
+            params=RequestParams(),
+        )
+        store = Mock()
+        store.load.return_value = None
+        send = Mock(return_value=b"ok")
+        with (
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(fetch_mod, "egress_ip", side_effect=["old", "new"]) as egress,
+            patch.object(fetch_mod, "_send_as", send),
+        ):
+            assert (
+                _fetch_with_identity(request, caller_headers=None, caller_cookies=None)
+                == b"ok"
+            )
+        assert egress.call_args_list == [call(cache=True), call(cache=False)]
+        send.assert_called_once_with(request, None, "new", None, None)
+
+    def test_browser_identity_forwards_headers_and_cookies(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(),
+            params=RequestParams(policy=PolicyParams(transport="zendriver")),
+        )
+        with (
+            patch.object(
+                fetch_mod,
+                "_send_via_zendriver",
+                return_value=b"ok",
+            ) as browser,
+            patch.object(
+                fetch_mod,
+                "_validated_body",
+                side_effect=_identity_body,
+            ),
+        ):
+            assert (
+                _fetch_with_identity(
+                    request,
+                    caller_headers={"H": "v"},
+                    caller_cookies={"c": "1"},
+                )
+                == b"ok"
+            )
+        browser.assert_called_once_with(request, headers={"H": "v"}, cookies={"c": "1"})
+
+
+class TestFetchRetryAndTransportMutationCoverage:
+    def test_fetch_once_retries_oserror_and_logs_exact_message(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=1),
+        )
+        backend = Mock(side_effect=[OSError("offline"), b"ok"])
+        sleeps = Mock()
+        monkeypatch.setattr(fetch_mod.time, "sleep", sleeps)
+        caplog.set_level("DEBUG", logger=fetch_mod.logger.name)
+        with (
+            patch("wesearch.types.params.random.uniform", return_value=0.0),
+            patch.object(fetch_mod, "fetch_curl", backend),
+        ):
+            assert (
+                _fetch_once(
+                    "https://x/",
+                    params,
+                    headers=None,
+                    cookies=None,
+                    raw_headers=False,
+                    impersonate="chrome",
+                    accept_ch={},
+                    on_response=None,
+                    session=None,
+                )
+                == b"ok"
+            )
+        assert sleeps.call_args_list == [((1.0,), {})]
+        assert [record.getMessage() for record in caplog.records] == [
+            "fetch https://x/ failed: offline, retry in 1.0s",
+        ]
+
+    def test_fetch_once_does_not_retry_nonretryable_status(self) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=1),
+        )
+        error = FetchError("https://x/", 404, {"h": "v"}, b"missing")
+        backend = Mock(side_effect=error)
+        with (
+            patch.object(fetch_mod, "fetch_curl", backend),
+            pytest.raises(FetchError) as raised,
+        ):
+            _fetch_once(
+                "https://x/",
+                params,
+                headers=None,
+                cookies=None,
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert raised.value is error
+        backend.assert_called_once()
+
+    def test_fetch_once_get_without_body_forwards_none(self) -> None:
+        params = RequestParams(policy=PolicyParams(transport="curl"))
+        backend = Mock(return_value=b"ok")
+        with patch.object(fetch_mod, "fetch_curl", backend):
+            _fetch_once(
+                "https://x/",
+                params,
+                headers=None,
+                cookies=None,
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert backend.call_args.kwargs["body"] is None
+
+
+class TestRemainingHeaderAndBrowserMutationCoverage:
+    def test_curl_headers_forward_hints_and_google_identity(self) -> None:
+        with (
+            patch.object(
+                fetch_mod,
+                "impersonate_version_platform",
+                return_value=(133, "linux"),
+            ) as identity,
+            patch.object(
+                fetch_mod,
+                "chrome_client_hints",
+                return_value={"Hint": "v"},
+            ) as hints,
+            patch.object(
+                fetch_mod,
+                "_google_headers",
+                return_value={"Google": "v"},
+            ) as google,
+        ):
+            assert _curl_structural_headers(
+                method="GET",
+                url="https://www.google.com/path",
+                content_type=None,
+                extra={"Extra": "v"},
+                impersonate="chrome133",
+                accept_ch={"https://www.google.com": frozenset({"Hint"})},
+            ) == {"Hint": "v", "Google": "v", "Extra": "v"}
+        identity.assert_called_once_with("chrome133")
+        hints.assert_called_once_with(major=133, platform="linux")
+        google.assert_called_once_with("https://www.google.com/path", "chrome133")
+
+    def test_browser_call_forwards_trust_redirect_and_profile_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(
+                policy=PolicyParams(transport="zendriver", trust="internal"),
+                retry=RetryParams(timeout_sec=9.0),
+                observe=ObserveParams(on_redirect=Mock()),
+            ),
+        )
+        result = BrowserResult(body=b"ok", cookies={}, final_url="")
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch.object(
+                fetch_mod.zendriver,
+                "fetch_zendriver",
+                return_value=result,
+            ) as browser,
+            patch.object(
+                fetch_mod,
+                "data_dir",
+                return_value=tmp_path,
+            ),
+        ):
+            assert _send_via_zendriver(request, headers=None, cookies=None) == b"ok"
+        assert browser.call_args.kwargs == {
+            "profile_dir": tmp_path / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
+            "egress": "",
+            "timeout_sec": 9.0,
+            "headers": None,
+            "cookies": None,
+            "trust": "internal",
+            "max_redirects": 10,
+            "on_redirect": request.params.observe.on_redirect,
+        }
+
+
+class TestFinalMutationCoverage:
+    def test_curl_reseat_callback_preserves_all_identity_arguments(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(policy=PolicyParams(transport="curl")),
+        )
+        with (
+            patch.object(fetch_mod, "curl_session", return_value=Mock()),
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "_reseat", return_value=None) as reseat,
+            patch.object(fetch_mod._Request, "send", return_value=b"ok") as send,
+        ):
+            _send_as(request, Profile(ua="u"), "198.51.100.7", None, None)
+            callback = send.call_args.kwargs["reseat"]
+            assert callable(callback)
+            callback("https://other.example/path")
+        reseat.assert_called_once_with(
+            request,
+            "198.51.100.7",
+            "chrome133",
+            "https://other.example/path",
+        )
+
+    def test_browser_fallback_and_existing_profile_update_use_exact_egress(
+        self,
+    ) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(),
+        )
+        result = BrowserResult(
+            body=b"ok",
+            cookies={"sid": "new"},
+            final_url="https://x.example/path",
+        )
+        store = Mock()
+        store.load.return_value = Profile(ua="u", cookies={"old": "1"})
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", side_effect=[None, "198.51.100.8"]),
+            patch.object(fetch_mod.zendriver, "fetch_zendriver", return_value=result),
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+        ):
+            assert _send_via_zendriver(request, headers=None, cookies=None) == b"ok"
+        store.update_cookies.assert_called_once_with(
+            "198.51.100.8",
+            "x.example",
+            {"sid": "new"},
+        )
+
+    def test_known_profile_burn_discards_exact_identity_before_retry(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(),
+        )
+        profile = Profile(ua="u", cookies={"old": "1"})
+        store = Mock()
+        store.load.return_value = profile
+        send = Mock(side_effect=[BotDetectionError("blocked"), b"ok"])
+        with (
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(
+                fetch_mod,
+                "egress_ip",
+                side_effect=["198.51.100.8", "198.51.100.9"],
+            ),
+            patch.object(fetch_mod, "_send_as", send),
+            patch.object(fetch_mod, "close_curl_session") as close,
+        ):
+            assert (
+                _fetch_with_identity(
+                    request,
+                    caller_headers={"H": "v"},
+                    caller_cookies={"c": "1"},
+                )
+                == b"ok"
+            )
+        store.discard.assert_called_once_with("198.51.100.8", "x.example")
+        close.assert_called_once_with("198.51.100.8", "x.example", "chrome133")
+        assert send.call_args_list == [
+            call(request, profile, "198.51.100.8", {"H": "v"}, {"c": "1"}),
+            call(request, None, "198.51.100.9", {"H": "v"}, {"c": "1"}),
+        ]
+
+
+class TestLastSurvivorCoverage:
+    def test_build_headers_forwards_each_curl_argument(self) -> None:
+        structural = Mock(return_value={"ok": "yes"})
+        with patch.object(fetch_mod, "_curl_structural_headers", structural):
+            assert _build_headers(
+                method="PATCH",
+                url="https://x.example/path",
+                content_type="application/json",
+                extra={"X": "y"},
+                raw_headers=False,
+                impersonate="chrome133",
+                use_curl=True,
+                accept_ch={"https://x.example": frozenset({"Hint"})},
+            ) == {"ok": "yes"}
+        structural.assert_called_once_with(
+            method="PATCH",
+            url="https://x.example/path",
+            content_type="application/json",
+            extra={"X": "y"},
+            impersonate="chrome133",
+            accept_ch={"https://x.example": frozenset({"Hint"})},
+        )
+
+    def test_build_headers_raw_without_extras_is_empty(self) -> None:
+        assert (
+            _build_headers(
+                method="GET",
+                url="https://x.example/path",
+                content_type=None,
+                extra=None,
+                raw_headers=True,
+                impersonate="chrome133",
+                use_curl=True,
+                accept_ch={},
+            )
+            == {}
+        )
+
+    def test_fetch_once_uses_all_cookie_values_and_retry_budget(self) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=1),
+        )
+        error = FetchError("https://x/", 500, {}, b"retry")
+        backend = Mock(side_effect=[error, error, b"ok"])
+        with patch.object(fetch_mod, "fetch_curl", backend), pytest.raises(FetchError):
+            _fetch_once(
+                "https://x/",
+                params,
+                headers=None,
+                cookies={"a": "1", "b": "2"},
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert backend.call_count == 2
+
+    def test_identity_burn_refreshes_live_egress_without_cache(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(),
+            params=RequestParams(),
+        )
+        store = Mock()
+        store.load.return_value = Profile(ua="u", cookies={})
+        egress = Mock(side_effect=_egress_value)
+        send = Mock(side_effect=[BotDetectionError("blocked"), b"ok"])
+        with (
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(fetch_mod, "egress_ip", egress),
+            patch.object(fetch_mod, "_send_as", send),
+            patch.object(fetch_mod, "close_curl_session"),
+        ):
+            assert (
+                _fetch_with_identity(request, caller_headers=None, caller_cookies=None)
+                == b"ok"
+            )
+        assert egress.call_args_list == [call(cache=True), call(cache=False)]
+
+    def test_google_hostname_fallback_is_empty(self) -> None:
+        with patch.object(fetch_mod, "is_google_property", return_value=True) as google:
+            _google_headers("https:///path", "chrome")
+        google.assert_called_once_with("")
+
+    def test_browser_fallback_calls_cache_false_and_not_true_twice(self) -> None:
+        request = _Request(
+            url="https://x.example/path",
+            session=FetchSession(),
+            params=RequestParams(),
+        )
+        result = BrowserResult(body=b"ok", cookies={}, final_url="")
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", side_effect=[None, "ip"]) as egress,
+            patch.object(fetch_mod.zendriver, "fetch_zendriver", return_value=result),
+        ):
+            _send_via_zendriver(request, headers=None, cookies=None)
+        assert egress.call_args_list == [call(cache=True), call(cache=False)]
+
+
+class TestExactForwardedMutationCoverage:
+    def test_build_headers_forwards_url_and_impersonate_to_both_helpers(self) -> None:
+        identity = Mock(return_value=(131, "linux"))
+        google = Mock(return_value={})
+        with (
+            patch.object(fetch_mod, "impersonate_version_platform", identity),
+            patch.object(fetch_mod, "_google_headers", google),
+            patch.object(fetch_mod, "chrome_navigation_headers", return_value={}),
+        ):
+            assert (
+                _build_headers(
+                    method="GET",
+                    url="https://x.example/path",
+                    content_type=None,
+                    extra=None,
+                    raw_headers=False,
+                    impersonate="chrome131",
+                    use_curl=False,
+                    accept_ch={},
+                )
+                == {}
+            )
+        identity.assert_called_once_with("chrome131")
+        google.assert_called_once_with("https://x.example/path", "chrome131")
+
+    def test_fetch_once_forwards_raw_headers_and_impersonate_exactly(self) -> None:
+        params = RequestParams(policy=PolicyParams(transport="curl"))
+        build = Mock(return_value={})
+        backend = Mock(return_value=b"ok")
+        with (
+            patch.object(fetch_mod, "_build_headers", build),
+            patch.object(fetch_mod, "fetch_curl", backend),
+        ):
+            assert (
+                _fetch_once(
+                    "https://x.example/",
+                    params,
+                    headers=None,
+                    cookies=None,
+                    raw_headers=True,
+                    impersonate="chrome131",
+                    accept_ch={},
+                    on_response=None,
+                    session=None,
+                )
+                == b"ok"
+            )
+        assert build.call_args.kwargs["raw_headers"] is True
+        assert build.call_args.kwargs["impersonate"] == "chrome131"
+
+    def test_fetch_once_joins_two_cookie_values_with_semicolon(self) -> None:
+        params = RequestParams(policy=PolicyParams(transport="curl"))
+        backend = Mock(return_value=b"ok")
+        with patch.object(fetch_mod, "fetch_curl", backend):
+            _fetch_once(
+                "https://x.example/",
+                params,
+                headers=None,
+                cookies={"a": "1", "b": "2"},
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert _recorded_headers(backend)["Cookie"] == "a=1; b=2"
+
+    def test_fetch_once_does_not_add_attempt_when_retries_zero(self) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=0),
+        )
+        error = FetchError("https://x.example/", 500, {}, b"error")
+        backend = Mock(side_effect=error)
+        with patch.object(fetch_mod, "fetch_curl", backend), pytest.raises(FetchError):
+            _fetch_once(
+                "https://x.example/",
+                params,
+                headers=None,
+                cookies=None,
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        backend.assert_called_once()
+
+
+class TestRemainingExactMutationCoverage:
+    def test_fetch_once_forwards_existing_session_to_backend(self) -> None:
+        params = RequestParams(policy=PolicyParams(transport="curl"))
+        session: cc_requests.Session[cc_requests.Response] = cc_requests.Session()
+        backend = Mock(return_value=b"ok")
+        try:
+            with patch.object(fetch_mod, "fetch_curl", backend):
+                _fetch_once(
+                    "https://x.example/",
+                    params,
+                    headers=None,
+                    cookies=None,
+                    raw_headers=False,
+                    impersonate="chrome",
+                    accept_ch={},
+                    on_response=None,
+                    session=session,
+                )
+            assert backend.call_args.kwargs["session"] is session
+        finally:
+            session.close()
+
+    def test_fetch_once_get_uses_no_content_type(self) -> None:
+        params = RequestParams(policy=PolicyParams(transport="stdlib"))
+        build = Mock(return_value={})
+        backend = Mock(return_value=b"ok")
+        with (
+            patch.object(fetch_mod, "_build_headers", build),
+            patch.object(fetch_mod, "fetch_stdlib", backend),
+        ):
+            _fetch_once(
+                "https://x.example/",
+                params,
+                headers=None,
+                cookies=None,
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert build.call_args.kwargs["content_type"] is None
+
+    def test_browser_fallback_forwards_caller_values_after_bot_block(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(policy=PolicyParams(transport="curl-then-zendriver")),
+        )
+        with (
+            patch.object(
+                fetch_mod,
+                "_send_as",
+                side_effect=BotDetectionError("blocked"),
+            ),
+            patch.object(fetch_mod, "_send_via_zendriver", return_value=b"ok") as send,
+            patch.object(transport_routing, "remember_zendriver_domain"),
+        ):
+            assert (
+                _fetch_with_identity(
+                    request,
+                    caller_headers={"X": "1"},
+                    caller_cookies={"c": "2"},
+                )
+                == b"ok"
+            )
+        send.assert_called_once_with(
+            request,
+            headers={"X": "1"},
+            cookies={"c": "2"},
+        )
+
+    def test_fetch_once_forwards_redirect_callback(self) -> None:
+        redirect = Mock()
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            observe=ObserveParams(on_redirect=redirect),
+        )
+        backend = Mock(return_value=b"ok")
+        with patch.object(fetch_mod, "fetch_curl", backend):
+            _fetch_once(
+                "https://x.example/",
+                params,
+                headers=None,
+                cookies=None,
+                raw_headers=False,
+                impersonate="chrome",
+                accept_ch={},
+                on_response=None,
+                session=None,
+            )
+        assert backend.call_args.kwargs["on_redirect"] is redirect
+
+    def test_request_send_forwards_existing_session_identity(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(),
+        )
+        session: cc_requests.Session[cc_requests.Response] = cc_requests.Session()
+        try:
+            with patch.object(fetch_mod, "_fetch_once", return_value=b"ok") as send:
+                request.send(
+                    headers=None,
+                    cookies=None,
+                    raw_headers=False,
+                    curl=session,
+                )
+            assert send.call_args.kwargs["session"] is session
+        finally:
+            session.close()
+
+    def test_browser_fallback_forwards_both_caller_values(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(policy=PolicyParams(transport="zendriver")),
+        )
+        with patch.object(fetch_mod, "_send_via_zendriver", return_value=b"ok") as send:
+            assert (
+                _fetch_with_identity(
+                    request,
+                    caller_headers={"X": "1"},
+                    caller_cookies={"c": "2"},
+                )
+                == b"ok"
+            )
+        send.assert_called_once_with(
+            request,
+            headers={"X": "1"},
+            cookies={"c": "2"},
+        )
+
+    def test_stdlib_send_has_no_reseat_callback(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(policy=PolicyParams(transport="stdlib")),
+        )
+        with patch.object(fetch_mod._Request, "send", return_value=b"ok") as send:
+            _send_as(request, None, "198.51.100.1", None, None)
+        assert send.call_args.kwargs["reseat"] is None
+
+    def test_curl_session_pin_and_port_are_forwarded_exactly(self) -> None:
+        request = _Request(
+            url="https://x.example:8443/",
+            session=FetchSession(),
+            params=RequestParams(
+                policy=PolicyParams(transport="curl", trust="internal"),
+            ),
+        )
+        curl = Mock()
+        with (
+            patch.object(fetch_mod, "curl_session", return_value=curl) as make,
+            patch.object(fetch_mod, "pinned_host", return_value="203.0.113.7") as pin,
+            patch.object(fetch_mod._Request, "send", return_value=b"ok"),
+        ):
+            _send_as(request, None, "198.51.100.1", None, None)
+        pin.assert_called_once_with("https://x.example:8443/", "internal")
+        make.assert_called_once_with(
+            "198.51.100.1",
+            "x.example",
+            "chrome",
+            pin="203.0.113.7",
+            port=8443,
+        )
+
+    def test_new_profile_saves_drawn_user_agent(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(policy=PolicyParams(transport="stdlib")),
+        )
+        store = Mock()
+        with (
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(fetch_mod, "draw_user_agent", return_value="drawn"),
+            patch.object(
+                fetch_mod,
+                "kind_for_impersonate",
+                return_value="kind",
+            ) as kind,
+            patch.object(fetch_mod._Request, "send", return_value=b"ok"),
+        ):
+            _send_as(request, None, "198.51.100.1", None, None)
+        kind.assert_called_once_with("chrome133")
+        assert _recorded_profile(store.save).ua == "drawn"
+
+    def test_browser_empty_landing_domain_does_not_persist(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(),
+            observer=Mock(),
+        )
+        result = BrowserResult(
+            body=b"ok",
+            cookies={"sid": "1"},
+            final_url="https:///path",
+        )
+        store = Mock()
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", return_value="198.51.100.1"),
+            patch.object(fetch_mod.zendriver, "fetch_zendriver", return_value=result),
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+        ):
+            assert _send_via_zendriver(request, headers=None, cookies=None) == b"ok"
+        store.save.assert_not_called()
+        store.update_cookies.assert_not_called()
+
+    def test_browser_cookie_free_response_notifies_with_empty_headers(self) -> None:
+        observer = Mock()
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(),
+            observer=observer,
+        )
+        result = BrowserResult(body=b"ok", cookies={}, final_url="https://x.example/")
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch.object(fetch_mod.zendriver, "fetch_zendriver", return_value=result),
+        ):
+            _send_via_zendriver(request, headers=None, cookies=None)
+        observer.assert_called_once_with(200, {}, "https://x.example/")
+
+    def test_browser_profile_uses_request_impersonate_for_user_agent(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(impersonate="chrome133"),
+            params=RequestParams(),
+        )
+        result = BrowserResult(
+            body=b"ok",
+            cookies={"sid": "1"},
+            final_url="https://x.example/",
+        )
+        store = Mock()
+        store.load.return_value = None
+        with (
+            patch.object(fetch_mod, "pinned_host", return_value=None),
+            patch.object(fetch_mod, "egress_ip", return_value="198.51.100.1"),
+            patch.object(fetch_mod.zendriver, "fetch_zendriver", return_value=result),
+            patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
+            patch.object(fetch_mod, "draw_user_agent", return_value="drawn"),
+            patch.object(
+                fetch_mod,
+                "kind_for_impersonate",
+                return_value="kind",
+            ) as kind,
+        ):
+            _send_via_zendriver(request, headers=None, cookies=None)
+        kind.assert_called_once_with("chrome133")
+        assert _recorded_profile(store.save).ua == "drawn"
+
+
+class TestRetryAttemptCounterMutationCoverage:
+    def test_retry_counter_advances_across_three_fetch_error_attempts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=3),
+        )
+        error = FetchError("https://x.example/", 500, {}, b"retry")
+        backend = Mock(side_effect=[error, error, error, b"ok"])
+        sleeps = Mock()
+        monkeypatch.setattr(fetch_mod.time, "sleep", sleeps)
+        with (
+            patch("wesearch.types.params.random.uniform", return_value=0.0),
+            patch.object(fetch_mod, "fetch_curl", backend),
+        ):
+            assert (
+                _fetch_once(
+                    "https://x.example/",
+                    params,
+                    headers=None,
+                    cookies=None,
+                    raw_headers=False,
+                    impersonate="chrome",
+                    accept_ch={},
+                    on_response=None,
+                    session=None,
+                )
+                == b"ok"
+            )
+        assert backend.call_count == 4
+        assert sleeps.call_args_list == [((1.0,), {}), ((2.0,), {}), ((4.0,), {})]
+
+    def test_retry_counter_advances_across_three_oserror_attempts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        params = RequestParams(
+            policy=PolicyParams(transport="curl"),
+            retry=RetryParams(retries=3),
+        )
+        backend = Mock(
+            side_effect=[
+                OSError("offline"),
+                OSError("offline"),
+                OSError("offline"),
+                b"ok",
+            ],
+        )
+        sleeps = Mock()
+        monkeypatch.setattr(fetch_mod.time, "sleep", sleeps)
+        with (
+            patch("wesearch.types.params.random.uniform", return_value=0.0),
+            patch.object(fetch_mod, "fetch_curl", backend),
+        ):
+            assert (
+                _fetch_once(
+                    "https://x.example/",
+                    params,
+                    headers=None,
+                    cookies=None,
+                    raw_headers=False,
+                    impersonate="chrome",
+                    accept_ch={},
+                    on_response=None,
+                    session=None,
+                )
+                == b"ok"
+            )
+        assert backend.call_count == 4
+        assert sleeps.call_args_list == [((1.0,), {}), ((2.0,), {}), ((4.0,), {})]
 
 
 if __name__ == "__main__":

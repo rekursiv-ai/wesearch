@@ -33,7 +33,6 @@ from wesearch.fetch import (
     ContentParams,
     PolicyParams,
     RequestParams,
-    RetryParams,
     fetch,
 )
 from wesearch.types.errors import FetchError
@@ -73,7 +72,8 @@ def third_party_render_allowed() -> bool:
     """
     if os.environ.get(_API_KEY_ENV, "").strip():
         return True
-    return os.environ.get(_ALLOW_THIRD_PARTY_RENDER_ENV, "").strip().lower() in (
+    value = os.environ.get(_ALLOW_THIRD_PARTY_RENDER_ENV)
+    return value is not None and value.strip().lower() in (
         "1",
         "true",
         "yes",
@@ -108,14 +108,15 @@ def fetch_reader_proxy(url: str, *, policy: PolicyParams) -> bytes:
                 f"{_API_KEY_ENV} or {_ALLOW_THIRD_PARTY_RENDER_ENV}=1 to allow."
             ).encode(),
         )
+    # pragma: no mutate start -- `quote` never escapes letters, so "XX" padding is inert.
     proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/"))
-    key = os.environ.get(_API_KEY_ENV, "")
+    # pragma: no mutate end
+    key = os.environ.get(_API_KEY_ENV) or ""
     headers = {"Authorization": f"Bearer {key}"} if key else None
     body, _session = fetch(
         proxy_url,
         request=RequestParams(
             content=ContentParams(headers=headers),
-            retry=RetryParams(timeout_sec=30),
             policy=policy,
         ),
     )

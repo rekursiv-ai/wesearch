@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import json
 
@@ -154,6 +154,7 @@ class TestRequestErrors:
                 open_access_only=False,
             )
         assert ei.value.status == 500
+        assert str(ei.value) == "OpenAlex HTTP 500: boom"
 
     def test_timeout_raises_backend_error_status_zero(self) -> None:
         with (
@@ -205,6 +206,14 @@ class TestRequestErrors:
                 open_access_only=False,
             )
         assert "invalid JSON" in str(ei.value)
+
+    def test_invalid_utf8_error_body_is_replaced(self) -> None:
+        err = FetchError("u", 500, {}, b"bad \xff body")
+        with (
+            patch("wesearch.paper.providers.openalex.fetch", side_effect=err),
+            pytest.raises(BackendError, match="bad \\ufffd body"),
+        ):
+            openalex._get("/works", {})
 
     @pytest.mark.parametrize("payload", [b"[]", b"null", b'"text"'])
     def test_non_object_json_raises_backend_error(self, payload: bytes) -> None:
@@ -442,6 +451,26 @@ class TestReferences:
             records, complete = openalex.references("doi", "10.1/x", limit=None)
         assert len(records) == 1  # Only 1 of 2 refs resolved.
         assert not complete  # Must NOT claim complete when refs went missing.
+
+    def test_non_string_reference_ids_are_ignored(self) -> None:
+        resolve: MutableJSON = {
+            "results": [
+                {
+                    "id": "https://openalex.org/W1",
+                    "referenced_works": [123, "https://openalex.org/W10"],
+                },
+            ],
+        }
+        batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref"}]}
+        fetch = _RecordingFetch(
+            (json.dumps(resolve).encode(), FetchSession()),
+            (json.dumps(batch).encode(), FetchSession()),
+        )
+        with patch("wesearch.paper.providers.openalex.fetch", fetch):
+            records, complete = openalex.references("doi", "10.1/x", limit=None)
+        assert [record.title for record in records] == ["ref"]
+        assert complete
+        assert _params(fetch)["filter"] == "openalex:W10"
 
     def test_duplicate_ref_id_still_complete(self) -> None:
         # SPEC-A: referenced_works may repeat an id. The ``openalex:`` OR-filter
@@ -689,6 +718,7 @@ class _RecordingFetch:
     def __init__(self, *outcomes: tuple[bytes, FetchSession] | BaseException) -> None:
         self._outcomes = list(outcomes)
         self.requests: list[RequestParams] = []
+        self.urls: list[str] = []
 
     def __call__(
         self,
@@ -697,13 +727,482 @@ class _RecordingFetch:
         session: FetchSession | None = None,
         request: RequestParams | None = None,
     ) -> tuple[bytes, FetchSession]:
-        del url, session
+        del session
         assert request is not None
+        self.urls.append(url)
         self.requests.append(request)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+
+class TestExactInternals:
+    def test_select_exact_default_and_extra(self) -> None:
+        fields = "id,doi,ids,title,display_name,authorships,publication_year,primary_location,cited_by_count,referenced_works_count,abstract_inverted_index,open_access"
+        assert openalex._select() == fields
+        assert openalex._select("referenced_works") == f"{fields},referenced_works"
+
+    def test_get_builds_exact_request(self) -> None:
+        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        with (
+            patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
+            patch("wesearch.paper.providers.openalex.fetch", fetch),
+        ):
+            result = openalex._get(
+                "/works",
+                {"filter": "x"},
+                base="https://base",
+                source="src",
+                interval_sec=0.25,
+                timeout_sec=3.5,
+                transport="curl",
+            )
+        assert result == {"ok": True}
+        assert fetch.requests[0].content.params == {"filter": "x"}
+        assert fetch.requests[0].content.headers == {
+            "Accept": "application/json",
+            "User-Agent": "loop-paper",
+        }
+        assert fetch.requests[0].retry.timeout_sec == 3.5
+        assert fetch.requests[0].policy.transport == "curl"
+
+    def test_get_defaults_and_gate_arguments_are_exact(self) -> None:
+        gate = MagicMock()
+        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        with (
+            patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
+            patch(
+                "wesearch.paper.providers.openalex.cross_process_limiter",
+                return_value=gate,
+            ) as limiter,
+            patch("wesearch.paper.providers.openalex.fetch", fetch),
+        ):
+            assert openalex._get("/works", {"filter": "x"}) == {"ok": True}
+        limiter.assert_called_once_with("openalex", per_seconds=0.1)
+        gate.acquire.assert_called_once_with()
+        assert fetch.urls == ["https://api.openalex.org/works"]
+        request = fetch.requests[0]
+        assert request.content.params == {"filter": "x"}
+        assert request.retry.timeout_sec == 10.0
+        assert request.policy.transport == "auto"
+        assert fetch.requests[0].content.headers == {
+            "Accept": "application/json",
+            "User-Agent": "loop-paper",
+        }
+
+    def test_get_rate_limit_message_preserves_truncated_detail(self) -> None:
+        detail = b"x" * 200 + b"Z"
+        err = FetchError("u", 429, {}, detail)
+        with (
+            patch("wesearch.paper.providers.openalex.fetch", side_effect=err),
+            pytest.raises(RateLimitError) as exc,
+        ):
+            openalex._get("/works", {})
+        assert "x" * 200 in str(exc.value)
+        assert "Z" not in str(exc.value)
+        assert str(exc.value) == (
+            "OpenAlex rate limit / daily credit budget exhausted. Set "
+            "OPENALEX_API_KEY for a higher budget, or retry after the reset "
+            "(midnight UTC). " + "x" * 200
+        )
+
+    def test_get_rate_limit_message_includes_body(self) -> None:
+        err = FetchError("u", 429, {}, b"detail")
+        with (
+            patch("wesearch.paper.providers.openalex.fetch", side_effect=err),
+            pytest.raises(RateLimitError, match=r"detail"),
+        ):
+            openalex._get("/works", {})
+
+    def test_get_gate_failure_has_status_zero(self) -> None:
+        gate = MagicMock()
+        gate.acquire.side_effect = OSError("locked")
+        with (
+            patch(
+                "wesearch.paper.providers.openalex.cross_process_limiter",
+                return_value=gate,
+            ),
+            pytest.raises(
+                BackendError,
+                match=r"^OpenAlex rate-limit gate failed: locked$",
+            ) as caught,
+        ):
+            openalex._get("/works", {})
+        assert caught.value.status == 0
+
+    def test_get_timeout_message_is_exact(self) -> None:
+        with (
+            patch(
+                "wesearch.paper.providers.openalex.fetch",
+                side_effect=TimeoutError("slow"),
+            ),
+            pytest.raises(
+                BackendError,
+                match=r"^OpenAlex request failed \(timeout or connection error\): slow$",
+            ) as caught,
+        ):
+            openalex._get("/works", {})
+        assert caught.value.status == 0
+
+    def test_get_non_object_error_names_actual_type(self) -> None:
+        with (
+            patch(
+                "wesearch.paper.providers.openalex.fetch",
+                _RecordingFetch((b"[]", FetchSession())),
+            ),
+            pytest.raises(
+                BackendError,
+                match=r"^OpenAlex returned list, expected a JSON object\.$",
+            ),
+        ):
+            openalex._get("/works", {})
+
+    def test_get_404_is_backend_error(self) -> None:
+        err = FetchError("u", 404, {}, b"missing")
+        with (
+            patch("wesearch.paper.providers.openalex.fetch", side_effect=err),
+            pytest.raises(BackendError) as exc,
+        ):
+            openalex._get("/works", {})
+        assert exc.value.status == 404
+        assert str(exc.value) == "OpenAlex HTTP 404: missing"
+
+    def test_select_extra_is_not_added_when_empty(self) -> None:
+        assert not openalex._select().endswith(",")
+
+    def test_resolve_work_exact_request_and_error_message(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+        fetch = _fetch_returning({"results": []})
+        with (
+            patch("wesearch.paper.providers.openalex.fetch", fetch),
+            pytest.raises(
+                NotFoundError,
+                match=r"^OpenAlex has no work for doi:10\.1/missing\.$",
+            ),
+        ):
+            openalex._resolve_work("doi", "10.1/missing", extra_select="id")
+        params = fetch.requests[0].content.params
+        assert params == {"filter": "doi:10.1/missing", "select": "id,id"}
+
+    def test_resolve_work_rejects_arxiv_with_status(self) -> None:
+        with pytest.raises(
+            BackendError,
+            match=r"^OpenAlex citation graph resolves DOIs only",
+        ) as exc:
+            openalex._resolve_work("arxiv", "1", extra_select="id")
+        assert exc.value.status == 0
+        assert str(exc.value) == (
+            "OpenAlex citation graph resolves DOIs only; arXiv-id resolution is "
+            "unreliable. Use the S2 source for an arXiv id, or supply the DOI."
+        )
+
+    def test_work_id_tail_handles_url_and_bare_id(self) -> None:
+        assert openalex._work_id_tail("https://openalex.org/W123") == "W123"
+        assert openalex._work_id_tail("W123") == "W123"
+
+    def test_works_page_advance_boundaries(self) -> None:
+        assert (
+            openalex._works_page_advance({"results": [1], "meta": {"count": 1}}, 1, 1)
+            is None
+        )
+        assert (
+            openalex._works_page_advance({"results": [1], "meta": {"count": 2}}, 1, 1)
+            == 2
+        )
+        assert (
+            openalex._works_page_advance({"results": [], "meta": {"count": 2}}, 1, 1)
+            is None
+        )
+
+    def test_resolve_works_batches_and_forwards_transport(self) -> None:
+        payload = {"meta": {"count": 2}, "results": [{"title": "a"}, {"title": "b"}]}
+        fetch = _fetch_returning(payload)
+        with patch("wesearch.paper.providers.openalex.fetch", fetch):
+            records = openalex._resolve_works(
+                ["W1", "W2"],
+                per_page_max=2,
+                transport="curl",
+            )
+        assert [record.title for record in records] == ["a", "b"]
+        assert fetch.requests[0].policy.transport == "curl"
+        params = fetch.requests[0].content.params
+        assert params is not None
+        assert params["filter"] == "openalex:W1|W2"
+
+    def test_paginate_works_builds_page_params_and_total(self) -> None:
+        body: MutableJSON = {"meta": {"count": 1}, "results": [{}]}
+        with patch.object(openalex, "_get", return_value=body) as get:
+            page, total = openalex._paginate_works(
+                {"filter": "x"},
+                limit=None,
+                transport="curl",
+            )
+        assert total == 1
+        assert page.complete
+        get.assert_called_once()
+        assert get.call_args.args == (
+            "/works",
+            {"select": openalex._select(), "filter": "x", "page": 1, "per-page": 200},
+        )
+        assert get.call_args.kwargs == {"transport": "curl"}
+
+    def test_paginate_works_limit_zero_does_not_fetch(self) -> None:
+        with patch.object(openalex, "_get") as get:
+            page, total = openalex._paginate_works({}, limit=0)
+        assert page.entries == []
+        assert total == 0
+        assert page.complete
+        get.assert_not_called()
+
+    def test_resolve_works_defaults_chunk_and_forwards_limit(self) -> None:
+        page = MagicMock(entries=[], complete=True)
+        with patch.object(
+            openalex,
+            "_paginate_works",
+            return_value=(page, 0),
+        ) as paginate_mock:
+            assert openalex._resolve_works(["W1"]) == []
+        paginate_mock.assert_called_once_with(
+            {"filter": "openalex:W1"},
+            limit=200,
+            per_page_max=200,
+            transport="auto",
+        )
+
+    def test_resolve_work_default_transport_and_exact_error(self) -> None:
+        with (
+            patch.object(openalex, "_get", return_value={"results": []}) as get,
+            pytest.raises(
+                NotFoundError,
+                match=r"^OpenAlex has no work for doi:10\.1/x\.$",
+            ),
+        ):
+            openalex._resolve_work("doi", "10.1/x", extra_select="id")
+        get.assert_called_once_with(
+            "/works",
+            {"filter": "doi:10.1/x", "select": "id,id"},
+            transport="auto",
+        )
+
+    def test_search_without_filters_omits_empty_filter_prefix(self) -> None:
+        page = MagicMock(entries=[], complete=True)
+        with patch.object(
+            openalex,
+            "_paginate_works",
+            return_value=(page, 0),
+        ) as paginate_mock:
+            openalex.search(
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
+            )
+        assert paginate_mock.call_args.args[0] == {
+            "filter": "title_and_abstract.search:q",
+        }
+
+    def test_citations_empty_work_id_is_preserved(self) -> None:
+        page = MagicMock(entries=[], complete=True)
+        with (
+            patch.object(openalex, "_resolve_work", return_value={"id": None}),
+            patch.object(
+                openalex,
+                "_paginate_works",
+                return_value=(page, 0),
+            ) as paginate_mock,
+        ):
+            openalex.citations("doi", "10.1/x", limit=None)
+        assert paginate_mock.call_args.args[0] == {"filter": "cites:"}
+
+    def test_search_forwards_exact_pagination_contract(self) -> None:
+        page = MagicMock(entries=[], complete=True)
+        with patch.object(
+            openalex,
+            "_paginate_works",
+            return_value=(page, 7),
+        ) as paginate_mock:
+            result = openalex.search(
+                "deep, learning | models",
+                limit=3,
+                year_from=2020,
+                year_to=2022,
+                open_access_only=True,
+                transport="curl",
+            )
+        assert result == ([], 7, True)
+        paginate_mock.assert_called_once_with(
+            {
+                "filter": "from_publication_date:2020-01-01,to_publication_date:2022-12-31,open_access.is_oa:true,title_and_abstract.search:deep  learning   models",
+            },
+            limit=3,
+            transport="curl",
+        )
+
+    def test_citations_forwards_seed_and_transport(self) -> None:
+        page = MagicMock(entries=[], complete=True)
+        with (
+            patch.object(
+                openalex,
+                "_resolve_work",
+                return_value={"id": "https://openalex.org/W1"},
+            ) as resolve,
+            patch.object(
+                openalex,
+                "_paginate_works",
+                return_value=(page, 0),
+            ) as paginate_mock,
+        ):
+            assert openalex.citations(
+                "doi",
+                "10.1/x",
+                limit=2,
+                year_from=2020,
+                transport="curl",
+            ) == ([], 0, True)
+        resolve.assert_called_once_with(
+            "doi",
+            "10.1/x",
+            extra_select="id",
+            transport="curl",
+        )
+        paginate_mock.assert_called_once_with(
+            {"filter": "cites:W1,from_publication_date:2020-01-01"},
+            limit=2,
+            transport="curl",
+        )
+
+    def test_references_forwards_seed_batch_and_transport(self) -> None:
+        with (
+            patch.object(
+                openalex,
+                "_resolve_work",
+                return_value={"referenced_works": ["https://openalex.org/W1"]},
+            ) as resolve,
+            patch.object(openalex, "_resolve_works", return_value=[]) as batch,
+        ):
+            records, complete = openalex.references(
+                "doi",
+                "10.1/x",
+                limit=2,
+                transport="curl",
+            )
+        assert records == []
+        assert not complete
+        resolve.assert_called_once_with(
+            "doi",
+            "10.1/x",
+            extra_select="referenced_works",
+            transport="curl",
+        )
+        batch.assert_called_once_with(["W1"], transport="curl")
+
+    def test_work_id_tail_handles_multiple_slashes(self) -> None:
+        assert openalex._work_id_tail("https://openalex.org/works/W123") == "W123"
+
+    def test_paginate_works_default_transport_is_auto(self) -> None:
+        with patch.object(
+            openalex,
+            "_get",
+            return_value={"meta": {"count": 0}, "results": []},
+        ) as get:
+            openalex._paginate_works({}, limit=None)
+        assert get.call_args.kwargs == {"transport": "auto"}
+
+    def test_public_default_transports_are_forwarded(self) -> None:
+        page = MagicMock(entries=[], complete=True)
+        with patch.object(
+            openalex,
+            "_paginate_works",
+            return_value=(page, 0),
+        ) as paginate_mock:
+            openalex.search(
+                "q",
+                limit=None,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
+            )
+        assert paginate_mock.call_args.kwargs == {"limit": None, "transport": "auto"}
+        with (
+            patch.object(
+                openalex,
+                "_resolve_work",
+                return_value={"id": "https://openalex.org/W1"},
+            ) as resolve,
+            patch.object(
+                openalex,
+                "_paginate_works",
+                return_value=(page, 0),
+            ) as paginate_mock,
+        ):
+            openalex.citations("doi", "10.1/x", limit=None)
+        resolve.assert_called_once_with(
+            "doi",
+            "10.1/x",
+            extra_select="id",
+            transport="auto",
+        )
+        assert paginate_mock.call_args.kwargs["transport"] == "auto"
+        with (
+            patch.object(
+                openalex,
+                "_resolve_work",
+                return_value={"referenced_works": []},
+            ) as resolve,
+            patch.object(openalex, "_resolve_works", return_value=[]) as batch,
+        ):
+            assert openalex.references("doi", "10.1/x", limit=None) == ([], True)
+        resolve.assert_called_once_with(
+            "doi",
+            "10.1/x",
+            extra_select="referenced_works",
+            transport="auto",
+        )
+        batch.assert_called_once_with([], transport="auto")
+
+    def test_references_exact_limit_is_complete(self) -> None:
+        with (
+            patch.object(
+                openalex,
+                "_resolve_work",
+                return_value={"referenced_works": ["W1"]},
+            ),
+            patch.object(
+                openalex,
+                "_resolve_works",
+                return_value=[openalex._work_to_record({"title": "x"})],
+            ),
+        ):
+            records, complete = openalex.references("doi", "10.1/x", limit=1)
+        assert len(records) == 1
+        assert complete
+
+    def test_work_to_record_preserves_http_doi_prefixes(self) -> None:
+        assert (
+            openalex._work_to_record({"doi": "http://doi.org/10.1/a"}).doi == "10.1/a"
+        )
+        assert (
+            openalex._work_to_record({"doi": "https://dx.doi.org/10.1/b"}).doi
+            == "10.1/b"
+        )
+        assert (
+            openalex._work_to_record({"doi": "http://dx.doi.org/10.1/c"}).doi
+            == "10.1/c"
+        )
+
+    def test_work_to_record_skips_non_string_arxiv_id(self) -> None:
+        assert openalex._work_to_record({"ids": {"arxiv": 123}}).arxiv_id is None
+
+    def test_work_to_record_preserves_empty_optional_fields(self) -> None:
+        rec = openalex._work_to_record(
+            {"doi": "", "ids": {"arxiv": ""}, "open_access": {"oa_url": ""}},
+        )
+        assert (rec.doi, rec.arxiv_id, rec.open_access_pdf) == (None, None, None)
 
 
 if __name__ == "__main__":

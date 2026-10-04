@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import Mock
 
+import os
 import threading
 import time
 
-from wesearch.profile import Profile, ProfileStore, parse_set_cookie
+import pytest
 
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from wesearch import profile
+from wesearch.profile import (
+    Profile,
+    ProfileStore,
+    parse_set_cookie,
+    parsedate_to_datetime_or_none,
+)
 
 
 def _store(tmp_path: Path, *, ttl_sec: float = 3600.0) -> ProfileStore:
@@ -25,6 +32,14 @@ def _loaded(store: ProfileStore, ip: str, domain: str) -> Profile:
 
 
 class TestProfileRoundTrip:
+    def test_default_base_path_uses_wesearch_namespace(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(profile, "data_dir", lambda: tmp_path)
+        assert ProfileStore()._base == tmp_path / "rekursiv-ai" / "wesearch"
+
     def test_save_then_load_returns_equal_profile(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
         p = Profile(ua="UA/1.0", cookies={"GSP": "abc", "NID": "xyz"})
@@ -81,6 +96,12 @@ class TestPathKeyCollision:
         b = store._path("1.1.1.1:", ":1")
         assert a != b, f"distinct keys collided to one path: {a.name}"
 
+    def test_path_percent_encodes_both_parts(self, tmp_path: Path) -> None:
+        assert _store(tmp_path)._path("2001:db8::1", "a/b").name == (
+            "2001%3Adb8%3A%3A1|a%2Fb.json"
+        )
+        assert _store(tmp_path)._path("a/b", "x.com").name == "a%2Fb|x.com.json"
+
     def test_ipv6_egress_and_domain_roundtrip(self, tmp_path: Path) -> None:
         # A v6 egress + v6 domain must save and load back to the same profile.
         store = _store(tmp_path)
@@ -93,10 +114,17 @@ class TestPathKeyCollision:
 class TestCookieMerge:
     def test_update_cookies_merges_preserving_prior(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save("1.2.3.4", "x.com", Profile(ua="u", cookies={"a": "1"}))
+        created = time.time()
+        store.save(
+            "1.2.3.4",
+            "x.com",
+            Profile(ua="u", cookies={"a": "1"}, created=created),
+        )
         store.update_cookies("1.2.3.4", "x.com", {"b": "2"})
         got = store.load("1.2.3.4", "x.com")
         assert got is not None
+        assert got.ua == "u"
+        assert got.created == created
         assert got.cookies == {"a": "1", "b": "2"}
 
     def test_update_cookies_overwrites_same_name(self, tmp_path: Path) -> None:
@@ -119,6 +147,18 @@ class TestCorruptFileResilience:
     Reads treat it as absent (self-healing on the next save), and writes are crash-
     atomic.
     """
+
+    def test_decode_drops_non_string_cookie_values(self) -> None:
+        raw = b'{"ua": "u", "cookies": {"a": 1}, "created": 1}'
+        assert profile._try_decode(raw) == Profile(ua="u", cookies={}, created=1.0)
+
+    def test_decode_accepts_complete_profile(self) -> None:
+        raw = b'{"ua": "u", "cookies": {"a": "1"}, "created": 1}'
+        assert profile._try_decode(raw) == Profile(
+            ua="u",
+            cookies={"a": "1"},
+            created=1.0,
+        )
 
     def test_load_truncated_json_returns_none(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
@@ -160,6 +200,36 @@ class TestCorruptFileResilience:
         siblings = list(tmp_path.glob("*.json*"))
         assert all(s.suffix == ".json" for s in siblings), siblings
 
+    def test_write_creates_nested_parent_and_private_file(self, tmp_path: Path) -> None:
+        base = tmp_path / "nested" / "profiles"
+        store = _store(base)
+        real_open = os.open
+        open_mock = Mock(wraps=real_open)
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr("wesearch.profile.os.open", open_mock)
+        try:
+            store.save("1.2.3.4", "x.com", Profile(ua="u"))
+        finally:
+            monkeypatch.undo()
+        path = store._path("1.2.3.4", "x.com")
+        assert path.parent == base
+        assert path.stat().st_mode & 0o777 == 0o600
+        _, flags, mode = open_mock.call_args.args
+        assert flags == os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC
+        assert mode == 0o600
+
+    def test_read_uses_close_on_exec(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        store.save("1.2.3.4", "x.com", Profile(ua="u"))
+        open_mock = Mock(wraps=os.open)
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr("wesearch.profile.os.open", open_mock)
+        try:
+            store.load("1.2.3.4", "x.com")
+        finally:
+            monkeypatch.undo()
+        assert open_mock.call_args.args[1] == os.O_RDONLY | os.O_CLOEXEC
+
 
 class TestExpiresDeletion:
     def test_expires_in_past_is_a_deletion(self) -> None:
@@ -171,8 +241,82 @@ class TestExpiresDeletion:
         got = parse_set_cookie("SID=x; Expires=Wed, 09 Jun 2099 10:18:14 GMT; Path=/")
         assert got == {"SID": "x"}
 
+    def test_expires_at_now_is_deleted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = datetime(2025, 1, 1, tzinfo=UTC)
+
+        class Clock:
+            @classmethod
+            def now(cls, tz: object) -> datetime:
+                assert tz is UTC
+                return now
+
+        monkeypatch.setattr(profile, "datetime", Clock)
+        assert parse_set_cookie("SID=x; Expires=Wed, 01 Jan 2025 00:00:00 GMT") == {}
+
+    def test_cookie_attributes_process_before_later_cookies(self) -> None:
+        assert parse_set_cookie("malformed\na=1; Max-Age=0\nb=2") == {"b": "2"}
+
+    def test_cookie_values_keep_equals_and_max_age_one(self) -> None:
+        assert parse_set_cookie("a=x=y; Max-Age=1") == {"a": "x=y"}
+
+    def test_cookie_malformed_expiry_is_not_deletion(self) -> None:
+        assert parse_set_cookie("a=1; Max-Age=wat") == {"a": "1"}
+
+    def test_malformed_max_age_does_not_hide_later_expiry(self) -> None:
+        assert not profile._is_deletion(
+            ["Max-Age=wat=bad", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"],
+        )
+
+    def test_expires_value_is_split_at_its_first_equals(self) -> None:
+        assert profile._is_deletion(["Expires==Thu, 01 Jan 1970 00:00:00 GMT"])
+
+    def test_empty_cookie_name_does_not_stop_later_cookie(self) -> None:
+        assert parse_set_cookie("=ignored\nb=2") == {"b": "2"}
+
+
+class TestParsedate:
+    def test_naive_date_is_interpreted_as_utc(self) -> None:
+        got = parsedate_to_datetime_or_none("Wed, 09 Jun 2099 10:18:14")
+        assert got is not None
+        assert got.tzinfo is UTC
+
+    def test_aware_date_preserves_its_offset(self) -> None:
+        got = parsedate_to_datetime_or_none("Wed, 09 Jun 2099 10:18:14 +0200")
+        assert got is not None
+        assert got.utcoffset() == timedelta(hours=2)
+
+    def test_malformed_date_is_none(self) -> None:
+        assert parsedate_to_datetime_or_none("not a date") is None
+
 
 class TestTtlEviction:
+    def test_exact_ttl_boundary_is_still_live(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = _store(tmp_path, ttl_sec=10.0)
+        store.save("1.2.3.4", "x.com", Profile(ua="u", created=100.0))
+        monkeypatch.setattr("wesearch.profile.time.time", lambda: 110.0)
+        assert store.load("1.2.3.4", "x.com") is not None
+
+    def test_expired_profile_unlink_allows_missing_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = _store(tmp_path, ttl_sec=10.0)
+        store.save("1.2.3.4", "x.com", Profile(ua="old", created=0.0))
+
+        def ignore_unlink(**_kwargs: object) -> None:
+            del _kwargs
+
+        unlink_mock = Mock(side_effect=ignore_unlink)
+        monkeypatch.setattr(Path, "unlink", unlink_mock)
+        monkeypatch.setattr("wesearch.profile.time.time", lambda: 100.0)
+        assert store.load("1.2.3.4", "x.com") is None
+        assert unlink_mock.call_args.kwargs["missing_ok"] is True
+
     def test_expired_profile_file_unlinked_on_load(self, tmp_path: Path) -> None:
         store = _store(tmp_path, ttl_sec=10.0)
         stale = Profile(ua="old", cookies={}, created=time.time() - 100.0)

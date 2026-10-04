@@ -499,24 +499,23 @@ class TokenBucketRateLimiter:
     def _reserve(self) -> float:
         """Spend one token; return seconds to wait for it to be earned."""
         now = self._clock.time()
-        wait = 0.0
+        wait: list[float] = []
 
         def update(state: tuple[float, float] | None) -> tuple[float, float]:
-            nonlocal wait
             tokens, updated = state if state is not None else (self._capacity, now)
             tokens = min(
                 self._capacity,
                 tokens + (now - updated) * self._refill_per_sec,
             )
-            wait = max(0.0, (1.0 - tokens) / self._refill_per_sec)
+            wait.append(max(0.0, (1.0 - tokens) / self._refill_per_sec))
             # ``now + wait`` is monotonic non-decreasing even when ``now`` is a
             # stale early read (see the method docstring), so ``updated`` never
             # regresses and the budget cannot be exceeded.
-            tokens += wait * self._refill_per_sec - 1.0
-            return tokens, now + wait
+            tokens += wait[0] * self._refill_per_sec - 1.0
+            return tokens, now + wait[0]
 
         self._store.transact(update)
-        return wait
+        return wait[0]
 
 
 class CooldownGate:
@@ -560,15 +559,14 @@ class CooldownGate:
           wait: Seconds until the shared deadline expires (>=0).
 
         """
-        until = 0.0
+        until: list[float] = []
 
         def read(state: tuple[float, float] | None) -> tuple[float, float]:
-            nonlocal until
-            until = state[0] if state is not None else 0.0
-            return state if state is not None else (0.0, 0.0)
+            until.append(state[0] if state is not None else 0.0)
+            return state or (0.0, 0.0)
 
         self._store.transact(read)
-        return max(0.0, until - self._clock.time())
+        return max(0.0, until[0] - self._clock.time())
 
     def trigger(self, backoff_sec: float) -> None:
         """Open (or extend) the shared cooldown to ``now + backoff_sec``.
@@ -731,7 +729,7 @@ def clear_domain_cooldowns(domain: str, *, state_dir: Path | None = None) -> int
         and path.name.endswith("_cooldown.lock")
     ]
     for path in paths:
-        CooldownGate(store=FileStore(path), clock=SystemClock(source=time.time)).clear()
+        CooldownGate(store=FileStore(path)).clear()
     return len(paths)
 
 

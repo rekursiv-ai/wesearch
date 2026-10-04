@@ -76,7 +76,6 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
     for prefix in doi_prefixes:
         if lower.startswith(prefix):
             s = s[len(prefix) :]
-            lower = s.lower()
             forced = "doi"
             break
     if forced is None:

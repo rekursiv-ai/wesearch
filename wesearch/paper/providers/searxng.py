@@ -82,7 +82,10 @@ def search(
         records = [r for r in records if _year_in_range(r.year, year_from, year_to)]
     if open_access_only:
         records = [r for r in records if r.open_access_pdf]
-    capped = records if limit is None else records[:limit]
+    if limit is None:
+        capped = records
+    else:
+        capped = records[:limit]
     return capped, len(capped), len(capped) == len(hits)
 
 

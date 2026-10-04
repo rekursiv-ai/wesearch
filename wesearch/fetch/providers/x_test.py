@@ -42,6 +42,25 @@ class TestFetch:
         assert body == b"# tweet md"
         assert seen["url"] == "https://x.com/user"
 
+    def test_forwards_policy_to_proxy(self) -> None:
+        policy = PolicyParams()
+        seen: list[object] = []
+
+        def fake_proxy(url: str, *, policy: object) -> bytes:
+            seen.extend((url, policy))
+            return b"ok"
+
+        with patch.object(x, "fetch_reader_proxy", fake_proxy):
+            assert x.fetch_x("https://twitter.com/a", policy=policy) == b"ok"
+        assert seen == ["https://twitter.com/a", policy]
+
+    @pytest.mark.parametrize(
+        "url",
+        ["x.com", "https://", "https://x.com.evil", "not-a-url"],
+    )
+    def test_rejects_host_without_exact_domain(self, url: str) -> None:
+        assert not x.matches(url)
+
 
 if __name__ == "__main__":
     from wesearch.lib.testing.main import test_main
