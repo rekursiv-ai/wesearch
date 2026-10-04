@@ -268,7 +268,7 @@ def _format_rss(body: bytes) -> str:
         return _format_atom(root).rstrip()
     channel = root.find("channel") if _local_name(root.tag) == "rss" else root
     if channel is None:
-        return body.decode()
+        return body.decode(errors="replace")
     lines: list[str] = []
     feed_title = (_child_text(channel, "title") or "").strip()
     if feed_title:

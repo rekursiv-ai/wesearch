@@ -404,7 +404,7 @@ def _registrable_domain(host: str) -> str:
     """Return the eTLD+1 of a host (``a.b.example.co.uk`` -> ``example.co.uk``)."""
     labels = host.split(".")
     tail = labels[-2:]
-    if len(labels[-1]) == 2 and len(labels[-2]) <= 3:
+    if len(labels[-1]) == 2 and len(labels) > 1 and len(labels[-2]) <= 3:
         return ".".join(labels[-3:])
     return ".".join(tail)
 
