@@ -79,6 +79,8 @@ class TestRegistrableDomain:
 
     def test_single_label_unchanged(self) -> None:
         assert _registrable_domain("localhost") == "localhost"
+        # Two letters, like a ccTLD, with no second-level label to look at.
+        assert _registrable_domain("db") == "db"
 
     def test_cc_second_level_tld_keeps_three_labels(self) -> None:
         assert _registrable_domain("a.example.co.uk") == "example.co.uk"

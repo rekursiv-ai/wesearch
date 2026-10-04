@@ -127,6 +127,12 @@ All notable wesearch changes are documented here. This project follows
 - `drive_chrome` passes `--password-store=basic`, so headless Chrome no
   longer hangs on a locked desktop keyring, and it skips a snap-packaged
   Chromium, whose confinement ignores the throwaway profile.
+- Fused paper search folds case fully when it matches records by title,
+  DOI or arXiv id, so titles that differ only as `ß` and `ss`, or by a
+  ligature such as `ﬁ`, merge into one record.
+- An OpenAlex search or citation listing with `limit=0` returns no
+  records instead of failing with OpenAlex's HTTP 400, so a fused search
+  no longer reports OpenAlex as incomplete.
 
 ### Removed
 
