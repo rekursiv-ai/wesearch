@@ -15,7 +15,6 @@ from wesearch.fetch.testing import (
     lower_headers,
     zstd_compress,
 )
-from wesearch.lib.custom_json import DictCodec
 
 
 if TYPE_CHECKING:
@@ -29,11 +28,11 @@ def test_lower_headers_normalizes_keys_and_values() -> None:
     }
 
 
-def test_lower_headers_uses_string_codec() -> None:
+def test_lower_headers_uses_a_typed_read() -> None:
     headers = object()
-    with patch.object(DictCodec, "coerce", return_value={"X": "Y"}) as coerce:
+    with patch.object(testing, "convert", return_value={"X": "Y"}) as convert:
         assert lower_headers({"headers": headers}) == {"x": "Y"}
-    coerce.assert_called_once_with(headers, str)
+    convert.assert_called_once_with(headers, dict[str, str])
 
 
 def test_stub_cookies_replace_same_name_and_keep_other_names() -> None:

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import re
 import time
 
-from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
+from wesearch.lib.custom_json import convert_or_none
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
 from wesearch.paper.search import search
@@ -112,6 +112,21 @@ def _identity_of(doi: str) -> set[str]:
     return keys
 
 
+def _text(value: object) -> str:
+    """Return ``value`` when it is a string, else ``""``."""
+    return convert_or_none(value, str) or ""
+
+
+def _object(value: object) -> dict[str, object]:
+    """Return ``value`` when it is a JSON object, else ``{}``."""
+    return convert_or_none(value, dict[str, object]) or {}
+
+
+def _array(value: object) -> list[object]:
+    """Return ``value`` when it is a JSON array, else ``[]``."""
+    return convert_or_none(value, list[object]) or []
+
+
 def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
     """MAG id -> DOI (``""`` when absent) from a raw S2 search page."""
     for _attempt in range(attempts):
@@ -126,11 +141,11 @@ def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
     else:
         raise PaperError(f"Semantic Scholar unavailable for {query!r}")
     out: dict[str, str] = {}
-    for row in ListCodec.coerce(body.get("data")):
-        ids = DictCodec.coerce(DictCodec.coerce(row).get("externalIds"))
-        mag = StrCodec.coerce(ids.get("MAG"))
+    for row in _array(body.get("data")):
+        ids = _object(_object(row).get("externalIds"))
+        mag = _text(ids.get("MAG"))
         if mag:
-            out[mag] = StrCodec.coerce(ids.get("DOI"))
+            out[mag] = _text(ids.get("DOI"))
     return out
 
 
@@ -146,11 +161,11 @@ def _raw_mag_openalex(query: str) -> dict[str, str]:
             "page": 1,
         },
     )
-    for work in ListCodec.coerce(body.get("results")):
-        work_obj = DictCodec.coerce(work)
-        mag = StrCodec.coerce(DictCodec.coerce(work_obj.get("ids")).get("mag"))
+    for work in _array(body.get("results")):
+        work_obj = _object(work)
+        mag = _text(_object(work_obj.get("ids")).get("mag"))
         if mag:
-            doi = StrCodec.coerce(work_obj.get("doi"))
+            doi = _text(work_obj.get("doi"))
             out[mag.rpartition("/")[2]] = doi.rpartition("doi.org/")[2] or doi
     return out
 

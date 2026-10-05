@@ -357,9 +357,8 @@ def _append_rss_item(item: Element[str], lines: list[str]) -> None:
     if link:
         lines.append(link)
     # The first cluster entry duplicates the item title; siblings follow.
-    # pragma: no mutate start -- Empty descriptions and non-matching text parse identically.
-    cluster = _parse_rss_cluster(_child_text(item, "description") or "")
-    # pragma: no mutate end
+    description = _child_text(item, "description")
+    cluster = _parse_rss_cluster(description) if description else []
     for sibling_title, sibling_link, sibling_source in cluster[1:]:
         suffix = f" -- {sibling_source}" if sibling_source else ""
         lines.append(f"- [{sibling_title}]({sibling_link}){suffix}")

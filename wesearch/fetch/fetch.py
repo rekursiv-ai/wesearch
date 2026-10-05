@@ -939,7 +939,7 @@ def _fetch_with_identity(
         if profile is None:
             raise  # First contact burned: no known identity to discard or retry.
         if egress is None:  # A profile only loads once egress resolved.
-            raise ValueError from None
+            raise ValueError("Expected egress is not None.") from None
         store.discard(egress, domain)
         close_curl_session(egress, domain, request.session.impersonate)
         # The burn may be a VPN rotation: re-resolve live before the fresh retry.
@@ -1022,7 +1022,7 @@ def _send_as(
         seeded_cookies = {**jar, **(caller_cookies or {})}
     body = request.send(
         headers=seeded_headers,
-        cookies=seeded_cookies,
+        cookies=seeded_cookies or None,
         raw_headers=False,
         on_response=capture,
         curl=curl,

@@ -16,7 +16,6 @@ else:
 __all__ = ["extract_markdownify"]
 
 
-# pragma: no mutate start -- ``url`` is discarded, so its default is inert.
 def extract_markdownify(html: str, *, url: str = "") -> str:
     """Convert an HTML document to Markdown, converting every element.
 
@@ -35,7 +34,6 @@ def extract_markdownify(html: str, *, url: str = "") -> str:
       text: Markdown text; empty when the document has no content.
 
     """
-    # pragma: no mutate end
     del url
     # Called bare, deliberately. ``strip=["script", "style"]`` looks like the
     # way to drop a page's CSS and JS and does the opposite: ``strip`` removes a

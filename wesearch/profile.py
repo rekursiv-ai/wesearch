@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from urllib.parse import quote
 
 import fcntl
@@ -30,7 +30,7 @@ import os
 import threading
 import time
 
-from wesearch.lib.custom_json import DictCodec, FloatCodec, StrCodec, loads
+from wesearch.lib.custom_json import convert, parse
 from wesearch.lib.userdirs import data_dir
 
 
@@ -117,11 +117,25 @@ def _encode(profile: Profile) -> bytes:
 def _try_decode(raw: bytes) -> Profile | None:
     """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
     try:
-        obj = DictCodec.coerce(loads(raw))
+        obj = parse(raw, dict[str, object])
+        ua = obj.get("ua")
+        created = obj.get("created")
+        if not isinstance(ua, str) or not isinstance(created, (int, float)):
+            return None
+        raw_cookies = obj.get("cookies")
+        cookies = (
+            {
+                key: value
+                for key, value in cast(dict[object, object], raw_cookies).items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(raw_cookies, dict)
+            else {}
+        )
         return Profile(
-            ua=StrCodec.coerce(obj.get("ua")),
-            cookies=DictCodec.coerce(obj.get("cookies"), str),
-            created=FloatCodec.coerce(obj.get("created")),
+            ua=ua,
+            cookies=convert(cookies, dict[str, str]),
+            created=float(created),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from wesearch.lib.custom_json import IntCodec, MutableJSON, MutableJSONValue
+from wesearch.lib.custom_json import MutableJSON, MutableJSONValue, convert
 from wesearch.paper.errors import BackendError
 from wesearch.paper.paginate import Cursor, _cap, paginate
 
@@ -101,7 +101,7 @@ class TestPaginate:
         page = paginate(
             cursor,
             limit=None,
-            keep=lambda r: IntCodec.coerce(r["n"], 0) % 2 == 0,
+            keep=lambda r: convert(r["n"], int) % 2 == 0,
         )
         # Only one page fetched (limit=None), all-even kept, but complete
         # reflects the cursor (full page -> more), not the filtered count.

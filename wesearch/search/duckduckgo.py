@@ -201,7 +201,7 @@ def _duckduckgo_parse(
     results: list[SearchResult] = []
     for container in soup.select("div#links > div.web-result"):
         link = container.select_one(
-            "h2 a[href]",  # pragma: no mutate -- HTML CSS selectors ignore case.
+            "h2 a[href]",
         )
         if link is None:
             continue

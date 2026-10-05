@@ -44,7 +44,7 @@ from wesearch.fetch.transport.zendriver import (
     _Flags,
     _navigate,
 )
-from wesearch.lib.custom_json import DictCodec, ListCodec, StrCodec
+from wesearch.lib.custom_json import convert
 from wesearch.lib.userdirs import data_dir
 
 
@@ -55,6 +55,19 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+@pytest.fixture(autouse=True)
+def _stub_browser_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep fake-browser tests independent of installed Chrome binaries."""
+
+    # Never executed: every test fakes the launch, so nothing needs to exist here.
+    def find_fake_browser(browser: object) -> str:
+        del browser
+        return "/fake/chrome"
+
+    # A string target: `zendriver` names this package's transport module here.
+    monkeypatch.setattr("zendriver.core.config.find_executable", find_fake_browser)
 
 
 # A fake profile dir; the browser is mocked in every test, so it is never
@@ -207,19 +220,23 @@ class _FakeTab:
         raw = next(command, None) if isinstance(command, GeneratorType) else None
         if not isinstance(raw, dict):
             return
-        # ``DictCodec.coerce`` rather than a bare ``.get`` ladder: the CDP verbs are
+        # ``read`` rather than a bare ``.get`` ladder: the CDP verbs are
         # unstubbed, so their wire dict arrives as ``dict[Unknown, Unknown]``
         # and every read off it is partially unknown.
-        payload = DictCodec.coerce(cast(object, raw))
+        payload = convert(cast(object, raw), dict[str, object])
         # Kept: a generator is single-use, so a test that re-reads ``commands``
         # would find every one exhausted by this very inspection.
         self.wire_commands.append(payload)
-        request_id = StrCodec.coerce(
-            DictCodec.coerce(payload.get("params")).get("requestId"),
+        request_id = convert(
+            convert(payload.get("params"), dict[str, object], default={}).get(
+                "requestId",
+            ),
+            str,
+            default="",
         )
         if not request_id:
             return
-        method = StrCodec.coerce(payload.get("method"))
+        method = convert(payload.get("method"), str, default="")
         if method == "Fetch.continueRequest":
             self.continued_requests.append(request_id)
         elif method == "Fetch.failRequest":
@@ -1281,15 +1298,25 @@ def _continued_headers(tab: _FakeTab) -> dict[str, str]:
         (
             c
             for c in tab.wire_commands
-            if StrCodec.coerce(c.get("method")) == "Fetch.continueRequest"
+            if convert(c.get("method"), str, default="") == "Fetch.continueRequest"
         ),
         None,
     )
     assert payload is not None, "the request was never continued"
-    entries = ListCodec.coerce(DictCodec.coerce(payload.get("params")).get("headers"))
+    entries = convert(
+        convert(payload.get("params"), dict[str, object], default={}).get("headers"),
+        list[object],
+        default=[],
+    )
     return {
-        StrCodec.coerce(DictCodec.coerce(entry).get("name")).lower(): StrCodec.coerce(
-            DictCodec.coerce(entry).get("value"),
+        convert(
+            convert(entry, dict[str, object]).get("name"),
+            str,
+            default="",
+        ).lower(): convert(
+            convert(entry, dict[str, object]).get("value"),
+            str,
+            default="",
         )
         for entry in entries
     }
@@ -1307,12 +1334,12 @@ def _continue_override(tab: _FakeTab) -> dict[str, str] | None:
         (
             c
             for c in tab.wire_commands
-            if StrCodec.coerce(c.get("method")) == "Fetch.continueRequest"
+            if convert(c.get("method"), str, default="") == "Fetch.continueRequest"
         ),
         None,
     )
     assert payload is not None, "the request was never continued"
-    params = DictCodec.coerce(payload.get("params"))
+    params = convert(payload.get("params"), dict[str, object], default={})
     if "headers" not in params:
         return None
     return _continued_headers(tab)
@@ -1324,14 +1351,19 @@ def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
         (
             c
             for c in tab.wire_commands
-            if StrCodec.coerce(c.get("method")) == "Network.setExtraHTTPHeaders"
+            if convert(c.get("method"), str, default="")
+            == "Network.setExtraHTTPHeaders"
         ),
         None,
     )
     if payload is None:
         return {}
-    installed = DictCodec.coerce(DictCodec.coerce(payload.get("params")).get("headers"))
-    return {name.lower(): StrCodec.coerce(value) for name, value in installed.items()}
+    installed = convert(
+        convert(payload.get("params"), dict[str, object], default={}).get("headers"),
+        dict[str, object],
+        default={},
+    )
+    return {name.lower(): convert(value, str) for name, value in installed.items()}
 
 
 # The genuine CDP dataclass, not a look-alike: the guard filters on ``isinstance``, so a
@@ -1555,13 +1587,18 @@ class TestBrowserHonorsTrustPerHop:
         payload = next(
             c
             for c in tab.wire_commands
-            if StrCodec.coerce(c.get("method")) == "Fetch.continueRequest"
+            if convert(c.get("method"), str, default="") == "Fetch.continueRequest"
         )
-        entries = ListCodec.coerce(
-            DictCodec.coerce(payload.get("params")).get("headers"),
+        entries = convert(
+            convert(payload.get("params"), dict[str, object], default={}).get(
+                "headers",
+            ),
+            list[object],
+            default=[],
         )
         names = [
-            StrCodec.coerce(DictCodec.coerce(e).get("name")).lower() for e in entries
+            convert(convert(e, dict[str, object]).get("name"), str, default="").lower()
+            for e in entries
         ]
         assert names.count("cookie") == 1, f"duplicate Cookie row: {names}"
         # The caller's value is the one that must survive: a per-call cookie is
@@ -1812,17 +1849,25 @@ class TestBrowserHonorsTrustPerHop:
             (
                 c
                 for c in tab.wire_commands
-                if StrCodec.coerce(c.get("method")) == "Fetch.enable"
+                if convert(c.get("method"), str, default="") == "Fetch.enable"
             ),
             None,
         )
         assert enable is not None
-        patterns = ListCodec.coerce(
-            DictCodec.coerce(enable.get("params")).get("patterns"),
+        patterns = convert(
+            convert(enable.get("params"), dict[str, object], default={}).get(
+                "patterns",
+            ),
+            list[object],
+            default=[],
         )
-        shapes = [DictCodec.coerce(p) for p in patterns]
-        assert [StrCodec.coerce(s.get("resourceType")) for s in shapes] == ["Document"]
-        assert [StrCodec.coerce(s.get("requestStage")) for s in shapes] == ["Request"]
+        shapes = [convert(p, dict[str, object]) for p in patterns]
+        assert [convert(s.get("resourceType"), str, default="") for s in shapes] == [
+            "Document",
+        ]
+        assert [convert(s.get("requestStage"), str, default="") for s in shapes] == [
+            "Request",
+        ]
 
 
 def test_navigate_seeds_request_identity(

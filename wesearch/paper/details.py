@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import functools
 
-from wesearch.lib.custom_json import MutableJSON, decode_or_none
+from wesearch.lib.custom_json import MutableJSON, convert
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.ids import s2_wire_id
@@ -233,5 +233,7 @@ def _citation_keep(
     if year_from is None:
         return True
     inner = cast(MutableJSON, entry.get("citingPaper") or {})
-    year = decode_or_none(int, inner.get("year"))
-    return year is not None and year >= year_from
+    raw_year = inner.get("year")
+    if raw_year is None or isinstance(raw_year, bool):
+        return False
+    return convert(inner.get("year"), int) >= year_from

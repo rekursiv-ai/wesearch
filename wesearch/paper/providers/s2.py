@@ -28,7 +28,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import DictCodec, IntCodec, ListCodec, MutableJSON
+from wesearch.lib.custom_json import MutableJSON, convert_or_none
 from wesearch.paper import paginate as paper_paginate
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
@@ -301,7 +301,7 @@ def search_paginate(
         nonlocal total
         page_params = {**params, "offset": offset, "limit": size}
         body = get("/paper/search", page_params, transport=transport)
-        total = IntCodec.coerce(body.get("total"))
+        total = _count(body.get("total"))
         return body
 
     cursor = Cursor(
@@ -338,10 +338,10 @@ def paper_record_from(
       record: Populated paper record.
 
     """
-    ids = DictCodec.coerce(data.get("externalIds"))
-    authors_raw = ListCodec.mappings(data.get("authors"))
+    ids = _object(data.get("externalIds"))
+    authors_raw = _objects(data.get("authors"))
     authors = tuple(str(a["name"]) for a in authors_raw if a.get("name"))
-    oa = DictCodec.coerce(data.get("openAccessPdf"))
+    oa = _object(data.get("openAccessPdf"))
     doi = ids.get("DOI")
     arxiv = ids.get("ArXiv")
     return PaperRecord(
@@ -371,19 +371,19 @@ def author_record_from(data: MutableJSON) -> AuthorRecord:
 
     """
     author_id = str(data.get("authorId") or "")
-    aliases_raw = ListCodec.coerce(data.get("aliases"))
+    aliases_raw = _array(data.get("aliases"))
     aliases = tuple(str(a) for a in aliases_raw if a)
 
     # Affiliations can come as a list of strings (common) or a list of dicts
     # with ``name``/``affiliation`` keys (rarer). Handle both.
-    aff_raw = ListCodec.coerce(data.get("affiliations"))
+    aff_raw = _array(data.get("affiliations"))
     affiliations: list[str] = []
     for a in aff_raw:
         if isinstance(a, str):
             if a.strip():
                 affiliations.append(a.strip())
         else:
-            a_dict = DictCodec.coerce(a)
+            a_dict = _object(a)
             name = a_dict.get("name") or a_dict.get("affiliation") or ""
             if isinstance(name, str) and name.strip():
                 affiliations.append(name.strip())
@@ -442,7 +442,7 @@ def search_total(data: MutableJSON) -> int:
       result: Total number of results in the S2 response, or 0 if missing.
 
     """
-    return IntCodec.coerce(data.get("total"))
+    return _count(data.get("total"))
 
 
 def _headers() -> dict[str, str]:
@@ -536,16 +536,16 @@ def _next_offset_advance(body: MutableJSON, offset: int, size: int) -> int | Non
     """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
     del offset, size
     nxt = body.get("next")
-    rows = ListCodec.coerce(body.get("data"))
+    rows = _array(body.get("data"))
     return nxt if isinstance(nxt, int) and rows else None
 
 
 def _search_offset_advance(body: MutableJSON, offset: int, size: int) -> int | None:
     """Return the next ``/paper/search`` offset; None at ``total`` or an empty page."""
     del size
-    rows = ListCodec.coerce(body.get("data"))
+    rows = _array(body.get("data"))
     nxt = offset + len(rows)
-    return nxt if rows and nxt < IntCodec.coerce(body.get("total")) else None
+    return nxt if rows and nxt < _count(body.get("total")) else None
 
 
 def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
@@ -556,3 +556,23 @@ def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
         raise BackendError(
             f"Semantic Scholar returned invalid JSON for {what}: {e}",
         ) from e
+
+
+def _object(value: object) -> dict[str, object]:
+    """Return ``value`` when it is a JSON object, else ``{}``."""
+    return convert_or_none(value, dict[str, object]) or {}
+
+
+def _array(value: object) -> list[object]:
+    """Return ``value`` when it is a JSON array, else ``[]``."""
+    return convert_or_none(value, list[object]) or []
+
+
+def _objects(value: object) -> list[dict[str, object]]:
+    """Return the nonempty JSON objects of an array, dropping other elements."""
+    return [obj for item in _array(value) if (obj := _object(item))]
+
+
+def _count(value: object) -> int:
+    """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
+    return convert_or_none(value, int, strict=False) or 0

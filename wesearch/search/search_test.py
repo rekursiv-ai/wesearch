@@ -1100,6 +1100,8 @@ class TestLiveQueryAvailabilitySkips:
 
 class TestSearchDispatchDefaults:
     def test_general_without_backend_uses_default_provider(self) -> None:
+        # Public builds default to duckduckgo; pin the default so neither build
+        # reaches the network.
         with (
             patch("wesearch.search.search.DEFAULT_SEARCH_BACKEND", "searxng"),
             patch("wesearch.search.search.searxng", return_value=[]) as provider,
