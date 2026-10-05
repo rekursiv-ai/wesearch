@@ -59,9 +59,7 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     # so an S2 rank counts for more; an OpenAlex-only paper still scores.
     # Not kwargs: both metrics measure_fusion_quality reports are invariant to
     # these -- weights only reorder a set the identity rule already fixed.
-    # pragma: no mutate start -- labels are only distinct dict keys.
     weights = ((s2_hits, "s2", 1.0), (oa_hits, "openalex", 0.7))
-    # pragma: no mutate end
 
     groups = _group_by_identity([rec for hits, _label, _w in weights for rec in hits])
     merged: dict[int, PaperRecord] = {}
@@ -76,14 +74,10 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
         for hits, label, weight in weights
         for rank, rec in zip(count(1), hits)
     ]
-    # pragma: no mutate start -- grouping and flattening have identical lengths.
     for root, (rank, rec, label, weight) in zip(groups, ranked, strict=True):
-        # pragma: no mutate end
         merged[root] = merged[root].merge(rec) if root in merged else rec
         if best_rank.setdefault((root, label), rank) == rank:
-            # pragma: no mutate start -- every root's first score has same baseline.
             score.setdefault(root, 0.0)
-            # pragma: no mutate end
             score[root] += weight / (offset + rank)
     # Stable sort by descending score over insertion-ordered roots; the S2 loop
     # runs first so a coincidental score tie keeps S2's paper first.

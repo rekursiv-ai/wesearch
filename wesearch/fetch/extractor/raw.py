@@ -6,7 +6,6 @@ from __future__ import annotations
 __all__ = ["extract_raw"]
 
 
-# pragma: no mutate start -- ``url`` is discarded, so its default is inert.
 def extract_raw(html: str, *, url: str = "") -> str:
     """Return the document unchanged.
 
@@ -19,6 +18,5 @@ def extract_raw(html: str, *, url: str = "") -> str:
       text: ``html``, verbatim.
 
     """
-    # pragma: no mutate end
     del url
     return html

@@ -27,6 +27,7 @@ from typing import Literal
 
 import functools
 import hashlib
+import inspect
 
 
 try:
@@ -81,7 +82,9 @@ def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
     """Append generated prose to a tool's docstring before the SDK reads it."""
 
     def decorate(fn: F) -> F:
-        fn.__doc__ = f"{(fn.__doc__ or '').rstrip()}\n\n{extra}\n"
+        # `getdoc` dedents: Python 3.12 keeps the indentation 3.13+ strips from
+        # __doc__, which would misalign the column-0 ``extra`` with the sections.
+        fn.__doc__ = f"{inspect.getdoc(fn) or ''}\n\n{extra}\n"
         return fn
 
     return decorate
@@ -103,6 +106,9 @@ def _surface_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
         except Exception as e:
             raise ToolError(f"{type(e).__name__}: {e}") from e
 
+    # Python 3.12 keeps a docstring's indentation (3.13 strips it), and the SDK
+    # publishes ``__doc__`` verbatim, so 3.12 clients saw ``    Args:``.
+    wrapper.__doc__ = inspect.getdoc(fn)
     return wrapper
 
 

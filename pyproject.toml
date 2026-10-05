@@ -31,6 +31,8 @@ dependencies = [
     "markdownify>=1.2.3",
     "trafilatura",
     "zendriver>=0.15.5",
+    # serialization
+    "msgspec>=0.22.0",
     # containers
     "wrapt",
     # compression (Content-Encoding decode)
@@ -277,6 +279,7 @@ extend-safe-fixes = [
     "PT018",  # Split composite assertions.
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
+    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.

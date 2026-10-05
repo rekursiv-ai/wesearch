@@ -196,9 +196,7 @@ def _fused(
     s2_total = oa_total = 0
     exhausted = True
     errors: list[str] = []
-    # pragma: no mutate start -- None and False are identical in this private flag.
     answered = False
-    # pragma: no mutate end
 
     try:
         s2_hits, s2_total, s2_complete = _s2_search(

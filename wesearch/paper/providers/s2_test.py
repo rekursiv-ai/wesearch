@@ -275,6 +275,32 @@ class TestRecordMapping:
         assert rec.affiliations == ("MILA", "UdeM")
         assert rec.h_index == 200
 
+    def test_wrong_typed_fields_take_defaults(self) -> None:
+        paper = s2.paper_record_from(
+            {
+                "title": "T",
+                "externalIds": "oops",
+                "authors": [{"name": "A"}, "stray", 3, {}],
+                "openAccessPdf": [],
+            },
+        )
+        assert paper.authors == ("A",)
+        assert paper.doi is None
+        assert paper.open_access_pdf is None
+        author = s2.author_record_from(
+            {"authorId": "1", "aliases": "x", "affiliations": ["U", 5, {"name": "M"}]},
+        )
+        assert author.aliases == ()
+        assert author.affiliations == ("U", "M")
+        assert s2.author_record_from({"affiliations": 7}).affiliations == ()
+
+    def test_wrong_typed_totals_and_rows(self) -> None:
+        assert s2.search_total({"total": "7"}) == 7
+        assert s2.search_total({"total": [1]}) == 0
+        assert s2.search_total({"total": True}) == 0
+        assert s2._search_offset_advance({"data": "x", "total": 9}, 0, 5) is None
+        assert s2._next_offset_advance({"data": {}, "next": 5}, 0, 5) is None
+
 
 type _Fetch = Callable[..., tuple[bytes, FetchSession]]
 

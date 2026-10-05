@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, cast, get_args, overload
 from urllib.parse import urlencode
@@ -27,14 +28,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import (
-    DatetimeCodec,
-    DictCodec,
-    ListCodec,
-    StrCodec,
-    decode_or_none,
-    loads,
-)
+from wesearch.lib.custom_json import convert_or_none, loads
 from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
@@ -286,22 +280,34 @@ def searxng(
         payload = loads(text)
     except json.JSONDecodeError as e:
         raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
-    items = ListCodec.coerce(DictCodec.coerce(payload).get("results"))
+    # SearXNG is an external service: a malformed body or item degrades to fewer
+    # results, never an exception.
+    body: object = payload
+    results = (
+        cast(dict[object, object], body).get("results")
+        if isinstance(body, dict)
+        else None
+    )
+    items = [
+        cast(dict[str, object], item)
+        for item in (cast(list[object], results) if isinstance(results, list) else [])
+        if isinstance(item, dict)
+    ]
     parse = category_parser(categories)
-    return [parse(DictCodec.coerce(item)) for item in items[:num_results]]
+    return [parse(item) for item in items[:num_results]]
 
 
 def _searxng_media(item: dict[str, object]) -> MediaResult:
     """Parse a ``news``/``music`` ``default.html`` item into a :class:`MediaResult`."""
     return MediaResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
-        published=DatetimeCodec.coerce(item.get("publishedDate")),
-        audio_url=StrCodec.coerce(item.get("audio_src")),
-        iframe_url=StrCodec.coerce(item.get("iframe_src")),
-        length=StrCodec.coerce(item.get("length")),
-        thumbnail_url=StrCodec.coerce(item.get("thumbnail")),
+        url=_text(item, "url"),
+        title=clean_text(_text(item, "title")),
+        snippet=clean_text(_text(item, "content")),
+        published=_published(item),
+        audio_url=_text(item, "audio_src"),
+        iframe_url=_text(item, "iframe_src"),
+        length=_text(item, "length"),
+        thumbnail_url=_text(item, "thumbnail"),
     )
 
 
@@ -309,29 +315,29 @@ def _searxng_it(
     item: dict[str, object],
 ) -> PackageResult | CodeResult | SearchResult:
     """Dispatch an ``it`` item by ``template`` to its package/code/web reader."""
-    template = StrCodec.coerce(item.get("template"))
+    template = _text(item, "template")
     if template == "packages.html":
         return PackageResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
-            snippet=clean_text(StrCodec.coerce(item.get("content"))),
-            package_name=StrCodec.coerce(item.get("package_name")),
-            version=StrCodec.coerce(item.get("version")),
-            maintainer=StrCodec.coerce(item.get("maintainer")),
-            license_name=StrCodec.coerce(item.get("license_name")),
-            homepage=StrCodec.coerce(item.get("homepage")),
-            source_code_url=StrCodec.coerce(item.get("source_code_url")),
-            popularity=StrCodec.coerce(item.get("popularity")),
-            tags=tuple(ListCodec.coerce(item.get("tags"), str)),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
+            package_name=_text(item, "package_name"),
+            version=_text(item, "version"),
+            maintainer=_text(item, "maintainer"),
+            license_name=_text(item, "license_name"),
+            homepage=_text(item, "homepage"),
+            source_code_url=_text(item, "source_code_url"),
+            popularity=_text(item, "popularity"),
+            tags=_strings(item, "tags"),
         )
     if template == "code.html":
         return CodeResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
-            snippet=clean_text(StrCodec.coerce(item.get("content"))),
-            repository=StrCodec.coerce(item.get("repository")),
-            filename=StrCodec.coerce(item.get("filename")),
-            code_language=StrCodec.coerce(item.get("code_language")),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
+            repository=_text(item, "repository"),
+            filename=_text(item, "filename"),
+            code_language=_text(item, "code_language"),
         )
     return _searxng_web(item)
 
@@ -340,30 +346,29 @@ def _searxng_files(
     item: dict[str, object],
 ) -> FileResult | TorrentResult | SearchResult:
     """Dispatch a ``files`` item by ``template`` to its file/torrent/web reader."""
-    template = StrCodec.coerce(item.get("template"))
+    template = _text(item, "template")
     if template == "torrent.html":
         return TorrentResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
-            snippet=clean_text(StrCodec.coerce(item.get("content"))),
-            magnet_url=StrCodec.coerce(item.get("magnetlink")),
-            torrent_url=StrCodec.coerce(item.get("torrentfile")),
-            seed=decode_or_none(int, item.get("seed")),
-            leech=decode_or_none(int, item.get("leech")),
-            filesize=StrCodec.coerce(item.get("filesize")),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
+            magnet_url=_text(item, "magnetlink"),
+            torrent_url=_text(item, "torrentfile"),
+            seed=_count(item.get("seed")),
+            leech=_count(item.get("leech")),
+            filesize=_text(item, "filesize"),
         )
     if template == "file.html":
         return FileResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
             snippet=clean_text(
-                StrCodec.coerce(item.get("abstract"))
-                or StrCodec.coerce(item.get("content")),
+                _text(item, "abstract") or _text(item, "content"),
             ),
-            filename=StrCodec.coerce(item.get("filename")),
-            size=StrCodec.coerce(item.get("size")),
-            mimetype=StrCodec.coerce(item.get("mimetype")),
-            author=StrCodec.coerce(item.get("author")),
+            filename=_text(item, "filename"),
+            size=_text(item, "size"),
+            mimetype=_text(item, "mimetype"),
+            author=_text(item, "author"),
         )
     return _searxng_web(item)
 
@@ -385,18 +390,18 @@ def _searxng_paper(item: dict[str, object]) -> PaperResult:
     # fabricate one.
     cites = re.match(
         r"^\s*(\d[\d,]{0,23})(?![\d,])",
-        StrCodec.coerce(item.get("comments")),
+        _text(item, "comments"),
     )
     return PaperResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
-        authors=tuple(ListCodec.coerce(item.get("authors"), str)),
-        journal=clean_text(StrCodec.coerce(item.get("journal"))),
-        doi=StrCodec.coerce(item.get("doi")),
-        pdf_url=StrCodec.coerce(item.get("pdf_url")),
-        published=DatetimeCodec.coerce(item.get("publishedDate")),
-        tags=tuple(ListCodec.coerce(item.get("tags"), str)),
+        url=_text(item, "url"),
+        title=clean_text(_text(item, "title")),
+        snippet=clean_text(_text(item, "content")),
+        authors=_strings(item, "authors"),
+        journal=clean_text(_text(item, "journal")),
+        doi=_text(item, "doi"),
+        pdf_url=_text(item, "pdf_url"),
+        published=_published(item),
+        tags=_strings(item, "tags"),
         citations=int(cites.group(1).replace(",", "")) if cites else None,
     )
 
@@ -424,16 +429,60 @@ class CategoryInfo:
 def _searxng_web(item: dict[str, object]) -> SearchResult:
     """Parse a SearXNG ``default.html`` item into a :class:`SearchResult`."""
     return SearchResult(
-        url=StrCodec.coerce(item.get("url")),
-        title=clean_text(StrCodec.coerce(item.get("title"))),
-        snippet=clean_text(StrCodec.coerce(item.get("content"))),
+        url=_text(item, "url"),
+        title=clean_text(_text(item, "title")),
+        snippet=clean_text(_text(item, "content")),
     )
+
+
+# SearXNG relays upstream engines, so a field's JSON type is not fixed: video and music
+# results carry a float ``length``. One such field must not reject the whole result.
+def _text(item: dict[str, object], key: str) -> str:
+    """Return ``item[key]`` when it is a string, else ``""``."""
+    return convert_or_none(item.get(key), str) or ""
 
 
 def _coordinate(value: object) -> float | None:
     """Return one finite map coordinate, or None when unknown."""
-    coordinate = decode_or_none(float, value)
-    return coordinate if coordinate is not None and math.isfinite(coordinate) else None
+    if type(value) not in {int, float}:
+        return None
+    coordinate = float(cast(float, value))
+    return coordinate if math.isfinite(coordinate) else None
+
+
+def _count(value: object) -> int | None:
+    """Return a JSON integer count, or None for anything else (``"2"``, ``1.9``)."""
+    return value if type(value) is int else None
+
+
+def _strings(item: dict[str, object], key: str) -> tuple[str, ...]:
+    """Return the string elements of ``item[key]``, dropping any non-string."""
+    values = item.get(key)
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        value for value in cast(list[object], values) if isinstance(value, str)
+    )
+
+
+def _string_map(value: object) -> dict[str, str]:
+    """Return the string-to-string entries of a JSON object, else ``{}``."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: entry
+        for key, entry in cast(dict[object, object], value).items()
+        if isinstance(key, str) and isinstance(entry, str)
+    }
+
+
+def _published(item: dict[str, object]) -> datetime | None:
+    """Parse ``publishedDate``, or None when absent or not ISO 8601."""
+    text = _text(item, "publishedDate")
+    try:
+        return datetime.fromisoformat(text) if text else None
+    except ValueError:
+        return None
 
 
 # One record per member of ``SearxngCategory``. The Literal in
@@ -445,41 +494,41 @@ CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
     "images": CategoryInfo(
         gloss="image URL, resolution, format, source",
         parser=lambda item: ImageResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
-            snippet=clean_text(StrCodec.coerce(item.get("content"))),
-            image_url=StrCodec.coerce(item.get("img_src")),
-            thumbnail_url=StrCodec.coerce(item.get("thumbnail_src")),
-            resolution=StrCodec.coerce(item.get("resolution")),
-            img_format=StrCodec.coerce(item.get("img_format")),
-            source=StrCodec.coerce(item.get("source")),
-            filesize=StrCodec.coerce(item.get("filesize")),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
+            image_url=_text(item, "img_src"),
+            thumbnail_url=_text(item, "thumbnail_src"),
+            resolution=_text(item, "resolution"),
+            img_format=_text(item, "img_format"),
+            source=_text(item, "source"),
+            filesize=_text(item, "filesize"),
         ),
     ),
     "videos": CategoryInfo(
         gloss="duration, view count, channel, embed URL",
         parser=lambda item: VideoResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
-            snippet=clean_text(StrCodec.coerce(item.get("content"))),
-            published=DatetimeCodec.coerce(item.get("publishedDate")),
-            iframe_url=StrCodec.coerce(item.get("iframe_src")),
-            length=StrCodec.coerce(item.get("length")),
-            thumbnail_url=StrCodec.coerce(item.get("thumbnail")),
-            views=StrCodec.coerce(item.get("views")),
-            author=StrCodec.coerce(item.get("author")),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
+            published=_published(item),
+            iframe_url=_text(item, "iframe_src"),
+            length=_text(item, "length"),
+            thumbnail_url=_text(item, "thumbnail"),
+            views=_text(item, "views"),
+            author=_text(item, "author"),
         ),
     ),
     "news": CategoryInfo(gloss="web results with publish date", parser=_searxng_media),
     "map": CategoryInfo(
         gloss="places with coordinates and structured address",
         parser=lambda item: MapResult(
-            url=StrCodec.coerce(item.get("url")),
-            title=clean_text(StrCodec.coerce(item.get("title"))),
-            snippet=clean_text(StrCodec.coerce(item.get("content"))),
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
             latitude=_coordinate(item.get("latitude")),
             longitude=_coordinate(item.get("longitude")),
-            address=MappingProxyType(DictCodec.coerce(item.get("address"), str)),
+            address=MappingProxyType(_string_map(item.get("address"))),
         ),
     ),
     "music": CategoryInfo(

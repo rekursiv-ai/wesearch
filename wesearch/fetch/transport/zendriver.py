@@ -1040,9 +1040,7 @@ async def _guard_requests(
 def _wire_url(url: str) -> str:
     """Return ``url`` as it goes on the wire: no fragment, path never empty."""
     parts = urlsplit(url)
-    # pragma: no mutate start -- ``None`` and ``""`` serialize identically here.
     return urlunsplit(parts._replace(fragment="", path=parts.path or "/"))
-    # pragma: no mutate end
 
 
 def _fail(request_id: object) -> object:

@@ -88,6 +88,20 @@ def test_media_parser_maps_and_cleans_fields() -> None:
     )
 
 
+def test_media_parser_defaults_wrong_typed_fields() -> None:
+    """SearXNG relays engines: a float ``length`` must not reject the item."""
+    result = _searxng_media(
+        {
+            "url": "u",
+            "title": 7,
+            "length": 123.5,
+            "publishedDate": 3,
+            "audio_src": None,
+        },
+    )
+    assert result == MediaResult(url="u", title="", snippet="", length="")
+
+
 def test_paper_parser_recovers_bounded_citations() -> None:
     result = _searxng_paper(
         {

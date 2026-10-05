@@ -28,7 +28,7 @@ from wesearch.fetch.transport.stdlib import (
     _widen_after_connect,
     fetch_stdlib,
 )
-from wesearch.lib.custom_json import DictCodec
+from wesearch.lib.custom_json import convert
 from wesearch.types.errors import (
     FetchError,
 )
@@ -1477,7 +1477,7 @@ def test_fetch_stdlib_redirect_budget_stops_after_one_hop() -> None:
 
 def _recorded_headers(mock_conn: Mock) -> dict[str, str]:
     """Return the typed headers mapping recorded by a mock connection."""
-    return DictCodec.coerce(mock_conn.request.call_args.kwargs["headers"], str)
+    return convert(mock_conn.request.call_args.kwargs["headers"], dict[str, str])
 
 
 if __name__ == "__main__":

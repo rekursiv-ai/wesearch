@@ -75,6 +75,23 @@ def test_raw_mag_s2_extracts_mag_and_doi() -> None:
         }
 
 
+def test_raw_mag_probes_skip_wrong_typed_rows() -> None:
+    s2_body = {
+        "data": [
+            "stray",
+            {"externalIds": "oops"},
+            {"externalIds": {"MAG": 5}},
+            {"externalIds": {"MAG": "m", "DOI": 3}},
+        ],
+    }
+    with patch.object(s2, "get", return_value=s2_body):
+        assert measure_fusion_identity._raw_mag_s2("query") == {"m": ""}
+    oa_rows: list[object] = [7, {"ids": []}, {"ids": {"mag": "9"}, "doi": 1}]
+    oa_body = {"results": oa_rows}
+    with patch.object(openalex, "_get", return_value=oa_body):
+        assert measure_fusion_identity._raw_mag_openalex("query") == {"9": ""}
+
+
 def test_raw_mag_s2_retries_paper_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 

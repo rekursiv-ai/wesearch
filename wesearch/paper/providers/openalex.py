@@ -34,14 +34,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import (
-    DictCodec,
-    IntCodec,
-    ListCodec,
-    MutableJSON,
-    StrCodec,
-    loads,
-)
+from wesearch.lib.custom_json import MutableJSON, convert_or_none, loads
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,
@@ -155,7 +148,8 @@ def references(
         extra_select="referenced_works",
         transport=transport,
     )
-    ref_urls = ListCodec.coerce(work.get("referenced_works"), str)
+    ref_values = _array(work.get("referenced_works"))
+    ref_urls = [value for value in ref_values if isinstance(value, str)]
     ids = [_work_id_tail(u) for u in ref_urls]
     if limit is None:
         capped = ids
@@ -237,7 +231,7 @@ def _resolve_work(
         {"filter": f"doi:{canonical}", "select": f"id,{extra_select}"},
         transport=transport,
     )
-    results = ListCodec.mappings(data.get("results"))
+    results = _objects(data.get("results"))
     if not results:
         raise NotFoundError(f"OpenAlex has no work for doi:{canonical}.")
     return results[0]
@@ -263,11 +257,29 @@ def _resolve_works(
     return records
 
 
+def _object(value: object) -> dict[str, object]:
+    """Return ``value`` when it is a JSON object, else ``{}``."""
+    return convert_or_none(value, dict[str, object]) or {}
+
+
+def _array(value: object) -> list[object]:
+    """Return ``value`` when it is a JSON array, else ``[]``."""
+    return convert_or_none(value, list[object]) or []
+
+
+def _objects(value: object) -> list[dict[str, object]]:
+    """Return the nonempty JSON objects of an array, dropping other elements."""
+    return [obj for item in _array(value) if (obj := _object(item))]
+
+
+def _count(value: object) -> int:
+    """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
+    return convert_or_none(value, int, strict=False) or 0
+
+
 def _work_id_tail(url_or_id: str) -> str:
     """Return the bare ``W...`` id from an OpenAlex work URL or id."""
-    return url_or_id.rsplit("/", maxsplit=1)[
-        -1
-    ]  # pragma: no mutate -- split limit is irrelevant to the final segment.
+    return url_or_id.rsplit("/", maxsplit=1)[-1]
 
 
 def _select(extra: str = "") -> str:
@@ -338,7 +350,7 @@ def _paginate_works(
             "per-page": size,
         }
         body = _get("/works", params, transport=transport)
-        total = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"))
+        total = _count(_object(body.get("meta")).get("count"))
         return body
 
     cursor = Cursor(
@@ -355,8 +367,8 @@ def _paginate_works(
 # continue, since ``len < size`` alone never fires for it.
 def _works_page_advance(body: MutableJSON, page_no: int, size: int) -> int | None:
     """Next 1-based ``/works`` page, or None at the end."""
-    rows = ListCodec.coerce(body.get("results"))
-    count = IntCodec.coerce(DictCodec.coerce(body.get("meta")).get("count"))
+    rows = _array(body.get("results"))
+    count = _count(_object(body.get("meta")).get("count"))
     seen = (page_no - 1) * size + len(rows)
     return page_no + 1 if rows and seen < count else None
 
@@ -405,14 +417,12 @@ def _get(
         backend = "OpenAlex"
         # OpenAlex signals real not-found semantically (200 + empty results);
         # an HTTP 404 here is a bad endpoint -> BackendError, not NotFound.
-        # pragma: no mutate start -- the flag is truth-tested, so False->None is inert.
         raise translate_http_error(
             e,
             backend=backend,
             rate_limit_message=rate_limit_message,
             treat_404_as_missing=False,
         ) from e
-        # pragma: no mutate end
     except (TimeoutError, OSError) as e:
         raise BackendError(
             f"OpenAlex request failed (timeout or connection error): {e}",
@@ -446,11 +456,11 @@ def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str | None:
 
 def _work_to_record(work: MutableJSON) -> PaperRecord:
     """Convert an OpenAlex work dict into a :class:`PaperRecord`."""
-    authorships = ListCodec.mappings(work.get("authorships"))
+    authorships = _objects(work.get("authorships"))
     authors = tuple(
-        str(DictCodec.coerce(a.get("author")).get("display_name"))
+        str(_object(a.get("author")).get("display_name"))
         for a in authorships
-        if DictCodec.coerce(a.get("author")).get("display_name")
+        if _object(a.get("author")).get("display_name")
     )
     title = str(work.get("title") or work.get("display_name") or "")
 
@@ -467,7 +477,7 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
 
     # arXiv id lives under ``ids.arxiv`` as a full URL in OpenAlex.
     arxiv: str | None = None
-    ids = DictCodec.coerce(work.get("ids"))
+    ids = _object(work.get("ids"))
     arxiv_raw = ids.get("arxiv")
     if isinstance(arxiv_raw, str) and arxiv_raw:
         m = re.search(
@@ -475,7 +485,9 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
             arxiv_raw,
         )
         if m:
-            arxiv = StrCodec.coerce(m.group(1))
+            value = m.group(1)
+            if isinstance(value, str):
+                arxiv = value
     if arxiv is None and doi is not None:
         # OpenAlex indexes an arXiv preprint as its own work whose DOI is
         # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
@@ -484,16 +496,16 @@ def _work_to_record(work: MutableJSON) -> PaperRecord:
         # suffix must go: S2 reports the bare id, so keeping ``v2`` here would
         # yield a key that joins nothing -- the exact failure this recovery
         # exists to prevent.
-        # pragma: no mutate start -- IGNORECASE makes pattern case inert.
         m = re.match(r"10\.48550/arxiv\.(.+?)(?:v\d+)?$", doi, re.IGNORECASE)
-        # pragma: no mutate end
         if m:
-            arxiv = StrCodec.coerce(m.group(1))
+            value = m.group(1)
+            if isinstance(value, str):
+                arxiv = value
 
-    primary = DictCodec.coerce(work.get("primary_location"))
-    source = DictCodec.coerce(primary.get("source"))
+    primary = _object(work.get("primary_location"))
+    source = _object(primary.get("source"))
     venue = source.get("display_name")
-    oa = DictCodec.coerce(work.get("open_access"))
+    oa = _object(work.get("open_access"))
 
     return PaperRecord(
         title=title,

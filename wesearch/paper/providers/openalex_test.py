@@ -393,6 +393,29 @@ class TestWorkToRecord:
         work: MutableJSON = {"doi": "https://doi.org/10.48550/arXiv.2210.11934v2"}
         assert openalex._work_to_record(work).arxiv_id == "2210.11934"
 
+    def test_wrong_typed_nested_fields_take_defaults(self) -> None:
+        work: MutableJSON = {
+            "title": "T",
+            "authorships": [
+                {"author": "oops"},
+                "stray",
+                {"author": {"display_name": "A"}},
+            ],
+            "ids": 3,
+            "primary_location": {"source": []},
+            "open_access": "no",
+        }
+        rec = openalex._work_to_record(work)
+        assert rec.authors == ("A",)
+        assert rec.arxiv_id is None
+        assert rec.venue is None
+
+    def test_wrong_typed_paging_fields_end_the_walk(self) -> None:
+        body: MutableJSON = {"results": {"x": 1}, "meta": []}
+        assert openalex._works_page_advance(body, 1, 2) is None
+        body = {"results": [{}, {}], "meta": {"count": "5"}}
+        assert openalex._works_page_advance(body, 1, 2) == 2
+
 
 class TestReferences:
     def test_resolves_then_batches(self) -> None:

@@ -21,7 +21,7 @@ pytest.importorskip("mcp.server")
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
-from wesearch.lib.custom_json import DictCodec, ListCodec
+from wesearch.lib.custom_json import convert
 from wesearch.mcp import server
 from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
@@ -83,7 +83,7 @@ def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     out = server.paper_search("mclmc")
     assert out["total"] == 41
     assert out["complete"] is False
-    first = ListCodec.mappings(out["records"])[0]
+    first = convert(out["records"], list[dict[str, object]])[0]
     assert first["title"] == "Microcanonical Sampling"
 
 
@@ -249,7 +249,7 @@ def test_mcp_renders_every_declared_param(
     fn: object = getattr(server, tool)  # pyright: ignore[reportAny] -- Tool names come from the declared schema table.
     assert callable(fn)
     declared = set(spec.fields())
-    hints = cast(dict[str, object], get_type_hints(fn))
+    hints = get_type_hints(fn)
     assert declared - set(hints) == omitted
     for name in declared & set(hints):
         field = spec.fields()[name]
@@ -382,7 +382,7 @@ def test_paper_search_emits_library_records_verbatim(
     fake = search.SearchResult(records=[distinct, namesake], total=2, complete=True)
     monkeypatch.setattr(search, "search", _returns(fake))
     out = server.paper_search("discussion")
-    assert len(ListCodec.coerce(out["records"])) == 2
+    assert len(convert(out["records"], list[object])) == 2
 
 
 _TOOLS = (
@@ -407,12 +407,16 @@ def test_append_doc_preserves_existing_text_and_adds_extra() -> None:
     assert tool.__doc__ == "Existing.\n\nGenerated.\n"
 
 
-def test_append_doc_preserves_leading_text_and_empty_doc() -> None:
+def test_append_doc_dedents_to_the_extras_column_and_accepts_no_doc() -> None:
+    """Python 3.12 keeps the body indentation that 3.13+ strips from __doc__."""
+
     def tool() -> None:
         pass
 
-    tool.__doc__ = "  Existing  "
-    assert server._append_doc("Extra")(tool).__doc__ == "  Existing\n\nExtra\n"
+    tool.__doc__ = "Summary.\n\n    Args:\n      x: An arg.\n    "
+    assert server._append_doc("Extra")(tool).__doc__ == (
+        "Summary.\n\nArgs:\n  x: An arg.\n\nExtra\n"
+    )
 
     tool.__doc__ = None
     assert server._append_doc("Extra")(tool).__doc__ == "\n\nExtra\n"
@@ -423,6 +427,16 @@ def test_main_runs_server(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server.mcp, "run", lambda: called.append(True))
     assert server.main() == 0
     assert called == [True]
+
+
+def test_published_descriptions_are_dedented_on_every_python() -> None:
+    # Python 3.12 keeps a docstring's indentation; 3.13 strips it at compile time.
+    # Simulate the 3.12 form so this bites on any interpreter.
+    def tool() -> None:
+        pass
+
+    tool.__doc__ = "Head.\n\n    Args:\n      x: y\n    "
+    assert server._surface_errors(tool).__doc__ == "Head.\n\nArgs:\n  x: y"
 
 
 def test_all_tools_registered() -> None:
@@ -440,7 +454,7 @@ def test_tool_description_documents_every_parameter(tool: str) -> None:
     published = {t.name: t for t in asyncio.run(server.mcp.list_tools())}[tool]
     entries = _entries(_section(published.description or "", "Args"))
     schema = cast(dict[str, object], published.input_schema)
-    properties = DictCodec.coerce(schema["properties"])
+    properties = convert(schema["properties"], dict[str, object])
     assert list(entries) == list(properties)
     for name, text in entries.items():
         # A value an entry quotes must be one the parameter accepts.
@@ -509,14 +523,10 @@ def test_tool_description_names_every_returned_key(
 
 
 def _section(description: str, name: str) -> list[str]:
-    """Return the lines under ``description``'s ``name:`` header, relative to it."""
-    lines = description.splitlines()
-    # Python 3.13 strips a docstring's common indentation at compile time and 3.12
-    # keeps it, so the header is ``Args:`` on one and ``    Args:`` on the other.
-    # The public export validates on 3.12; match the header at any indentation.
-    start = next(i for i, line in enumerate(lines) if line.strip() == f"{name}:")
-    indent = len(lines[start]) - len(lines[start].lstrip())
-    body = (line[indent:] for line in lines[start + 1 :])
+    """Return the indented lines under ``description``'s ``name:`` header."""
+    # `cleandoc`: Python 3.12 keeps the docstring indentation 3.13+ strips.
+    lines = inspect.cleandoc(description).splitlines()
+    body = lines[lines.index(f"{name}:") + 1 :]
     return list(itertools.takewhile(lambda line: line.startswith("  "), body))
 
 
@@ -535,9 +545,9 @@ def _entries(lines: list[str]) -> dict[str, str]:
 
 def _enum_values(schema: object) -> set[object]:
     """Return every ``enum`` member of a JSON-Schema property, through ``anyOf``."""
-    prop = DictCodec.coerce(schema)
-    values = set(ListCodec.coerce(prop.get("enum")))
-    for branch in ListCodec.mappings(prop.get("anyOf")):
+    prop = convert(schema, dict[str, object])
+    values = set(convert(prop.get("enum"), list[object], default=[]))
+    for branch in convert(prop.get("anyOf"), list[dict[str, object]], default=[]):
         values |= _enum_values(branch)
     return values
 

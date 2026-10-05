@@ -108,9 +108,7 @@ def fetch_reader_proxy(url: str, *, policy: PolicyParams) -> bytes:
                 f"{_API_KEY_ENV} or {_ALLOW_THIRD_PARTY_RENDER_ENV}=1 to allow."
             ).encode(),
         )
-    # pragma: no mutate start -- `quote` never escapes letters, so "XX" padding is inert.
     proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/"))
-    # pragma: no mutate end
     key = os.environ.get(_API_KEY_ENV) or ""
     headers = {"Authorization": f"Bearer {key}"} if key else None
     body, _session = fetch(

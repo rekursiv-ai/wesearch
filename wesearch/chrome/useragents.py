@@ -31,7 +31,7 @@ from wesearch.chrome.headers import (
     chrome_user_agent,
     impersonate_version_platform,
 )
-from wesearch.lib.custom_json import DictCodec, ListCodec, loads
+from wesearch.lib.custom_json import convert, convert_or_none, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -184,7 +184,7 @@ def _download_records() -> list[object]:
         raise RuntimeError(  # noqa: TRY004 -- Dataset shape is a downloader contract error.
             "expected JSON array",
         )
-    return ListCodec.coerce(parsed)
+    return convert(parsed, list[object])
 
 
 def _read_response(dataset_request: request.Request) -> bytes:
@@ -213,7 +213,7 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
     """Select safe, plain Chrome identities for one pool."""
     selected_set: set[str] = set()
     for raw_record in records:
-        record = DictCodec.coerce(raw_record)
+        record = convert_or_none(raw_record, dict[str, object])
         if not record:
             continue
         ua = record.get("userAgent")

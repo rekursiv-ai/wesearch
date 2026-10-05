@@ -347,6 +347,22 @@ class TestRefresh:
             second_desktop,
         ]
 
+    def test_non_object_dataset_records_are_skipped(self) -> None:
+        valid_desktop = self._DATASET[0]["userAgent"]
+        second_desktop = self._DATASET[2]["userAgent"]
+        records: list[object] = [
+            "stray",
+            3,
+            None,
+            [1],
+            {"userAgent": valid_desktop, "deviceCategory": "desktop"},
+            {"userAgent": second_desktop, "deviceCategory": "desktop"},
+        ]
+        assert useragents._select_user_agents(records, kind="chrome_desktop") == [
+            valid_desktop,
+            second_desktop,
+        ]
+
     def test_desktop_mobile_and_android_markers_are_case_sensitive(self) -> None:
         base = self._DATASET[0]["userAgent"]
         second = self._DATASET[2]["userAgent"]
