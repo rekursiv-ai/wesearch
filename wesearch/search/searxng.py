@@ -28,7 +28,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import convert_or_none, loads
+from wesearch.lib.custom_json import loads
 from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
@@ -439,7 +439,7 @@ def _searxng_web(item: dict[str, object]) -> SearchResult:
 # results carry a float ``length``. One such field must not reject the whole result.
 def _text(item: dict[str, object], key: str) -> str:
     """Return ``item[key]`` when it is a string, else ``""``."""
-    return convert_or_none(item.get(key), str) or ""
+    return value if isinstance(value := item.get(key), str) else ""
 
 
 def _coordinate(value: object) -> float | None:

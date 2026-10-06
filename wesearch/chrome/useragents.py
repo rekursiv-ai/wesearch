@@ -31,7 +31,7 @@ from wesearch.chrome.headers import (
     chrome_user_agent,
     impersonate_version_platform,
 )
-from wesearch.lib.custom_json import convert, convert_or_none, loads
+from wesearch.lib.custom_json import ReadError, convert, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -213,7 +213,10 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
     """Select safe, plain Chrome identities for one pool."""
     selected_set: set[str] = set()
     for raw_record in records:
-        record = convert_or_none(raw_record, dict[str, object])
+        try:
+            record = convert(raw_record, dict[str, object])
+        except ReadError:
+            continue
         if not record:
             continue
         ua = record.get("userAgent")

@@ -502,7 +502,7 @@ def _write_samples(
 def _parse_args(argv: Sequence[str] | None) -> _Flags:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="".join((__doc__ or "").split("\n", 2)[2:]),
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
     )
     parser.add_argument(
         "--cache-dir",
