@@ -1991,6 +1991,7 @@ debug = [
 dev = [
     { name = "basedpyright" },
     { name = "codespell" },
+    { name = "cryptography" },
     { name = "hatchling" },
     { name = "hypothesis" },
     { name = "ipython" },
@@ -2011,6 +2012,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright" },
     { name = "codespell" },
+    { name = "cryptography" },
     { name = "hatchling" },
     { name = "hypothesis" },
     { name = "lxml-stubs" },
@@ -2027,6 +2029,7 @@ stubs = [
     { name = "lxml-stubs" },
 ]
 test = [
+    { name = "cryptography" },
     { name = "hypothesis" },
     { name = "nodejs-wheel-binaries" },
     { name = "pytest" },
@@ -2062,6 +2065,7 @@ debug = [{ name = "ipython" }]
 dev = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
+    { name = "cryptography" },
     { name = "hatchling", specifier = ">=1.32.4" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "ipython" },
@@ -2082,6 +2086,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
+    { name = "cryptography" },
     { name = "hatchling", specifier = ">=1.32.4" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "lxml-stubs", specifier = ">=0.5.1" },
@@ -2096,6 +2101,7 @@ pre-commit = [
 ]
 stubs = [{ name = "lxml-stubs", specifier = ">=0.5.1" }]
 test = [
+    { name = "cryptography" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "nodejs-wheel-binaries", specifier = ">=24.16.0" },
     { name = "pytest", specifier = ">=7.0" },
