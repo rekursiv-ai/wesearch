@@ -36,9 +36,9 @@ def main() -> int:
       exit_code: 0 on clean exit or after timeout; child PID printed to stdout.
 
     """
-    if __doc__ is None:
-        raise ValueError("Expected __doc__ is not None.")
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", 2)[2])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+    )
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
 

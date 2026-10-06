@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import re
 import time
 
-from wesearch.lib.custom_json import convert_or_none
+from wesearch.lib.custom_json import ReadError, convert
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
 from wesearch.paper.search import search
@@ -114,17 +114,23 @@ def _identity_of(doi: str) -> set[str]:
 
 def _text(value: object) -> str:
     """Return ``value`` when it is a string, else ``""``."""
-    return convert_or_none(value, str) or ""
+    return value if isinstance(value, str) else ""
 
 
 def _object(value: object) -> dict[str, object]:
     """Return ``value`` when it is a JSON object, else ``{}``."""
-    return convert_or_none(value, dict[str, object]) or {}
+    try:
+        return convert(value, dict[str, object])
+    except ReadError:
+        return {}
 
 
 def _array(value: object) -> list[object]:
     """Return ``value`` when it is a JSON array, else ``[]``."""
-    return convert_or_none(value, list[object]) or []
+    try:
+        return convert(value, list[object])
+    except ReadError:
+        return []
 
 
 def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:

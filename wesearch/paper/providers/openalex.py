@@ -34,7 +34,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import MutableJSON, convert_or_none, loads
+from wesearch.lib.custom_json import MutableJSON, ReadError, convert, loads
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,
@@ -259,12 +259,18 @@ def _resolve_works(
 
 def _object(value: object) -> dict[str, object]:
     """Return ``value`` when it is a JSON object, else ``{}``."""
-    return convert_or_none(value, dict[str, object]) or {}
+    try:
+        return convert(value, dict[str, object])
+    except ReadError:
+        return {}
 
 
 def _array(value: object) -> list[object]:
     """Return ``value`` when it is a JSON array, else ``[]``."""
-    return convert_or_none(value, list[object]) or []
+    try:
+        return convert(value, list[object])
+    except ReadError:
+        return []
 
 
 def _objects(value: object) -> list[dict[str, object]]:
@@ -274,7 +280,10 @@ def _objects(value: object) -> list[dict[str, object]]:
 
 def _count(value: object) -> int:
     """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
-    return convert_or_none(value, int, strict=False) or 0
+    try:
+        return convert(value, int, strict=False, default=0)
+    except ReadError:
+        return 0
 
 
 def _work_id_tail(url_or_id: str) -> str:
