@@ -284,11 +284,11 @@ async def _close_browser_on_port(port: int) -> None:
 # must pass ``--no-sandbox``. A normal desktop user keeps the sandbox -- disabling it
 # there needlessly weakens security AND makes Chrome show a persistent "unsupported
 # command-line flag: --no-sandbox" banner.
-def _command_flag(command: str, marker: str) -> str | None:
+def _command_flag(command: str, marker: str) -> str:
     """Extract a Chrome flag value from NUL- or space-flattened proc args."""
     _, found, suffix = command.partition(marker)
     if not found:
-        return None
+        return ""
     return suffix.partition(" --")[0].strip()
 
 
@@ -521,7 +521,7 @@ def _tolerate_late_cdp_replies() -> None:
     if vendor.__module__ == __name__:
         return
 
-    def call(self: connection.Transaction, **response: object) -> None:
+    def call(self: connection.Transaction[object], **response: object) -> None:
         if not self.done():
             vendor(self, **response)
 
@@ -1100,12 +1100,11 @@ def _carried_headers(
     origin_url: str,
 ) -> list[zendriver.cdp.fetch.HeaderEntry] | None:
     """Return the header OVERRIDE for this hop, or ``None`` to send none."""
-    if not caller_headers or origin(target) != origin(origin_url):
+    caller = caller_headers or {}
+    if not caller or origin(target) != origin(origin_url):
         return None
     bound = _origin_bound()
-    entitled = {
-        name: value for name, value in caller_headers.items() if name.lower() in bound
-    }
+    entitled = {name: value for name, value in caller.items() if name.lower() in bound}
     if not entitled:
         return None
     # Merged case-INSENSITIVELY, unlike a plain dict union: field names are
@@ -1310,7 +1309,7 @@ async def _navigate(
     """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies."""
     async with asyncio.timeout(timeout_sec):
         browser = await _pool().browser(egress, profile_dir, headless=headless)
-        if cookies:
+        if seeded := cookies or {}:
             await browser.cookies.set_all(
                 [
                     zendriver.cdp.network.CookieParam(
@@ -1318,7 +1317,7 @@ async def _navigate(
                         value=value,
                         url=url,
                     )
-                    for name, value in cookies.items()
+                    for name, value in seeded.items()
                 ],
             )
         tab = await _navigate_tab(

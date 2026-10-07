@@ -8,7 +8,7 @@ from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.fuse import _find, fuse, normalize_title
 
 
-def _rec(title: str, *, doi: str | None = None, source: str = "s2") -> PaperRecord:
+def _rec(title: str, *, doi: str = "", source: str = "s2") -> PaperRecord:
     return PaperRecord(title=title, doi=doi, sources=(source,))
 
 

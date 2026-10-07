@@ -103,8 +103,7 @@ def duckduckgo(
         "Accept-Language": "all,all-ALL;q=0.7",
         "Referer": _DUCKDUCKGO_URL,
     }
-    if headers:
-        request_headers.update(headers)
+    request_headers.update(headers or {})
     # The query goes in the URL, not a POST body: DuckDuckGo's HTML endpoint now
     # drops a POSTed query and serves its empty homepage (``body--home``),
     # yielding zero results. A GET with ``q`` in the query string returns the
@@ -181,7 +180,7 @@ def _duckduckgo_extract_url(href: str) -> str | None:
         and (hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"))
         and parsed.path == "/l/"
     ):
-        wrapped = parse_qs(parsed.query).get("uddg")
+        wrapped = parse_qs(parsed.query).get("uddg", [])
         if wrapped:
             return wrapped[0]
     if parsed.scheme in {"http", "https"}:

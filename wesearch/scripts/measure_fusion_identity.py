@@ -185,9 +185,9 @@ def _arxiv_keys(rec: PaperRecord) -> list[str]:
     """DOI plus arXiv id, including one recovered from a 10.48550 DOI."""
     keys = _doi_keys(rec)
     arxiv = rec.arxiv_id
-    if arxiv is None and rec.doi:
+    if not arxiv and rec.doi:
         match = _ARXIV_DOI_RE.match(rec.doi)
-        arxiv = match.group(1) if match else None
+        arxiv = match.group(1) if match else ""
     if arxiv:
         keys.append(f"arxiv:{str.casefold(arxiv)}")
     return keys

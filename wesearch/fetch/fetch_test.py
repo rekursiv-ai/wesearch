@@ -1220,7 +1220,7 @@ class TestRedirectIdentityScoping:
         self,
         *,
         first_status: int,
-        target_set_cookie: str | None = None,
+        target_set_cookie: str = "",
     ) -> Callable[..., Mock]:
         """Return a curl ``request`` mock: a.com/start -> (status) -> b.com/next ->."""
 

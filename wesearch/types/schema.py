@@ -23,7 +23,7 @@ standalone and cannot import a tool package) while every adapter reads it.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, cast, get_args, get_origin
 
 import types
@@ -56,7 +56,7 @@ class Field[T]:
     default: T | None = None
     description: str = ""
     required: bool = False
-    schema_extra: Mapping[str, object] | None = None
+    schema_extra: Mapping[str, object] = field(default_factory=dict[str, object])
 
     @property
     def choices(self) -> tuple[object, ...]:

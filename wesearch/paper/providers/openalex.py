@@ -314,7 +314,7 @@ def _select(extra: str = "") -> str:
 
 def _headers() -> dict[str, str]:
     """UA with mailto signals the polite pool for better rate limits."""
-    email = os.environ.get("OPENALEX_EMAIL")
+    email = os.environ.get("OPENALEX_EMAIL", "")
     ua = f"loop-paper (mailto:{email})" if email else "loop-paper"
     return {"Accept": "application/json", "User-Agent": ua}
 
@@ -324,7 +324,7 @@ def _filter(
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
-) -> str | None:
+) -> str:
     """Build an OpenAlex filter string from year bounds and OA flag."""
     parts: list[str] = []
     if year_from is not None:
@@ -333,7 +333,7 @@ def _filter(
         parts.append(f"to_publication_date:{year_to}-12-31")
     if open_access_only:
         parts.append("open_access.is_oa:true")
-    return ",".join(parts) if parts else None
+    return ",".join(parts)
 
 
 def _paginate_works(
@@ -402,7 +402,7 @@ def _get(
     """GET an OpenAlex path, gated, with polite UA + optional key; parse JSON."""
     # A premium key raises the daily credit budget far above the anonymous
     # ~1000/day; send it when configured.
-    api_key = os.environ.get("OPENALEX_API_KEY")
+    api_key = os.environ.get("OPENALEX_API_KEY", "")
     if api_key:
         params = {**params, "api_key": api_key}
     try:
@@ -457,16 +457,12 @@ def _get(
     return body
 
 
-def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str | None:
+def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str:
     """Rebuild plain text from OpenAlex's ``{word: [positions]}`` abstract."""
-    if not inverted:
-        return None
     positions: dict[int, str] = {}
-    for word, idxs in inverted.items():
+    for word, idxs in (inverted or {}).items():
         for i in idxs:
             positions[i] = word
-    if not positions:
-        return None
     return " ".join(positions[i] for i in sorted(positions))
 
 
@@ -482,8 +478,8 @@ def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
 
     # DOI: OpenAlex returns it as a full URL - strip the prefix.
     doi_raw = work.get("doi")
-    doi: str | None = None
-    if isinstance(doi_raw, str) and doi_raw:
+    doi = ""
+    if isinstance(doi_raw, str):
         doi = (
             doi_raw.removeprefix("https://doi.org/")
             .removeprefix("http://doi.org/")
@@ -492,10 +488,10 @@ def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
         )
 
     # arXiv id lives under ``ids.arxiv`` as a full URL in OpenAlex.
-    arxiv: str | None = None
+    arxiv = ""
     ids = _object(work.get("ids"))
     arxiv_raw = ids.get("arxiv")
-    if isinstance(arxiv_raw, str) and arxiv_raw:
+    if isinstance(arxiv_raw, str):
         m = re.search(
             r"(?:arxiv\.org/abs/|arxiv:)?([\w.-]+/\d+|\d{4}\.\d{4,5})",
             arxiv_raw,
@@ -504,7 +500,7 @@ def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
             value = m.group(1)
             if isinstance(value, str):
                 arxiv = value
-    if arxiv is None and doi is not None:
+    if not arxiv and doi:
         # OpenAlex indexes an arXiv preprint as its own work whose DOI is
         # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
         # id is the DOI suffix; recovering it here is what lets fusion join the
@@ -527,7 +523,7 @@ def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
         title=title,
         authors=authors,
         year=cast(int | None, work.get("publication_year")),
-        venue=(str(venue) if venue else None),
+        venue=str(venue) if venue else "",
         doi=doi,
         arxiv_id=arxiv,
         abstract=_reconstruct_abstract(
@@ -535,6 +531,6 @@ def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
         ),
         citation_count=cast(int | None, work.get("cited_by_count")),
         reference_count=cast(int | None, work.get("referenced_works_count")),
-        open_access_pdf=(str(oa["oa_url"]) if oa.get("oa_url") else None),
+        open_access_pdf=str(oa["oa_url"]) if oa.get("oa_url") else "",
         sources=("openalex",),
     )

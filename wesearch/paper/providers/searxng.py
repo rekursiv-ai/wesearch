@@ -101,21 +101,19 @@ def _to_record(hit: PaperResult) -> PaperRecord:
     """Convert a SearXNG :class:`PaperResult` into a :class:`PaperRecord`."""
     # SearXNG carries no structured arXiv id, so recover it from the URL.
     arxiv_match = ARXIV_URL_RE.search(hit.url)
-    arxiv_id = arxiv_match.group(1) if arxiv_match else None
+    arxiv_id = arxiv_match.group(1) if arxiv_match else ""
     # ``hit.tags`` (field-of-study) is dropped: PaperRecord has no tag concept
     # and the S2/OpenAlex converters drop them too, keeping records uniform.
-    doi = hit.doi or None
-    if doi is not None and not looks_like_paper_id(doi):  # Keep only normalizable.
-        doi = None
     return PaperRecord(
         title=hit.title,
         authors=hit.authors,
         year=hit.published.year if hit.published is not None else None,
-        venue=hit.journal or None,
-        doi=doi,
+        venue=hit.journal,
+        # Keep only a normalizable DOI.
+        doi=hit.doi if hit.doi and looks_like_paper_id(hit.doi) else "",
         arxiv_id=arxiv_id,
-        abstract=hit.snippet or None,
+        abstract=hit.snippet,
         citation_count=hit.citations,
-        open_access_pdf=hit.pdf_url or None,
+        open_access_pdf=hit.pdf_url,
         sources=("searxng",),
     )

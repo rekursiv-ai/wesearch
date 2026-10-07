@@ -182,7 +182,7 @@ class TestToRecord:
 
     def test_arxiv_id_none_for_non_arxiv_url(self) -> None:
         rec = searxng._to_record(_result(url="https://example.com/paper"))
-        assert rec.arxiv_id is None
+        assert rec.arxiv_id == ""
 
     def test_doi_kept_when_normalizes(self) -> None:
         rec = searxng._to_record(_result(doi="10.1234/x"))
@@ -190,7 +190,7 @@ class TestToRecord:
 
     def test_doi_dropped_when_garbage(self) -> None:
         rec = searxng._to_record(_result(doi="garbage"))
-        assert rec.doi is None
+        assert rec.doi == ""
 
     def test_year_from_published(self) -> None:
         rec = searxng._to_record(_result(published=datetime(2019, 6, 1)))  # noqa: DTZ001 -- The fixture intentionally uses a naive datetime.
@@ -219,8 +219,8 @@ class TestToRecord:
     def test_empty_fields_become_none(self) -> None:
         rec = searxng._to_record(_result(title="", journal="", snippet=""))
         assert rec.title == ""
-        assert rec.venue is None
-        assert rec.abstract is None
+        assert rec.venue == ""
+        assert rec.abstract == ""
 
 
 class TestYearInRange:

@@ -280,8 +280,7 @@ class TestRequestErrors:
 class TestFilter:
     def test_all_none_returns_none(self) -> None:
         assert (
-            openalex._filter(year_from=None, year_to=None, open_access_only=False)
-            is None
+            openalex._filter(year_from=None, year_to=None, open_access_only=False) == ""
         )
 
     def test_composes_parts(self) -> None:
@@ -298,14 +297,14 @@ class TestReconstructAbstract:
         inverted = {"learning": [1], "Deep": [0], "rocks": [2]}
         assert openalex._reconstruct_abstract(inverted) == "Deep learning rocks"
 
-    def test_none_returns_none(self) -> None:
-        assert openalex._reconstruct_abstract(None) is None
+    def test_none_returns_empty(self) -> None:
+        assert openalex._reconstruct_abstract(None) == ""
 
-    def test_empty_returns_none(self) -> None:
-        assert openalex._reconstruct_abstract({}) is None
+    def test_empty_returns_empty(self) -> None:
+        assert openalex._reconstruct_abstract({}) == ""
 
-    def test_all_empty_positions_returns_none(self) -> None:
-        assert openalex._reconstruct_abstract({"word": []}) is None
+    def test_all_empty_positions_returns_empty(self) -> None:
+        assert openalex._reconstruct_abstract({"word": []}) == ""
 
 
 class TestWorkToRecord:
@@ -349,11 +348,11 @@ class TestWorkToRecord:
         assert rec.title == ""
         assert rec.authors == ()
         assert rec.year is None
-        assert rec.doi is None
-        assert rec.arxiv_id is None
-        assert rec.abstract is None
-        assert rec.venue is None
-        assert rec.open_access_pdf is None
+        assert rec.doi == ""
+        assert rec.arxiv_id == ""
+        assert rec.abstract == ""
+        assert rec.venue == ""
+        assert rec.open_access_pdf == ""
 
     def test_display_name_fallback_for_title(self) -> None:
         work: dict[str, MutablePlainTree] = {"display_name": "Fallback Title"}
@@ -365,7 +364,7 @@ class TestWorkToRecord:
 
     def test_arxiv_no_match_leaves_none(self) -> None:
         work: dict[str, MutablePlainTree] = {"ids": {"arxiv": "!!!"}}
-        assert openalex._work_to_record(work).arxiv_id is None
+        assert openalex._work_to_record(work).arxiv_id == ""
 
     def test_arxiv_id_recovered_from_datacite_doi(self) -> None:
         # OpenAlex indexes an arXiv preprint as its own work whose DOI is
@@ -388,7 +387,7 @@ class TestWorkToRecord:
 
     def test_non_arxiv_doi_yields_no_arxiv_id(self) -> None:
         work: dict[str, MutablePlainTree] = {"doi": "https://doi.org/10.1145/3596512"}
-        assert openalex._work_to_record(work).arxiv_id is None
+        assert openalex._work_to_record(work).arxiv_id == ""
 
     def test_datacite_doi_version_suffix_is_stripped(self) -> None:
         # S2 reports the BARE arXiv id, so a recovered "2210.11934v2" is a key
@@ -414,8 +413,8 @@ class TestWorkToRecord:
         }
         rec = openalex._work_to_record(work)
         assert rec.authors == ("A",)
-        assert rec.arxiv_id is None
-        assert rec.venue is None
+        assert rec.arxiv_id == ""
+        assert rec.venue == ""
 
     def test_wrong_typed_paging_fields_end_the_walk(self) -> None:
         body: dict[str, MutablePlainTree] = {"results": {"x": 1}, "meta": []}
@@ -1247,13 +1246,13 @@ class TestExactInternals:
         )
 
     def test_work_to_record_skips_non_string_arxiv_id(self) -> None:
-        assert openalex._work_to_record({"ids": {"arxiv": 123}}).arxiv_id is None
+        assert openalex._work_to_record({"ids": {"arxiv": 123}}).arxiv_id == ""
 
     def test_work_to_record_preserves_empty_optional_fields(self) -> None:
         rec = openalex._work_to_record(
             {"doi": "", "ids": {"arxiv": ""}, "open_access": {"oa_url": ""}},
         )
-        assert (rec.doi, rec.arxiv_id, rec.open_access_pdf) == (None, None, None)
+        assert (rec.doi, rec.arxiv_id, rec.open_access_pdf) == ("", "", "")
 
 
 if __name__ == "__main__":

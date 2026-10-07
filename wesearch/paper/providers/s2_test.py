@@ -285,8 +285,8 @@ class TestRecordMapping:
             },
         )
         assert paper.authors == ("A",)
-        assert paper.doi is None
-        assert paper.open_access_pdf is None
+        assert paper.doi == ""
+        assert paper.open_access_pdf == ""
         author = s2.author_record_from(
             {"authorId": "1", "aliases": "x", "affiliations": ["U", 5, {"name": "M"}]},
         )
@@ -511,7 +511,7 @@ class TestExactInternals:
             rec.aliases,
             rec.affiliations,
             rec.homepage,
-        ) == ("", "(unknown)", (), (), None)
+        ) == ("", "(unknown)", (), (), "")
 
     def test_paper_record_from_empty_values(self) -> None:
         rec = s2.paper_record_from(
@@ -531,10 +531,10 @@ class TestExactInternals:
             rec.arxiv_id,
             rec.abstract,
             rec.open_access_pdf,
-        ) == ("", (), None, None, None, None, None)
+        ) == ("", (), "", "", "", "", "")
 
     def test_author_record_from_ignores_non_string_homepage(self) -> None:
-        assert s2.author_record_from({"homepage": 1}).homepage is None
+        assert s2.author_record_from({"homepage": 1}).homepage == ""
 
     def test_get_forwards_every_attempt_option(self) -> None:
         with patch.object(s2, "_attempt", return_value=b"{}") as attempt:

@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.xdist_group(name="live_search")]
 
 _searxng_required = pytest.mark.skipif(
-    not os.environ.get("SEARXNG_URL"),
+    not os.environ.get("SEARXNG_URL", ""),
     reason="SEARXNG_URL not set; live SearXNG instance required.",
 )
 

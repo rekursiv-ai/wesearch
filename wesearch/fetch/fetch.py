@@ -339,7 +339,7 @@ class _Request:
         request = replace(self, params=p, observer=learner.observe)
         seeded_cookies = {
             **self.session.cookies_for(self.url),
-            **(p.content.cookies or {}),
+            **p.content.cookies,
         }
         if p.content.raw_headers:
             # Validated here too, not only on the identity path below. This
@@ -544,7 +544,7 @@ def _is_valid_ip_address(text: str, *, ipv6: bool) -> bool:
 # to a server, so those parameters silently vanished from the wire.
 def _url_with_params(
     url: str,
-    params: Mapping[str, str | int] | None,
+    params: Mapping[str, str | int],
 ) -> str:
     """Return ``url`` with encoded query parameters merged into its query."""
     if not params:
@@ -557,11 +557,13 @@ def _url_with_params(
 def _split_userinfo(url: str) -> tuple[str, str | None]:
     """Strip ``user:pass@`` from a URL; return the URL and Basic auth."""
     parsed = urlparse(url)
-    if not (parsed.username or parsed.password):
+    user = parsed.username or ""
+    password = parsed.password or ""
+    if not (user or password):
         return url, None
-    user = unquote(parsed.username or "")
-    password = unquote(parsed.password or "")
-    credentials = base64.b64encode(f"{user}:{password}".encode()).decode()
+    credentials = base64.b64encode(
+        f"{unquote(user)}:{unquote(password)}".encode(),
+    ).decode()
     netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
     return parsed._replace(netloc=netloc).geturl(), f"Basic {credentials}"
 
@@ -617,8 +619,7 @@ def _fetch_once(
     cookie_parts = [
         merged.pop(key) for key in [k for k in merged if k.lower() == "cookie"]
     ]
-    if cookies:
-        cookie_parts.append("; ".join(f"{k}={v}" for k, v in cookies.items()))
+    cookie_parts.extend(f"{k}={v}" for k, v in (cookies or {}).items())
     if cookie_parts:
         merged["Cookie"] = "; ".join(cookie_parts)
     method = params.content.method
@@ -694,7 +695,7 @@ def _build_headers(
     # the wire (the connection path overrides Host when validated_hosts splits
     # SNI/IP); curl adds them itself.
     if raw_headers:
-        return dict(extra) if extra else {}
+        return dict(extra or {})
     if use_curl:
         return _curl_structural_headers(
             method=method,
@@ -722,10 +723,9 @@ def _build_headers(
         http2=False,
     )
     h.update(_google_headers(url, impersonate))
-    if extra:
-        # Caller wins; dict.update preserves slot for existing keys and
-        # appends new ones at the end.
-        h.update(extra)
+    # Caller wins; dict.update preserves slot for existing keys and
+    # appends new ones at the end.
+    h.update(extra or {})
     return h
 
 
@@ -769,19 +769,18 @@ def _curl_structural_headers(
 ) -> dict[str, str]:
     """Headers for the curl path: what impersonate omits + Accept-CH opt-ins."""
     h: dict[str, str] = {}
-    wanted = accept_ch.get(origin(url))
+    wanted = accept_ch.get(origin(url), frozenset[str]())
     if wanted:
         major, platform = impersonate_version_platform(impersonate)
         hints = chrome_client_hints(major=major, platform=platform)
         h.update({name: value for name, value in hints.items() if name in wanted})
     if method not in ("GET", "HEAD"):
-        if content_type:
+        if content_type is not None:
             h["Content-Type"] = content_type
         parsed = urlparse(url)
         h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
     h.update(_google_headers(url, impersonate))
-    if extra:
-        h.update(extra)
+    h.update(extra or {})
     return h
 
 
@@ -816,7 +815,7 @@ class _ResponseLearner:
           url: URL of the responding origin (for cookie attribution).
 
         """
-        set_cookie = resp_headers.get("set-cookie")
+        set_cookie = resp_headers.get("set-cookie", "")
         if set_cookie:
             self._cookies.setdefault(origin(url), {}).update(
                 parse_set_cookie(set_cookie),
@@ -988,7 +987,7 @@ def _send_as(
         # redirect target's Set-Cookie belongs to that origin's profile, not this
         # one, so it must not pollute (egress, request.domain).
         if origin(url) == request_origin:
-            set_cookie = resp_headers.get("set-cookie")
+            set_cookie = resp_headers.get("set-cookie", "")
             if set_cookie:
                 captured.update(parse_set_cookie(set_cookie))
         if request.observer is not None:

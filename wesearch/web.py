@@ -270,7 +270,7 @@ def _format_rss(body: bytes) -> str:
     if channel is None:
         return body.decode(errors="replace")
     lines: list[str] = []
-    feed_title = (_child_text(channel, "title") or "").strip()
+    feed_title = _child_text(channel, "title").strip()
     if feed_title:
         lines.append(f"# {feed_title}\n")
     for item in _children(channel, "item"):
@@ -281,7 +281,7 @@ def _format_rss(body: bytes) -> str:
 def _format_atom(feed: Element[str]) -> str:
     """Format an Atom feed as readable markdown."""
     lines: list[str] = []
-    feed_title = (_child_text(feed, "title") or "").strip()
+    feed_title = _child_text(feed, "title").strip()
     if feed_title:
         lines.append(f"# {feed_title}\n")
     for entry in _children(feed, "entry"):
@@ -291,11 +291,9 @@ def _format_atom(feed: Element[str]) -> str:
 
 def _append_atom_entry(entry: Element[str], lines: list[str]) -> None:
     """Append one Atom entry to ``lines``."""
-    title = (_child_text(entry, "title") or "").strip()
+    title = _child_text(entry, "title").strip()
     author = _atom_author(entry)
-    updated = (
-        _child_text(entry, "updated") or _child_text(entry, "published") or ""
-    ).strip()
+    updated = (_child_text(entry, "updated") or _child_text(entry, "published")).strip()
     link = _atom_link(entry)
     content = _atom_content(entry)
     if title:
@@ -315,13 +313,13 @@ def _atom_author(entry: Element[str]) -> str:
     author = _child(entry, "author")
     if author is None:
         return ""
-    return (_child_text(author, "name") or "").strip()
+    return _child_text(author, "name").strip()
 
 
 def _atom_link(entry: Element[str]) -> str:
     """Return the first Atom link href, if present."""
     for link in _children(entry, "link"):
-        href = link.attrib.get("href")
+        href = link.attrib.get("href", "")
         if href:
             return href.strip()
     return ""
@@ -344,11 +342,11 @@ def _element_text(parent: Element[str], name: str) -> str:
 
 def _append_rss_item(item: Element[str], lines: list[str]) -> None:
     """Append one feed item (heading + meta + cluster bullets) to ``lines``."""
-    title = (_child_text(item, "title") or "").strip()
-    link = (_child_text(item, "link") or "").strip()
+    title = _child_text(item, "title").strip()
+    link = _child_text(item, "link").strip()
     source_elem = _child(item, "source")
     source = (source_elem.text or "").strip() if source_elem is not None else ""
-    pub_date = (_child_text(item, "pubDate") or "").strip()
+    pub_date = _child_text(item, "pubDate").strip()
     if title:
         lines.append(f"## {title}")
     meta_parts = [p for p in (source, pub_date) if p]
@@ -383,10 +381,10 @@ def _child(parent: Element[str], name: str) -> Element[str] | None:
     return None
 
 
-def _child_text(parent: Element[str], name: str) -> str | None:
+def _child_text(parent: Element[str], name: str) -> str:
     """Return text for the first direct child with local tag name ``name``."""
     child = _child(parent, name)
-    return child.text if child is not None else None
+    return (child.text or "") if child is not None else ""
 
 
 def _parse_rss_cluster(description_html: str) -> list[tuple[str, str, str]]:
