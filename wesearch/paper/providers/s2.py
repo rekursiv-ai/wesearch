@@ -28,7 +28,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import MutableJSON, ReadError, convert
+from wesearch.lib.codec import MutablePlainTree, ReadError, from_plain
 from wesearch.paper import paginate as paper_paginate
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
@@ -122,7 +122,7 @@ def get(
     backoff_base_sec: float = 1.0,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """GET an S2 Graph API path, rate-gated, with key injection and backoff.
 
     Args:
@@ -175,7 +175,7 @@ def batch(
     backoff_base_sec: float = 1.0,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
-) -> list[MutableJSON | None]:
+) -> list[dict[str, MutablePlainTree] | None]:
     """Fetch metadata for many ids in one batched ``POST /{endpoint}/batch``.
 
     A single gated call returns every requested record, far cheaper than one
@@ -228,7 +228,10 @@ def batch(
     result = _loads(raw, f"/{endpoint}/batch")
     if not isinstance(result, list):
         raise BackendError(f"Semantic Scholar /{endpoint}/batch returned a non-array.")
-    return [cast(MutableJSON, p) if isinstance(p, dict) else None for p in result]
+    return [
+        cast(dict[str, MutablePlainTree], p) if isinstance(p, dict) else None
+        for p in result
+    ]
 
 
 def paginate(
@@ -236,7 +239,7 @@ def paginate(
     params: dict[str, str | int],
     *,
     limit: int | None,
-    keep: Callable[[MutableJSON], bool] = lambda _e: True,
+    keep: Callable[[dict[str, MutablePlainTree]], bool] = lambda _e: True,
     page_rows: int = 1000,
     transport: Transport = "auto",
 ) -> Page:
@@ -297,7 +300,7 @@ def search_paginate(
     """
     total = 0
 
-    def fetch_page(offset: int, size: int) -> MutableJSON:
+    def fetch_page(offset: int, size: int) -> dict[str, MutablePlainTree]:
         nonlocal total
         page_params = {**params, "offset": offset, "limit": size}
         body = get("/paper/search", page_params, transport=transport)
@@ -306,7 +309,10 @@ def search_paginate(
 
     cursor = Cursor(
         fetch=fetch_page,
-        rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
+        rows=lambda body: cast(
+            list[dict[str, MutablePlainTree]],
+            body.get("data") or [],
+        ),
         advance=_search_offset_advance,
         page_size_max=search_page_max,
         is_depth_ceiling=lambda e: e.status == 400,
@@ -319,7 +325,7 @@ def search_paginate(
 
 
 def paper_record_from(
-    data: MutableJSON,
+    data: dict[str, MutablePlainTree],
     *,
     sources: tuple[str, ...] = ("s2",),
     is_influential: bool | None = None,
@@ -360,7 +366,7 @@ def paper_record_from(
     )
 
 
-def author_record_from(data: MutableJSON) -> AuthorRecord:
+def author_record_from(data: dict[str, MutablePlainTree]) -> AuthorRecord:
     """Convert an S2 author dict into an :class:`AuthorRecord`.
 
     Args:
@@ -408,7 +414,7 @@ def author_papers(
     author_id: str,
     *,
     limit: int | None,
-    keep: Callable[[MutableJSON], bool] = lambda _e: True,
+    keep: Callable[[dict[str, MutablePlainTree]], bool] = lambda _e: True,
     transport: Transport = "auto",
 ) -> Page:
     """Fetch an author's publications, walking the cursor for filtered matches.
@@ -432,7 +438,7 @@ def author_papers(
     )
 
 
-def search_total(data: MutableJSON) -> int:
+def search_total(data: dict[str, MutablePlainTree]) -> int:
     """Extract the ``total`` field from an S2 search response.
 
     Args:
@@ -497,7 +503,7 @@ def _paginate(
     params: dict[str, str | int],
     *,
     limit: int | None,
-    keep: Callable[[MutableJSON], bool],
+    keep: Callable[[dict[str, MutablePlainTree]], bool],
     page_size: int,
     transport: Transport,
 ) -> Page:
@@ -509,7 +515,10 @@ def _paginate(
             params,
             transport=transport,
         ),
-        rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
+        rows=lambda body: cast(
+            list[dict[str, MutablePlainTree]],
+            body.get("data") or [],
+        ),
         advance=_next_offset_advance,
         page_size_max=page_size,
         # S2 answers a too-deep page with 400 ``offset + limit < 10000`` -- the
@@ -526,13 +535,17 @@ def _fetch_offset_page(
     size: int,
     *,
     transport: Transport,
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """GET one offset/limit page of an S2 list endpoint."""
     page_params = {**params, "offset": offset, "limit": size}
     return get(path, page_params, transport=transport)
 
 
-def _next_offset_advance(body: MutableJSON, offset: int, size: int) -> int | None:
+def _next_offset_advance(
+    body: dict[str, MutablePlainTree],
+    offset: int,
+    size: int,
+) -> int | None:
     """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
     del offset, size
     nxt = body.get("next")
@@ -540,7 +553,11 @@ def _next_offset_advance(body: MutableJSON, offset: int, size: int) -> int | Non
     return nxt if isinstance(nxt, int) and rows else None
 
 
-def _search_offset_advance(body: MutableJSON, offset: int, size: int) -> int | None:
+def _search_offset_advance(
+    body: dict[str, MutablePlainTree],
+    offset: int,
+    size: int,
+) -> int | None:
     """Return the next ``/paper/search`` offset; None at ``total`` or an empty page."""
     del size
     rows = _array(body.get("data"))
@@ -548,10 +565,10 @@ def _search_offset_advance(body: MutableJSON, offset: int, size: int) -> int | N
     return nxt if rows and nxt < _count(body.get("total")) else None
 
 
-def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
+def _loads(raw: bytes, what: str) -> dict[str, MutablePlainTree] | list[object]:
     """Parse S2 JSON bytes, mapping a decode failure to :class:`BackendError`."""
     try:
-        return cast(MutableJSON | list[object], json.loads(raw))
+        return cast(dict[str, MutablePlainTree] | list[object], json.loads(raw))
     except json.JSONDecodeError as e:
         raise BackendError(
             f"Semantic Scholar returned invalid JSON for {what}: {e}",
@@ -561,7 +578,7 @@ def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
 def _object(value: object) -> dict[str, object]:
     """Return ``value`` when it is a JSON object, else ``{}``."""
     try:
-        return convert(value, dict[str, object])
+        return from_plain(value, dict[str, object])
     except ReadError:
         return {}
 
@@ -569,7 +586,7 @@ def _object(value: object) -> dict[str, object]:
 def _array(value: object) -> list[object]:
     """Return ``value`` when it is a JSON array, else ``[]``."""
     try:
-        return convert(value, list[object])
+        return from_plain(value, list[object])
     except ReadError:
         return []
 
@@ -582,6 +599,6 @@ def _objects(value: object) -> list[dict[str, object]]:
 def _count(value: object) -> int:
     """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
     try:
-        return convert(value, int, strict=False, default=0)
+        return from_plain(value, int, strict=False, default=0)
     except ReadError:
         return 0

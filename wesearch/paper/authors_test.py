@@ -14,12 +14,12 @@ from wesearch.paper.providers import s2
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from wesearch.lib.custom_json import MutableJSON
+    from wesearch.lib.codec import MutablePlainTree
 
 
 class TestAuthors:
     def test_search_sorts_by_h_index_and_caps(self) -> None:
-        payload: MutableJSON = {
+        payload: dict[str, MutablePlainTree] = {
             "total": 3,
             "data": [
                 {"authorId": "1", "name": "Low", "hIndex": 5},
@@ -48,7 +48,7 @@ class TestAuthors:
         assert batch.call_args.kwargs == {"endpoint": "author"}
 
     def test_search_authors_requests_exact_path_and_params(self) -> None:
-        payload: MutableJSON = {
+        payload: dict[str, MutablePlainTree] = {
             "total": 0,
             "data": [],
         }
@@ -60,7 +60,7 @@ class TestAuthors:
         )
 
     def test_search_authors_sorts_unknown_h_index_last(self) -> None:
-        payload: MutableJSON = {
+        payload: dict[str, MutablePlainTree] = {
             "total": 3,
             "data": [
                 {"authorId": "1", "name": "Unknown"},
@@ -73,7 +73,7 @@ class TestAuthors:
         assert [record.name for record in result.records] == ["One", "Zero", "Unknown"]
 
     def test_author_papers_year_filter(self) -> None:
-        entries: list[MutableJSON] = [
+        entries: list[dict[str, MutablePlainTree]] = [
             {"title": "new", "year": 2024},
             {"title": "boundary", "year": 2020},
             {"title": "old", "year": 2000},
@@ -83,7 +83,7 @@ class TestAuthors:
             author_id: str,
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del author_id, limit
             return Page(entries=[e for e in entries if keep(e)], complete=True)
@@ -100,7 +100,7 @@ class TestAuthors:
             author_id: str,
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del author_id, limit, keep
             return Page(entries=[], complete=False)
@@ -112,7 +112,7 @@ class TestAuthors:
     def test_author_papers_excludes_a_bool_year(self) -> None:
         # ``bool`` subclasses ``int``, so ``isinstance(True, int)`` admitted a
         # JSON ``true`` as a publication year and then compared it as 1.
-        entries: list[MutableJSON] = [
+        entries: list[dict[str, MutablePlainTree]] = [
             {"title": "real", "year": 2024},
             {"title": "bogus", "year": True},
         ]
@@ -121,7 +121,7 @@ class TestAuthors:
             author_id: str,
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del author_id, limit
             return Page(entries=[e for e in entries if keep(e)], complete=True)
@@ -131,13 +131,13 @@ class TestAuthors:
         assert [r.title for r in listing.records] == ["real"]
 
     def test_author_papers_no_filter_keeps_all(self) -> None:
-        entries: list[MutableJSON] = [{"title": "a"}, {"title": "b"}]
+        entries: list[dict[str, MutablePlainTree]] = [{"title": "a"}, {"title": "b"}]
 
         def fake(
             author_id: str,
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del author_id, limit
             # No bounds -> keep predicate returns True for every entry.
@@ -149,7 +149,7 @@ class TestAuthors:
 
     def test_author_papers_year_to_and_undated(self) -> None:
         # year_to upper bound + an undated (non-int year) work excluded.
-        entries: list[MutableJSON] = [
+        entries: list[dict[str, MutablePlainTree]] = [
             {"title": "in", "year": 2018},
             {"title": "boundary", "year": 2020},
             {"title": "toolate", "year": 2024},
@@ -160,7 +160,7 @@ class TestAuthors:
             author_id: str,
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del author_id, limit
             return Page(entries=[e for e in entries if keep(e)], complete=True)

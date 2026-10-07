@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import re
 import time
 
-from wesearch.lib.custom_json import ReadError, convert
+from wesearch.lib.codec import ReadError, from_plain
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
 from wesearch.paper.search import search
@@ -120,7 +120,7 @@ def _text(value: object) -> str:
 def _object(value: object) -> dict[str, object]:
     """Return ``value`` when it is a JSON object, else ``{}``."""
     try:
-        return convert(value, dict[str, object])
+        return from_plain(value, dict[str, object])
     except ReadError:
         return {}
 
@@ -128,7 +128,7 @@ def _object(value: object) -> dict[str, object]:
 def _array(value: object) -> list[object]:
     """Return ``value`` when it is a JSON array, else ``[]``."""
     try:
-        return convert(value, list[object])
+        return from_plain(value, list[object])
     except ReadError:
         return []
 

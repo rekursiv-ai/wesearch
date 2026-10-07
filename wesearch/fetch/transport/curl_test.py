@@ -49,7 +49,7 @@ from wesearch.fetch.transport.curl import (
     seed_session_jar,
     set_session_cookies,
 )
-from wesearch.lib.custom_json import convert
+from wesearch.lib.codec import from_plain
 from wesearch.types.errors import (
     FetchError,
 )
@@ -809,7 +809,7 @@ def _recorded_curl_options(mock_req: Mock) -> dict[object, object]:
 
 def _recorded_headers(mock_req: Mock) -> dict[str, str]:
     """Return the typed headers mapping recorded by a request mock."""
-    return convert(mock_req.call_args.kwargs["headers"], dict[str, str])
+    return from_plain(mock_req.call_args.kwargs["headers"], dict[str, str])
 
 
 def test_curl_set_cookies_uses_all_set_cookie_headers() -> None:

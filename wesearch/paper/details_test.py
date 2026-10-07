@@ -25,12 +25,12 @@ from wesearch.paper.providers import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from wesearch.lib.custom_json import MutableJSON
+    from wesearch.lib.codec import MutablePlainTree
 
 
 class TestCitations:
     def test_year_filter_keeps_recent(self) -> None:
-        entries: list[MutableJSON] = [
+        entries: list[dict[str, MutablePlainTree]] = [
             {"isInfluential": True, "citingPaper": {"title": "new", "year": 2024}},
             {"isInfluential": False, "citingPaper": {"title": "old", "year": 2010}},
         ]
@@ -40,7 +40,7 @@ class TestCitations:
             params: dict[str, str | int],
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del path, params, limit
             return Page(entries=[e for e in entries if keep(e)], complete=True)
@@ -50,7 +50,7 @@ class TestCitations:
         assert [r.title for r in listing.records] == ["new"]
 
     def test_year_filter_includes_the_boundary_year(self) -> None:
-        entry: MutableJSON = {
+        entry: dict[str, MutablePlainTree] = {
             "isInfluential": True,
             "citingPaper": {"title": "boundary", "year": 2020},
         }
@@ -66,7 +66,7 @@ class TestCitations:
     def test_year_filter_excludes_a_bool_year(self) -> None:
         # ``isinstance(True, int)`` is true, so a JSON ``true`` year passed the
         # filter and was compared as the value 1.
-        entries: list[MutableJSON] = [
+        entries: list[dict[str, MutablePlainTree]] = [
             {"isInfluential": True, "citingPaper": {"title": "real", "year": 2024}},
             {"isInfluential": True, "citingPaper": {"title": "bogus", "year": True}},
         ]
@@ -76,7 +76,7 @@ class TestCitations:
             params: dict[str, str | int],
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del path, params, limit
             return Page(entries=[e for e in entries if keep(e)], complete=True)
@@ -86,7 +86,7 @@ class TestCitations:
         assert [r.title for r in listing.records] == ["real"]
 
     def test_influential_only_filters(self) -> None:
-        entries: list[MutableJSON] = [
+        entries: list[dict[str, MutablePlainTree]] = [
             {"isInfluential": True, "citingPaper": {"title": "keep"}},
             {"isInfluential": False, "citingPaper": {"title": "drop"}},
         ]
@@ -96,7 +96,7 @@ class TestCitations:
             params: dict[str, str | int],
             *,
             limit: int | None,
-            keep: Callable[[MutableJSON], bool],
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
         ) -> Page:
             del path, params, limit
             return Page(entries=[e for e in entries if keep(e)], complete=False)
@@ -148,14 +148,17 @@ class TestCitations:
 
 class TestMetadata:
     def test_single(self) -> None:
-        payload: MutableJSON = {"title": "T", "externalIds": {"DOI": "10.1/x"}}
+        payload: dict[str, MutablePlainTree] = {
+            "title": "T",
+            "externalIds": {"DOI": "10.1/x"},
+        }
         with patch.object(s2, "get", return_value=payload) as get:
             rec = metadata("doi", "10.1/x")
         assert rec.title == "T"
         assert get.call_args.args[0] == "/paper/DOI:10.1/x"
 
     def test_single_requests_full_s2_fields(self) -> None:
-        payload: MutableJSON = {"title": "T"}
+        payload: dict[str, MutablePlainTree] = {"title": "T"}
         with patch.object(s2, "get", return_value=payload) as get:
             metadata("arxiv", "2312.00000")
 

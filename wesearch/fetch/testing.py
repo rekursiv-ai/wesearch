@@ -8,7 +8,7 @@ import io
 
 from curl_cffi import requests as cc_requests
 
-from wesearch.lib.custom_json import convert
+from wesearch.lib.codec import from_plain
 
 
 try:
@@ -60,7 +60,7 @@ def lower_headers(kw: dict[str, object]) -> dict[str, str]:
       result: The dict[str, str].
 
     """
-    headers = convert(kw.get("headers"), dict[str, str])
+    headers = from_plain(kw.get("headers"), dict[str, str])
     return {k.lower(): v for k, v in headers.items()}
 
 

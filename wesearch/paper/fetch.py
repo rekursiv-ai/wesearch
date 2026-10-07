@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, cast
 import logging
 
 from wesearch.fetch import RequestParams, RetryParams, fetch
-from wesearch.lib.custom_json import MutableJSON
+from wesearch.lib.codec import MutablePlainTree
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.ids import s2_wire_id
 from wesearch.paper.providers import s2
@@ -70,7 +70,7 @@ def looks_like_pdf(
     return len(content) >= min_pdf_bytes and content[: len(pdf_magic)] == pdf_magic
 
 
-def oa_url_of(paper: MutableJSON) -> str | None:
+def oa_url_of(paper: dict[str, MutablePlainTree]) -> str | None:
     """Extract a non-empty ``openAccessPdf.url`` from an S2 paper record.
 
     Args:
@@ -80,7 +80,7 @@ def oa_url_of(paper: MutableJSON) -> str | None:
       url: The open-access PDF URL, or ``None`` when absent or empty.
 
     """
-    oa = cast(MutableJSON, paper.get("openAccessPdf") or {})
+    oa = cast(dict[str, MutablePlainTree], paper.get("openAccessPdf") or {})
     url = oa.get("url")
     return url if isinstance(url, str) and url else None
 

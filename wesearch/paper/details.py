@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import functools
 
-from wesearch.lib.custom_json import MutableJSON, convert
+from wesearch.lib.codec import MutablePlainTree, from_plain
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.ids import s2_wire_id
@@ -199,7 +199,7 @@ def _edge_listing(page: Page, *, inner_key: str) -> Listing:
     """Extract paper records from S2 citation-edge entries into a Listing."""
     records: list[PaperRecord] = []
     for e in page.entries:
-        inner = cast(MutableJSON, e.get(inner_key) or {})
+        inner = cast(dict[str, MutablePlainTree], e.get(inner_key) or {})
         if not inner:
             continue
         records.append(
@@ -222,7 +222,7 @@ def _check_graph_source(source: GraphSource) -> None:
 
 
 def _citation_keep(
-    entry: MutableJSON,
+    entry: dict[str, MutablePlainTree],
     *,
     influential_only: bool,
     year_from: int | None,
@@ -232,8 +232,8 @@ def _citation_keep(
         return False
     if year_from is None:
         return True
-    inner = cast(MutableJSON, entry.get("citingPaper") or {})
+    inner = cast(dict[str, MutablePlainTree], entry.get("citingPaper") or {})
     raw_year = inner.get("year")
     if raw_year is None or isinstance(raw_year, bool):
         return False
-    return convert(inner.get("year"), int) >= year_from
+    return from_plain(inner.get("year"), int) >= year_from

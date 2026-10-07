@@ -31,7 +31,7 @@ from wesearch.chrome.headers import (
     chrome_user_agent,
     impersonate_version_platform,
 )
-from wesearch.lib.custom_json import ReadError, convert, loads
+from wesearch.lib.codec import ReadError, from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -184,7 +184,7 @@ def _download_records() -> list[object]:
         raise RuntimeError(  # noqa: TRY004 -- Dataset shape is a downloader contract error.
             "expected JSON array",
         )
-    return convert(parsed, list[object])
+    return from_plain(parsed, list[object])
 
 
 def _read_response(dataset_request: request.Request) -> bytes:
@@ -214,7 +214,7 @@ def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[s
     selected_set: set[str] = set()
     for raw_record in records:
         try:
-            record = convert(raw_record, dict[str, object])
+            record = from_plain(raw_record, dict[str, object])
         except ReadError:
             continue
         if not record:

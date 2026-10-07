@@ -21,7 +21,7 @@ pytest.importorskip("mcp.server")
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
-from wesearch.lib.custom_json import convert
+from wesearch.lib.codec import from_plain
 from wesearch.mcp import server
 from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
@@ -83,7 +83,7 @@ def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     out = server.paper_search("mclmc")
     assert out["total"] == 41
     assert out["complete"] is False
-    first = convert(out["records"], list[dict[str, object]])[0]
+    first = from_plain(out["records"], list[dict[str, object]])[0]
     assert first["title"] == "Microcanonical Sampling"
 
 
@@ -382,7 +382,7 @@ def test_paper_search_emits_library_records_verbatim(
     fake = search.SearchResult(records=[distinct, namesake], total=2, complete=True)
     monkeypatch.setattr(search, "search", _returns(fake))
     out = server.paper_search("discussion")
-    assert len(convert(out["records"], list[object])) == 2
+    assert len(from_plain(out["records"], list[object])) == 2
 
 
 _TOOLS = (
@@ -454,7 +454,7 @@ def test_tool_description_documents_every_parameter(tool: str) -> None:
     published = {t.name: t for t in asyncio.run(server.mcp.list_tools())}[tool]
     entries = _entries(_section(published.description or "", "Args"))
     schema = cast(dict[str, object], published.input_schema)
-    properties = convert(schema["properties"], dict[str, object])
+    properties = from_plain(schema["properties"], dict[str, object])
     assert list(entries) == list(properties)
     for name, text in entries.items():
         # A value an entry quotes must be one the parameter accepts.
@@ -545,9 +545,9 @@ def _entries(lines: list[str]) -> dict[str, str]:
 
 def _enum_values(schema: object) -> set[object]:
     """Return every ``enum`` member of a JSON-Schema property, through ``anyOf``."""
-    prop = convert(schema, dict[str, object])
-    values = set(convert(prop.get("enum"), list[object], default=[]))
-    for branch in convert(prop.get("anyOf"), list[dict[str, object]], default=[]):
+    prop = from_plain(schema, dict[str, object])
+    values = set(from_plain(prop.get("enum"), list[object], default=[]))
+    for branch in from_plain(prop.get("anyOf"), list[dict[str, object]], default=[]):
         values |= _enum_values(branch)
     return values
 

@@ -7,32 +7,36 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from wesearch.lib.custom_json import MutableJSON, MutableJSONValue, convert
+from wesearch.lib.codec import MutablePlainTree, from_plain
 from wesearch.paper.errors import BackendError
 from wesearch.paper.paginate import Cursor, _cap, paginate
 
 
-def _rows(body: MutableJSON) -> list[MutableJSON]:
+def _rows(body: dict[str, MutablePlainTree]) -> list[dict[str, MutablePlainTree]]:
     """Read the ``data`` row list from a fixture page body."""
-    return cast(list[MutableJSON], body.get("data") or [])
+    return cast(list[dict[str, MutablePlainTree]], body.get("data") or [])
 
 
 def _offset_cursor(
-    pages: list[list[MutableJSON]],
+    pages: list[list[dict[str, MutablePlainTree]]],
     *,
     page_size_max: int = 100,
     fetch: MagicMock | None = None,
 ) -> Cursor:
     """Return a 0-based offset cursor over pre-baked ``pages`` (short page = last)."""
 
-    def do_fetch(offset: int, size: int) -> MutableJSON:
+    def do_fetch(offset: int, size: int) -> dict[str, MutablePlainTree]:
         del size
         idx = offset  # `pages` are indexed by page number for simplicity.
         rows = pages[idx] if idx < len(pages) else []
-        body: MutableJSON = {"data": [*rows]}
+        body: dict[str, MutablePlainTree] = {"data": [*rows]}
         return body
 
-    def advance(body: MutableJSON, position: int, size: int) -> int | None:
+    def advance(
+        body: dict[str, MutablePlainTree],
+        position: int,
+        size: int,
+    ) -> int | None:
         rows = body.get("data") or []
         assert isinstance(rows, list)
         return position + 1 if len(rows) >= size else None
@@ -47,7 +51,7 @@ def _offset_cursor(
 
 class TestPaginate:
     def test_cap_none_preserves_list_identity(self) -> None:
-        entries: list[MutableJSON] = [{"n": 1}]
+        entries: list[dict[str, MutablePlainTree]] = [{"n": 1}]
         assert _cap(entries, None) is entries
 
     def test_single_page_under_limit_is_complete(self) -> None:
@@ -59,10 +63,10 @@ class TestPaginate:
     def test_limit_clamps_page_size_never_exceeds_max(self) -> None:
         sizes: list[int] = []
 
-        def do_fetch(offset: int, size: int) -> MutableJSON:
+        def do_fetch(offset: int, size: int) -> dict[str, MutablePlainTree]:
             sizes.append(size)
-            rows: list[MutableJSONValue] = [{"n": offset}] * size  # Always full.
-            body: MutableJSON = {"data": rows}
+            rows: list[MutablePlainTree] = [{"n": offset}] * size  # Always full.
+            body: dict[str, MutablePlainTree] = {"data": rows}
             return body
 
         cursor = _offset_cursor(
@@ -77,7 +81,7 @@ class TestPaginate:
     def test_walks_multiple_pages_to_limit_incomplete(self) -> None:
         # Three full 200-pages available; limit 450 spans them and stays
         # incomplete (a full final page means more may remain).
-        pages: list[list[MutableJSON]] = [
+        pages: list[list[dict[str, MutablePlainTree]]] = [
             [{"n": i} for i in range(200)] for _ in range(3)
         ]
         cursor = _offset_cursor(pages, page_size_max=200)
@@ -88,7 +92,10 @@ class TestPaginate:
     def test_full_page_exactly_at_limit_is_incomplete(self) -> None:
         # Limit == a full page: enough is reached, but the cursor was not
         # exhausted, so complete must be False (the limit-clamp bug guard).
-        pages: list[list[MutableJSON]] = [[{"n": i} for i in range(200)], [{"n": 200}]]
+        pages: list[list[dict[str, MutablePlainTree]]] = [
+            [{"n": i} for i in range(200)],
+            [{"n": 200}],
+        ]
         cursor = _offset_cursor(pages, page_size_max=200)
         page = paginate(cursor, limit=200)
         assert len(page.entries) == 200
@@ -96,12 +103,15 @@ class TestPaginate:
 
     def test_keep_filter_does_not_understate_completeness(self) -> None:
         # A keep-filter dropping rows must not make a full page look short.
-        pages: list[list[MutableJSON]] = [[{"n": i} for i in range(200)], [{"n": 200}]]
+        pages: list[list[dict[str, MutablePlainTree]]] = [
+            [{"n": i} for i in range(200)],
+            [{"n": 200}],
+        ]
         cursor = _offset_cursor(pages, page_size_max=200)
         page = paginate(
             cursor,
             limit=None,
-            keep=lambda r: convert(r["n"], int) % 2 == 0,
+            keep=lambda r: from_plain(r["n"], int) % 2 == 0,
         )
         # Only one page fetched (limit=None), all-even kept, but complete
         # reflects the cursor (full page -> more), not the filtered count.
@@ -114,7 +124,7 @@ class TestPaginate:
         assert page.complete is False
 
     def test_depth_ceiling_caps_overlong_backend_page(self) -> None:
-        def do_fetch(offset: int, size: int) -> MutableJSON:
+        def do_fetch(offset: int, size: int) -> dict[str, MutablePlainTree]:
             if offset == 0:
                 return {"data": [{"n": i} for i in range(size + 100)]}
             raise BackendError("too deep", status=400)
@@ -131,7 +141,7 @@ class TestPaginate:
         assert page.complete is False
 
     def test_depth_ceiling_stops_incomplete_with_results(self) -> None:
-        def do_fetch(offset: int, size: int) -> MutableJSON:
+        def do_fetch(offset: int, size: int) -> dict[str, MutablePlainTree]:
             if offset == 0:
                 return {"data": [{"n": i} for i in range(size)]}
             raise BackendError("too deep", status=400)
@@ -148,7 +158,7 @@ class TestPaginate:
         assert page.complete is False  # Ceiling hit -> more may exist.
 
     def test_depth_ceiling_without_results_reraises(self) -> None:
-        def do_fetch(offset: int, size: int) -> MutableJSON:
+        def do_fetch(offset: int, size: int) -> dict[str, MutablePlainTree]:
             del offset, size
             raise BackendError("bad", status=400)
 
@@ -198,7 +208,7 @@ class TestPaginate:
     def test_start_position_respected(self) -> None:
         seen: list[int] = []
 
-        def do_fetch(position: int, size: int) -> MutableJSON:
+        def do_fetch(position: int, size: int) -> dict[str, MutablePlainTree]:
             del size
             seen.append(position)
             return {"data": []}

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     import defusedxml.ElementTree as _defused_etree  # noqa: N813 -- The public web adapter preserves the external provider's API name.
 
     from wesearch.fetch.custom_types import HttpMethod
-    from wesearch.lib.custom_json import JSONValue
+    from wesearch.lib.codec import PlainTree
     from wesearch.types.extractor import Extract
 else:
     from wrapt import lazy_import
@@ -100,7 +100,7 @@ def fetch_web(
     url: str,
     *,
     method: HttpMethod = "GET",
-    json_body: JSONValue | NoBody = NO_BODY,
+    json_body: PlainTree | NoBody = NO_BODY,
     form_body: dict[str, str] | None = None,
     max_chars: int | None = None,
     policy: PolicyParams | None = None,
@@ -168,7 +168,7 @@ def _fetch_body(
     url: str,
     *,
     method: HttpMethod,
-    json_body: JSONValue | NoBody,
+    json_body: PlainTree | NoBody,
     form_body: dict[str, str] | None,
     policy: PolicyParams | None = None,
 ) -> tuple[bytes, str]:

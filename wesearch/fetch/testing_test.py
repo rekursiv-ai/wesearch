@@ -30,7 +30,7 @@ def test_lower_headers_normalizes_keys_and_values() -> None:
 
 def test_lower_headers_uses_a_typed_read() -> None:
     headers = object()
-    with patch.object(testing, "convert", return_value={"X": "Y"}) as convert:
+    with patch.object(testing, "from_plain", return_value={"X": "Y"}) as convert:
         assert lower_headers({"headers": headers}) == {"x": "Y"}
     convert.assert_called_once_with(headers, dict[str, str])
 

@@ -17,7 +17,7 @@ import functools
 import pytest
 import yaml
 
-from wesearch.lib.custom_json import convert
+from wesearch.lib.codec import from_plain
 
 
 _THIS: Final = Path(__file__).resolve()
@@ -183,18 +183,18 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
     ]
     assert marked, "no test file marks an xdist group; this guard is vacuous"
 
-    config = convert(
+    config = from_plain(
         yaml.safe_load(config_path.read_text(encoding="utf-8")),
         dict[str, object],
     )
     integration = [
         hook
-        for repo in convert(config.get("repos"), list[dict[str, object]], default=[])
-        for hook in convert(repo.get("hooks"), list[dict[str, object]], default=[])
-        if convert(hook.get("id"), str, default="") == "pytest-integration-global"
+        for repo in from_plain(config.get("repos"), list[dict[str, object]], default=[])
+        for hook in from_plain(repo.get("hooks"), list[dict[str, object]], default=[])
+        if from_plain(hook.get("id"), str, default="") == "pytest-integration-global"
     ]
     assert integration, "no pytest-integration-global hook"
-    script = "\n".join(convert(integration[0].get("args"), list[str], default=[]))
+    script = "\n".join(from_plain(integration[0].get("args"), list[str], default=[]))
 
     assert "--dist=loadgroup" in script, (
         f"{marked} mark an xdist group, but the integration hook no longer "
