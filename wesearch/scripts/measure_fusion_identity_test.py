@@ -15,7 +15,7 @@ from wesearch.paper.search import SearchResult
 from wesearch.scripts import measure_fusion_identity
 
 
-def _record(*, doi: str = "", arxiv_id: str | None = None) -> PaperRecord:
+def _record(*, doi: str = "", arxiv_id: str = "") -> PaperRecord:
     return PaperRecord(title="Title", doi=doi, arxiv_id=arxiv_id)
 
 

@@ -78,7 +78,7 @@ _PROFILE = Path("test-profile")
 # class-wide and permanent, and earlier tests in this module launch browsers, so
 # a test that read ``Transaction.__call__`` at call time would restore the guard
 # it means to remove and assert nothing.
-_VENDOR_TRANSACTION_CALL = Transaction.__call__
+_VENDOR_TRANSACTION_CALL = Transaction[object].__call__
 
 
 @pytest.mark.cli_python_subprocess
@@ -3078,7 +3078,7 @@ def test_close_browser_on_port_starts_and_stops_browser(
 def test_command_flag_uses_first_marker_and_stops_at_next_flag() -> None:
     command = "--user-data-dir=/first --user-data-dir=/second --remote-debugging-port=9"
     assert zendriver._command_flag(command, "--user-data-dir=") == "/first"
-    assert zendriver._command_flag(command, "--missing=") is None
+    assert zendriver._command_flag(command, "--missing=") == ""
 
 
 def test_command_flag_preserves_values_containing_single_dashes() -> None:

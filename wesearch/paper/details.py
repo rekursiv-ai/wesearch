@@ -199,7 +199,8 @@ def _edge_listing(page: Page, *, inner_key: str) -> Listing:
     """Extract paper records from S2 citation-edge entries into a Listing."""
     records: list[PaperRecord] = []
     for e in page.entries:
-        inner = cast(dict[str, MutablePlainTree], e.get(inner_key) or {})
+        inner_value = e.get(inner_key)
+        inner = inner_value if isinstance(inner_value, dict) else {}
         if not inner:
             continue
         records.append(
@@ -228,11 +229,12 @@ def _citation_keep(
     year_from: int | None,
 ) -> bool:
     """Whether a citation edge passes the influence and ``year_from`` filters."""
-    if influential_only and not entry.get("isInfluential"):
+    if influential_only and entry.get("isInfluential") is not True:
         return False
     if year_from is None:
         return True
-    inner = cast(dict[str, MutablePlainTree], entry.get("citingPaper") or {})
+    inner_value = entry.get("citingPaper")
+    inner = inner_value if isinstance(inner_value, dict) else {}
     raw_year = inner.get("year")
     if raw_year is None or isinstance(raw_year, bool):
         return False

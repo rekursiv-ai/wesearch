@@ -348,19 +348,17 @@ def paper_record_from(
     authors_raw = _objects(data.get("authors"))
     authors = tuple(str(a["name"]) for a in authors_raw if a.get("name"))
     oa = _object(data.get("openAccessPdf"))
-    doi = ids.get("DOI")
-    arxiv = ids.get("ArXiv")
     return PaperRecord(
         title=str(data.get("title") or ""),
         authors=authors,
         year=cast(int | None, data.get("year")),
-        venue=(str(data["venue"]) if data.get("venue") else None),
-        doi=(str(doi) if doi else None),
-        arxiv_id=(str(arxiv) if arxiv else None),
-        abstract=(str(data["abstract"]) if data.get("abstract") else None),
+        venue=_text(data.get("venue")),
+        doi=_text(ids.get("DOI")),
+        arxiv_id=_text(ids.get("ArXiv")),
+        abstract=_text(data.get("abstract")),
         citation_count=cast(int | None, data.get("citationCount")),
         reference_count=cast(int | None, data.get("referenceCount")),
-        open_access_pdf=(str(oa["url"]) if oa.get("url") else None),
+        open_access_pdf=_text(oa.get("url")),
         sources=sources,
         is_influential=is_influential,
     )
@@ -394,16 +392,13 @@ def author_record_from(data: dict[str, MutablePlainTree]) -> AuthorRecord:
             if isinstance(name, str) and name.strip():
                 affiliations.append(name.strip())
 
-    homepage_raw = data.get("homepage")
-    homepage = (
-        str(homepage_raw) if isinstance(homepage_raw, str) and homepage_raw else None
-    )
+    homepage = data.get("homepage")
     return AuthorRecord(
         author_id=author_id,
         name=str(data.get("name") or "(unknown)"),
         aliases=aliases,
         affiliations=tuple(affiliations),
-        homepage=homepage,
+        homepage=homepage if isinstance(homepage, str) else "",
         h_index=cast(int | None, data.get("hIndex")),
         citation_count=cast(int | None, data.get("citationCount")),
         paper_count=cast(int | None, data.get("paperCount")),
@@ -454,7 +449,7 @@ def search_total(data: dict[str, MutablePlainTree]) -> int:
 def _headers() -> dict[str, str]:
     """Build S2 request headers, injecting ``x-api-key`` when present in env."""
     headers: dict[str, str] = {"Accept": "application/json"}
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
     if key:
         headers["x-api-key"] = key
     return headers
@@ -594,6 +589,11 @@ def _array(value: object) -> list[object]:
 def _objects(value: object) -> list[dict[str, object]]:
     """Return the nonempty JSON objects of an array, dropping other elements."""
     return [obj for item in _array(value) if (obj := _object(item))]
+
+
+def _text(value: object) -> str:
+    """Return a JSON value as text, ``""`` for a falsy one (null, ``""``, ``0``)."""
+    return str(value) if value else ""
 
 
 def _count(value: object) -> int:

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     import pytest
 
 
-def _record(title: str, *, doi: str = "", arxiv_id: str | None = None) -> PaperRecord:
+def _record(title: str, *, doi: str = "", arxiv_id: str = "") -> PaperRecord:
     return PaperRecord(title=title, doi=doi, arxiv_id=arxiv_id)
 
 

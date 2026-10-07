@@ -270,10 +270,8 @@ def _id_prefix(rec: PaperRecord) -> str:
 # ``None`` means uncapped. A non-positive cap does NOT: it used to return the full
 # abstract, so ``abstract_chars=0`` -- the plainest way to ask for no abstract at all --
 # returned the longest possible one.
-def _trim_abstract(abstract: str | None, cap: int | None) -> str | None:
+def _trim_abstract(abstract: str, cap: int | None) -> str:
     """Apply caller-supplied character cap to an abstract, if any."""
-    if abstract is None:
-        return None
     if cap is None or len(abstract) <= cap:
         return abstract
     if cap < 1:

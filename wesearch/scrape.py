@@ -51,4 +51,4 @@ def get_element_content(html: str, selector: str) -> str | None:
     """
     soup = bs4.BeautifulSoup(html, "html.parser")
     element = soup.select_one(selector)
-    return element.get_text(strip=True) if element else None
+    return element.get_text(strip=True) if element is not None else None

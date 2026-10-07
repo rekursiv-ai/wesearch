@@ -29,7 +29,7 @@ class PaperRecord:
 
     All fields are optional except ``title`` -- backends occasionally return
     sparse records (e.g. OpenAlex for very old papers), and we prefer
-    ``None``/``""`` over fabricating values.
+    ``None`` (numbers) / ``""`` (text) over fabricating values.
     """
 
     title: str
@@ -46,16 +46,16 @@ class PaperRecord:
     year: int | None = None
     """Publication year."""
 
-    venue: str | None = None
+    venue: str = ""
     """Publication venue (journal or conference)."""
 
-    doi: str | None = None
+    doi: str = ""
     """DOI identifier (no prefix)."""
 
-    arxiv_id: str | None = None
+    arxiv_id: str = ""
     """arXiv identifier (no prefix)."""
 
-    abstract: str | None = None
+    abstract: str = ""
     """Abstract text."""
 
     citation_count: int | None = None
@@ -64,7 +64,7 @@ class PaperRecord:
     reference_count: int | None = None
     """Number of references reported by the backend."""
 
-    open_access_pdf: str | None = None
+    open_access_pdf: str = ""
     """URL of an open-access PDF, when available."""
 
     sources: tuple[str, ...] = field(default_factory=tuple)
@@ -139,7 +139,7 @@ class AuthorRecord:
     affiliations: tuple[str, ...] = ()
     """Institutional affiliations in backend-provided order."""
 
-    homepage: str | None = None
+    homepage: str = ""
     """Homepage URL, when available."""
 
     h_index: int | None = None

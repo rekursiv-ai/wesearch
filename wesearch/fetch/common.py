@@ -83,7 +83,7 @@ def public_host(hostname: str) -> ValidatedHost:
 
     """
     host = urlparse(f"//{hostname}").hostname
-    if not host:
+    if host is None:
         raise ValueError("URL has no host.")
     try:
         ips = [str(info[4][0]) for info in socket.getaddrinfo(host, None)]
@@ -143,7 +143,7 @@ def pinned_host(url: str, trust: Trust) -> ValidatedHost | None:
     if trust == "internal":
         return None
     hostname = urlparse(url).hostname
-    if not hostname:
+    if hostname is None:
         raise ValueError(f"URL has no host: {url!r}.")
     return public_host(hostname)
 
@@ -266,7 +266,7 @@ def redirect_target(current_url: str, status: int, headers: dict[str, str]) -> s
       result: Absolute URL after resolving Location relative to current_url.
 
     """
-    location = headers.get("location")
+    location = headers.get("location", "")
     if not location:
         raise FetchError(
             current_url,

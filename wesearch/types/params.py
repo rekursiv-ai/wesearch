@@ -166,11 +166,11 @@ class ContentParams:
     """
 
     method: HttpMethod = "GET"
-    params: dict[str, str | int] | None = None
+    params: dict[str, str | int] = field(default_factory=dict[str, str | int])
     data: dict[str, str] | None = None
     json: PlainTree | NoBody = NO_BODY
     headers: dict[str, str] | None = None
-    cookies: dict[str, str] | None = None
+    cookies: dict[str, str] = field(default_factory=dict[str, str])
     raw_headers: bool = False
 
     def __post_init__(self) -> None:

@@ -761,14 +761,14 @@ class TestCurlPathSendsUserAgent:
             thread.join(timeout=5)
 
         assert body == b"ok"
-        assert seen.get("user-agent"), (
+        assert seen.get("user-agent", ""), (
             "curl path sent no User-Agent; UA-gated APIs (e.g. GitHub) "
             f"403 such requests. headers seen: {sorted(seen)}"
         )
         assert "chrome" in seen["user-agent"].lower()
         # Full coherent Chrome identity, not just a bare UA (a partial set is
         # itself a bot tell): every rung must send what the others send.
-        assert seen.get("accept"), f"curl path missing Accept: {sorted(seen)}"
+        assert seen.get("accept", ""), f"curl path missing Accept: {sorted(seen)}"
         assert seen.get("sec-fetch-mode") == "navigate", (
             f"curl path missing Sec-Fetch navigation headers: {sorted(seen)}"
         )
