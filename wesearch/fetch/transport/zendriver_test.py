@@ -44,7 +44,7 @@ from wesearch.fetch.transport.zendriver import (
     _Flags,
     _navigate,
 )
-from wesearch.lib.custom_json import convert
+from wesearch.lib.codec import from_plain
 from wesearch.lib.userdirs import data_dir
 
 
@@ -223,12 +223,12 @@ class _FakeTab:
         # ``read`` rather than a bare ``.get`` ladder: the CDP verbs are
         # unstubbed, so their wire dict arrives as ``dict[Unknown, Unknown]``
         # and every read off it is partially unknown.
-        payload = convert(cast(object, raw), dict[str, object])
+        payload = from_plain(cast(object, raw), dict[str, object])
         # Kept: a generator is single-use, so a test that re-reads ``commands``
         # would find every one exhausted by this very inspection.
         self.wire_commands.append(payload)
-        request_id = convert(
-            convert(payload.get("params"), dict[str, object], default={}).get(
+        request_id = from_plain(
+            from_plain(payload.get("params"), dict[str, object], default={}).get(
                 "requestId",
             ),
             str,
@@ -236,7 +236,7 @@ class _FakeTab:
         )
         if not request_id:
             return
-        method = convert(payload.get("method"), str, default="")
+        method = from_plain(payload.get("method"), str, default="")
         if method == "Fetch.continueRequest":
             self.continued_requests.append(request_id)
         elif method == "Fetch.failRequest":
@@ -1298,23 +1298,23 @@ def _continued_headers(tab: _FakeTab) -> dict[str, str]:
         (
             c
             for c in tab.wire_commands
-            if convert(c.get("method"), str, default="") == "Fetch.continueRequest"
+            if from_plain(c.get("method"), str, default="") == "Fetch.continueRequest"
         ),
         None,
     )
     assert payload is not None, "the request was never continued"
-    entries = convert(
-        convert(payload.get("params"), dict[str, object], default={}).get("headers"),
+    entries = from_plain(
+        from_plain(payload.get("params"), dict[str, object], default={}).get("headers"),
         list[object],
         default=[],
     )
     return {
-        convert(
-            convert(entry, dict[str, object]).get("name"),
+        from_plain(
+            from_plain(entry, dict[str, object]).get("name"),
             str,
             default="",
-        ).lower(): convert(
-            convert(entry, dict[str, object]).get("value"),
+        ).lower(): from_plain(
+            from_plain(entry, dict[str, object]).get("value"),
             str,
             default="",
         )
@@ -1334,12 +1334,12 @@ def _continue_override(tab: _FakeTab) -> dict[str, str] | None:
         (
             c
             for c in tab.wire_commands
-            if convert(c.get("method"), str, default="") == "Fetch.continueRequest"
+            if from_plain(c.get("method"), str, default="") == "Fetch.continueRequest"
         ),
         None,
     )
     assert payload is not None, "the request was never continued"
-    params = convert(payload.get("params"), dict[str, object], default={})
+    params = from_plain(payload.get("params"), dict[str, object], default={})
     if "headers" not in params:
         return None
     return _continued_headers(tab)
@@ -1351,19 +1351,19 @@ def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
         (
             c
             for c in tab.wire_commands
-            if convert(c.get("method"), str, default="")
+            if from_plain(c.get("method"), str, default="")
             == "Network.setExtraHTTPHeaders"
         ),
         None,
     )
     if payload is None:
         return {}
-    installed = convert(
-        convert(payload.get("params"), dict[str, object], default={}).get("headers"),
+    installed = from_plain(
+        from_plain(payload.get("params"), dict[str, object], default={}).get("headers"),
         dict[str, object],
         default={},
     )
-    return {name.lower(): convert(value, str) for name, value in installed.items()}
+    return {name.lower(): from_plain(value, str) for name, value in installed.items()}
 
 
 # The genuine CDP dataclass, not a look-alike: the guard filters on ``isinstance``, so a
@@ -1587,17 +1587,21 @@ class TestBrowserHonorsTrustPerHop:
         payload = next(
             c
             for c in tab.wire_commands
-            if convert(c.get("method"), str, default="") == "Fetch.continueRequest"
+            if from_plain(c.get("method"), str, default="") == "Fetch.continueRequest"
         )
-        entries = convert(
-            convert(payload.get("params"), dict[str, object], default={}).get(
+        entries = from_plain(
+            from_plain(payload.get("params"), dict[str, object], default={}).get(
                 "headers",
             ),
             list[object],
             default=[],
         )
         names = [
-            convert(convert(e, dict[str, object]).get("name"), str, default="").lower()
+            from_plain(
+                from_plain(e, dict[str, object]).get("name"),
+                str,
+                default="",
+            ).lower()
             for e in entries
         ]
         assert names.count("cookie") == 1, f"duplicate Cookie row: {names}"
@@ -1849,23 +1853,23 @@ class TestBrowserHonorsTrustPerHop:
             (
                 c
                 for c in tab.wire_commands
-                if convert(c.get("method"), str, default="") == "Fetch.enable"
+                if from_plain(c.get("method"), str, default="") == "Fetch.enable"
             ),
             None,
         )
         assert enable is not None
-        patterns = convert(
-            convert(enable.get("params"), dict[str, object], default={}).get(
+        patterns = from_plain(
+            from_plain(enable.get("params"), dict[str, object], default={}).get(
                 "patterns",
             ),
             list[object],
             default=[],
         )
-        shapes = [convert(p, dict[str, object]) for p in patterns]
-        assert [convert(s.get("resourceType"), str, default="") for s in shapes] == [
+        shapes = [from_plain(p, dict[str, object]) for p in patterns]
+        assert [from_plain(s.get("resourceType"), str, default="") for s in shapes] == [
             "Document",
         ]
-        assert [convert(s.get("requestStage"), str, default="") for s in shapes] == [
+        assert [from_plain(s.get("requestStage"), str, default="") for s in shapes] == [
             "Request",
         ]
 

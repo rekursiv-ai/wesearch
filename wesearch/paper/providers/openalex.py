@@ -34,7 +34,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import MutableJSON, ReadError, convert, loads
+from wesearch.lib.codec import MutablePlainTree, ReadError, from_plain, loads
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,
@@ -260,7 +260,7 @@ def _resolve_works(
 def _object(value: object) -> dict[str, object]:
     """Return ``value`` when it is a JSON object, else ``{}``."""
     try:
-        return convert(value, dict[str, object])
+        return from_plain(value, dict[str, object])
     except ReadError:
         return {}
 
@@ -268,7 +268,7 @@ def _object(value: object) -> dict[str, object]:
 def _array(value: object) -> list[object]:
     """Return ``value`` when it is a JSON array, else ``[]``."""
     try:
-        return convert(value, list[object])
+        return from_plain(value, list[object])
     except ReadError:
         return []
 
@@ -281,7 +281,7 @@ def _objects(value: object) -> list[dict[str, object]]:
 def _count(value: object) -> int:
     """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
     try:
-        return convert(value, int, strict=False, default=0)
+        return from_plain(value, int, strict=False, default=0)
     except ReadError:
         return 0
 
@@ -350,7 +350,7 @@ def _paginate_works(
     if limit == 0:
         return Page(entries=[], complete=True), total
 
-    def fetch_page(page_no: int, size: int) -> MutableJSON:
+    def fetch_page(page_no: int, size: int) -> dict[str, MutablePlainTree]:
         nonlocal total
         params: dict[str, str | int] = {
             "select": _select(),
@@ -364,7 +364,10 @@ def _paginate_works(
 
     cursor = Cursor(
         fetch=fetch_page,
-        rows=lambda body: cast(list[MutableJSON], body.get("results") or []),
+        rows=lambda body: cast(
+            list[dict[str, MutablePlainTree]],
+            body.get("results") or [],
+        ),
         advance=_works_page_advance,
         page_size_max=per_page_max,
         start=1,
@@ -374,7 +377,11 @@ def _paginate_works(
 
 # Stops via ``meta.count``: a count-aligned full final page would otherwise
 # continue, since ``len < size`` alone never fires for it.
-def _works_page_advance(body: MutableJSON, page_no: int, size: int) -> int | None:
+def _works_page_advance(
+    body: dict[str, MutablePlainTree],
+    page_no: int,
+    size: int,
+) -> int | None:
     """Next 1-based ``/works`` page, or None at the end."""
     rows = _array(body.get("results"))
     count = _count(_object(body.get("meta")).get("count"))
@@ -391,7 +398,7 @@ def _get(
     interval_sec: float = 0.1,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """GET an OpenAlex path, gated, with polite UA + optional key; parse JSON."""
     # A premium key raises the daily credit budget far above the anonymous
     # ~1000/day; send it when configured.
@@ -447,7 +454,7 @@ def _get(
         raise BackendError(
             f"OpenAlex returned {type(body).__name__}, expected a JSON object.",
         )
-    return cast(MutableJSON, body)
+    return body
 
 
 def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str | None:
@@ -463,7 +470,7 @@ def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str | None:
     return " ".join(positions[i] for i in sorted(positions))
 
 
-def _work_to_record(work: MutableJSON) -> PaperRecord:
+def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
     """Convert an OpenAlex work dict into a :class:`PaperRecord`."""
     authorships = _objects(work.get("authorships"))
     authors = tuple(

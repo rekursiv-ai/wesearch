@@ -28,7 +28,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.custom_json import loads
+from wesearch.lib.codec import from_plain, loads
 from wesearch.search.custom_types import (
     CodeResult,
     FileResult,
@@ -282,15 +282,10 @@ def searxng(
         raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
     # SearXNG is an external service: a malformed body or item degrades to fewer
     # results, never an exception.
-    body: object = payload
-    results = (
-        cast(dict[object, object], body).get("results")
-        if isinstance(body, dict)
-        else None
-    )
+    results = payload.get("results") if isinstance(payload, dict) else None
     items = [
-        cast(dict[str, object], item)
-        for item in (cast(list[object], results) if isinstance(results, list) else [])
+        from_plain(item, dict[str, object])
+        for item in (results if isinstance(results, list) else [])
         if isinstance(item, dict)
     ]
     parse = category_parser(categories)

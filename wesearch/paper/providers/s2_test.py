@@ -19,7 +19,7 @@ from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:
-    from wesearch.lib.custom_json import MutableJSON
+    from wesearch.lib.codec import MutablePlainTree
 
 
 @pytest.fixture(autouse=True)
@@ -243,7 +243,7 @@ class TestSearchTotal:
 
 class TestRecordMapping:
     def test_paper_record_from_full(self) -> None:
-        data: MutableJSON = {
+        data: dict[str, MutablePlainTree] = {
             "title": "Attention",
             "externalIds": {"DOI": "10.1/x", "ArXiv": "1706.03762"},
             "authors": [{"name": "A"}, {"name": "B"}],
@@ -264,7 +264,7 @@ class TestRecordMapping:
         assert rec.sources == ("s2",)
 
     def test_author_record_dict_affiliations(self) -> None:
-        data: MutableJSON = {
+        data: dict[str, MutablePlainTree] = {
             "authorId": "42",
             "name": "Yoshua Bengio",
             "affiliations": [{"name": "MILA"}, "UdeM"],
@@ -735,7 +735,7 @@ class TestExactInternals:
             )
             return object()
 
-        def keep(row: MutableJSON) -> bool:
+        def keep(row: dict[str, MutablePlainTree]) -> bool:
             del row
             return True
 
@@ -842,7 +842,7 @@ class TestExactInternals:
         assert total == 0
 
     def test_author_papers_forwards_exact_arguments(self) -> None:
-        def keep(row: MutableJSON) -> bool:
+        def keep(row: dict[str, MutablePlainTree]) -> bool:
             del row
             return False
 

@@ -15,7 +15,7 @@ from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:
-    from wesearch.lib.custom_json import MutableJSON
+    from wesearch.lib.codec import MutablePlainTree
 
 
 _PDF = b"%PDF-1.5" + b"0" * 200
@@ -56,21 +56,21 @@ class TestLooksLikePdf:
 
 class TestOaUrlOf:
     def test_present_returns_url(self) -> None:
-        paper: MutableJSON = {"openAccessPdf": {"url": "http://x/pdf"}}
+        paper: dict[str, MutablePlainTree] = {"openAccessPdf": {"url": "http://x/pdf"}}
         assert fetch.oa_url_of(paper) == "http://x/pdf"
 
     def test_missing_returns_none(self) -> None:
-        paper: MutableJSON = {"title": "no oa"}
+        paper: dict[str, MutablePlainTree] = {"title": "no oa"}
         assert fetch.oa_url_of(paper) is None
 
     def test_empty_url_returns_none(self) -> None:
-        paper: MutableJSON = {"openAccessPdf": {"url": ""}}
+        paper: dict[str, MutablePlainTree] = {"openAccessPdf": {"url": ""}}
         assert fetch.oa_url_of(paper) is None
 
 
 class TestBatchOaUrls:
     def test_aligns_urls_and_nones(self) -> None:
-        papers: list[MutableJSON | None] = [
+        papers: list[dict[str, MutablePlainTree] | None] = [
             {"openAccessPdf": {"url": "http://a/pdf"}},
             None,
             {"openAccessPdf": {"url": "http://c/pdf"}},

@@ -18,7 +18,7 @@ from wesearch.types.errors import FetchError
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from wesearch.lib.custom_json import MutableJSON
+    from wesearch.lib.codec import MutablePlainTree
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +39,10 @@ def mock_limiter() -> Iterator[_FakeLimiter]:
 
 class TestSearch:
     def test_happy_path_maps_records_and_total(self) -> None:
-        work: MutableJSON = {"title": "Attention", "publication_year": 2017}
+        work: dict[str, MutablePlainTree] = {
+            "title": "Attention",
+            "publication_year": 2017,
+        }
         payload = {"meta": {"count": 42}, "results": [work, {"title": "B"}]}
         with patch(
             "wesearch.paper.providers.openalex.fetch",
@@ -307,7 +310,7 @@ class TestReconstructAbstract:
 
 class TestWorkToRecord:
     def test_full_work(self) -> None:
-        work: MutableJSON = {
+        work: dict[str, MutablePlainTree] = {
             "title": "Attention Is All You Need",
             "authorships": [
                 {"author": {"display_name": "Ashish Vaswani"}},
@@ -337,7 +340,7 @@ class TestWorkToRecord:
         assert rec.sources == ("openalex",)
 
     def test_sparse_work(self) -> None:
-        work: MutableJSON = {}
+        work: dict[str, MutablePlainTree] = {}
         rec = openalex._work_to_record(work)
         # Empty, not a stand-in: OpenAlex reported no title, which is not the
         # same claim as the work having none, and a fabricated string is one
@@ -353,15 +356,15 @@ class TestWorkToRecord:
         assert rec.open_access_pdf is None
 
     def test_display_name_fallback_for_title(self) -> None:
-        work: MutableJSON = {"display_name": "Fallback Title"}
+        work: dict[str, MutablePlainTree] = {"display_name": "Fallback Title"}
         assert openalex._work_to_record(work).title == "Fallback Title"
 
     def test_doi_dx_prefix_stripped(self) -> None:
-        work: MutableJSON = {"doi": "http://dx.doi.org/10.1/y"}
+        work: dict[str, MutablePlainTree] = {"doi": "http://dx.doi.org/10.1/y"}
         assert openalex._work_to_record(work).doi == "10.1/y"
 
     def test_arxiv_no_match_leaves_none(self) -> None:
-        work: MutableJSON = {"ids": {"arxiv": "!!!"}}
+        work: dict[str, MutablePlainTree] = {"ids": {"arxiv": "!!!"}}
         assert openalex._work_to_record(work).arxiv_id is None
 
     def test_arxiv_id_recovered_from_datacite_doi(self) -> None:
@@ -369,20 +372,22 @@ class TestWorkToRecord:
         # arXiv's DataCite form and whose ``ids`` carries no ``arxiv`` key. The
         # id is right there in the DOI suffix, so leaving arxiv_id None throws
         # away the only identity that joins the preprint to its published twin.
-        work: MutableJSON = {"doi": "https://doi.org/10.48550/arxiv.2210.11934"}
+        work: dict[str, MutablePlainTree] = {
+            "doi": "https://doi.org/10.48550/arxiv.2210.11934",
+        }
         rec = openalex._work_to_record(work)
         assert rec.arxiv_id == "2210.11934"
         assert rec.doi == "10.48550/arxiv.2210.11934"
 
     def test_structured_arxiv_id_wins_over_doi_suffix(self) -> None:
-        work: MutableJSON = {
+        work: dict[str, MutablePlainTree] = {
             "doi": "https://doi.org/10.48550/arxiv.9999.99999",
             "ids": {"arxiv": "https://arxiv.org/abs/1706.03762"},
         }
         assert openalex._work_to_record(work).arxiv_id == "1706.03762"
 
     def test_non_arxiv_doi_yields_no_arxiv_id(self) -> None:
-        work: MutableJSON = {"doi": "https://doi.org/10.1145/3596512"}
+        work: dict[str, MutablePlainTree] = {"doi": "https://doi.org/10.1145/3596512"}
         assert openalex._work_to_record(work).arxiv_id is None
 
     def test_datacite_doi_version_suffix_is_stripped(self) -> None:
@@ -390,11 +395,13 @@ class TestWorkToRecord:
         # that joins nothing -- the exact preprint/published merge this
         # recovery exists to make possible. The structured ``ids.arxiv`` path
         # already drops the version; the DOI path must agree.
-        work: MutableJSON = {"doi": "https://doi.org/10.48550/arXiv.2210.11934v2"}
+        work: dict[str, MutablePlainTree] = {
+            "doi": "https://doi.org/10.48550/arXiv.2210.11934v2",
+        }
         assert openalex._work_to_record(work).arxiv_id == "2210.11934"
 
     def test_wrong_typed_nested_fields_take_defaults(self) -> None:
-        work: MutableJSON = {
+        work: dict[str, MutablePlainTree] = {
             "title": "T",
             "authorships": [
                 {"author": "oops"},
@@ -411,7 +418,7 @@ class TestWorkToRecord:
         assert rec.venue is None
 
     def test_wrong_typed_paging_fields_end_the_walk(self) -> None:
-        body: MutableJSON = {"results": {"x": 1}, "meta": []}
+        body: dict[str, MutablePlainTree] = {"results": {"x": 1}, "meta": []}
         assert openalex._works_page_advance(body, 1, 2) is None
         body = {"results": [{}, {}], "meta": {"count": "5"}}
         assert openalex._works_page_advance(body, 1, 2) == 2
@@ -419,7 +426,7 @@ class TestWorkToRecord:
 
 class TestReferences:
     def test_resolves_then_batches(self) -> None:
-        resolve: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
             "results": [
                 {
                     "id": "https://openalex.org/W1",
@@ -430,7 +437,7 @@ class TestReferences:
                 },
             ],
         }
-        batch: MutableJSON = {
+        batch: dict[str, MutablePlainTree] = {
             "meta": {"count": 2},
             "results": [{"title": "ref-a"}, {"title": "ref-b"}],
         }
@@ -453,7 +460,7 @@ class TestReferences:
         # limit=None the old code reported complete=True from the REQUESTED count,
         # hiding a short reference set -- the lying-`complete` paginate.py exists
         # to prevent. `complete` must reflect the RESOLVED records, not intent.
-        resolve: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
             "results": [
                 {
                     "id": "https://openalex.org/W1",
@@ -465,7 +472,10 @@ class TestReferences:
             ],
         }
         # count=1: OpenAlex resolved only W10, dropped W11.
-        batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
+        batch: dict[str, MutablePlainTree] = {
+            "meta": {"count": 1},
+            "results": [{"title": "ref-a"}],
+        }
         fetch = _RecordingFetch(
             (json.dumps(resolve).encode(), FetchSession()),
             (json.dumps(batch).encode(), FetchSession()),
@@ -476,7 +486,7 @@ class TestReferences:
         assert not complete  # Must NOT claim complete when refs went missing.
 
     def test_non_string_reference_ids_are_ignored(self) -> None:
-        resolve: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
             "results": [
                 {
                     "id": "https://openalex.org/W1",
@@ -484,7 +494,10 @@ class TestReferences:
                 },
             ],
         }
-        batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref"}]}
+        batch: dict[str, MutablePlainTree] = {
+            "meta": {"count": 1},
+            "results": [{"title": "ref"}],
+        }
         fetch = _RecordingFetch(
             (json.dumps(resolve).encode(), FetchSession()),
             (json.dumps(batch).encode(), FetchSession()),
@@ -500,7 +513,7 @@ class TestReferences:
         # de-dups, so the batch returns fewer records than the (dup-bearing)
         # requested list -- but every DISTINCT id resolved, so this is COMPLETE.
         # A naive ``len(records) == len(capped)`` mis-reports incomplete here.
-        resolve: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
             "results": [
                 {
                     "id": "https://openalex.org/W1",
@@ -513,7 +526,7 @@ class TestReferences:
             ],
         }
         # Both DISTINCT ids resolved (W10, W11); OpenAlex returns 2, not 3.
-        batch: MutableJSON = {
+        batch: dict[str, MutablePlainTree] = {
             "meta": {"count": 2},
             "results": [{"title": "ref-a"}, {"title": "ref-b"}],
         }
@@ -526,7 +539,7 @@ class TestReferences:
         assert complete  # All distinct refs resolved -> complete despite dup.
 
     def test_limit_truncates_and_marks_incomplete(self) -> None:
-        resolve: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
             "results": [
                 {
                     "id": "https://openalex.org/W1",
@@ -538,7 +551,10 @@ class TestReferences:
                 },
             ],
         }
-        batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
+        batch: dict[str, MutablePlainTree] = {
+            "meta": {"count": 1},
+            "results": [{"title": "ref-a"}],
+        }
         fetch = _RecordingFetch(
             (json.dumps(resolve).encode(), FetchSession()),
             (json.dumps(batch).encode(), FetchSession()),
@@ -553,7 +569,7 @@ class TestReferences:
             openalex.references("arxiv", "1706.03762", limit=None)
 
     def test_unknown_doi_not_found(self) -> None:
-        empty: MutableJSON = {"results": []}
+        empty: dict[str, MutablePlainTree] = {"results": []}
         with (
             patch(
                 "wesearch.paper.providers.openalex.fetch",
@@ -566,8 +582,10 @@ class TestReferences:
 
 class TestCitations:
     def test_cites_filter_and_total(self) -> None:
-        resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
-        citing: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
+            "results": [{"id": "https://openalex.org/W1"}],
+        }
+        citing: dict[str, MutablePlainTree] = {
             "meta": {"count": 500},
             "results": [{"title": "citer"}],
         }
@@ -583,8 +601,10 @@ class TestCitations:
         assert _params(fetch)["filter"] == "cites:W1"
 
     def test_year_from_added_to_filter(self) -> None:
-        resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
-        citing: MutableJSON = {"meta": {"count": 0}, "results": []}
+        resolve: dict[str, MutablePlainTree] = {
+            "results": [{"id": "https://openalex.org/W1"}],
+        }
+        citing: dict[str, MutablePlainTree] = {"meta": {"count": 0}, "results": []}
         fetch = _RecordingFetch(
             (json.dumps(resolve).encode(), FetchSession()),
             (json.dumps(citing).encode(), FetchSession()),
@@ -604,12 +624,14 @@ class TestCitations:
         # BUG 1: a limit above the 200 per-page ceiling must paginate, never
         # request per-page>200 (which OpenAlex 400s). Two 200-work pages satisfy
         # a limit of 250; no single request may set per-page above 200.
-        resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
-        page1: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
+            "results": [{"id": "https://openalex.org/W1"}],
+        }
+        page1: dict[str, MutablePlainTree] = {
             "meta": {"count": 500},
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
-        page2: MutableJSON = {
+        page2: dict[str, MutablePlainTree] = {
             "meta": {"count": 500},
             "results": [{"title": f"c{200 + i}"} for i in range(200)],
         }
@@ -634,9 +656,11 @@ class TestCitations:
         # BUG 2: with no limit, a single default page of 25 against a total of
         # 500 is NOT complete. ``complete`` must mean "cursor exhausted", never
         # be True merely because ``limit is None``.
-        resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
+        resolve: dict[str, MutablePlainTree] = {
+            "results": [{"id": "https://openalex.org/W1"}],
+        }
         # One page shorter than ``count`` -> cursor not exhausted.
-        citing: MutableJSON = {
+        citing: dict[str, MutablePlainTree] = {
             "meta": {"count": 500},
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
@@ -653,8 +677,10 @@ class TestCitations:
         # BUG D: a full final page whose length equals the requested size but
         # exhausts ``count`` must report complete=True. The len>=size heuristic
         # alone lies here; exhaustion must consult ``meta.count``.
-        resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
-        citing: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
+            "results": [{"id": "https://openalex.org/W1"}],
+        }
+        citing: dict[str, MutablePlainTree] = {
             "meta": {"count": 200},
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
@@ -671,12 +697,14 @@ class TestCitations:
     def test_multi_page_exact_total_is_complete(self) -> None:
         # Two full 200-pages reaching count=400 exactly: walking to limit=400
         # exhausts the cursor and reports complete=True (no lying full-page).
-        resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
-        page1: MutableJSON = {
+        resolve: dict[str, MutablePlainTree] = {
+            "results": [{"id": "https://openalex.org/W1"}],
+        }
+        page1: dict[str, MutablePlainTree] = {
             "meta": {"count": 400},
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
-        page2: MutableJSON = {
+        page2: dict[str, MutablePlainTree] = {
             "meta": {"count": 400},
             "results": [{"title": f"c{200 + i}"} for i in range(200)],
         }
@@ -957,7 +985,7 @@ class TestExactInternals:
         assert params["filter"] == "openalex:W1|W2"
 
     def test_paginate_works_builds_page_params_and_total(self) -> None:
-        body: MutableJSON = {"meta": {"count": 1}, "results": [{}]}
+        body: dict[str, MutablePlainTree] = {"meta": {"count": 1}, "results": [{}]}
         with patch.object(openalex, "_get", return_value=body) as get:
             page, total = openalex._paginate_works(
                 {"filter": "x"},

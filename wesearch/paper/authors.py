@@ -10,7 +10,7 @@ from typing import cast
 
 import functools
 
-from wesearch.lib.custom_json import MutableJSON, convert
+from wesearch.lib.codec import MutablePlainTree, from_plain
 from wesearch.paper.custom_types import AuthorRecord
 from wesearch.paper.details import Listing
 from wesearch.paper.providers import s2
@@ -55,7 +55,7 @@ def search_authors(query: str, *, limit: int | None) -> AuthorSearchResult:
     """
     data = s2.get("/author/search", {"query": query, "fields": s2.AUTHOR_FIELDS_STR})
     total = s2.search_total(data)
-    entries = cast(list[MutableJSON], data.get("data") or [])
+    entries = cast(list[dict[str, MutablePlainTree]], data.get("data") or [])
     records = [s2.author_record_from(e) for e in entries]
     known = [record for record in records if record.h_index is not None]
     unknown = [record for record in records if record.h_index is None]
@@ -108,7 +108,7 @@ def author_papers(
 
 
 def _year_in_bounds(
-    entry: MutableJSON,
+    entry: dict[str, MutablePlainTree],
     *,
     year_from: int | None,
     year_to: int | None,
@@ -119,7 +119,7 @@ def _year_in_bounds(
     raw_year = entry.get("year")
     if raw_year is None or isinstance(raw_year, bool):
         return False
-    year = convert(entry.get("year"), int)
+    year = from_plain(entry.get("year"), int)
     if year_from is not None and year < year_from:
         return False
     return not (year_to is not None and year > year_to)

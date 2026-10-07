@@ -44,7 +44,7 @@ import random
 
 from curl_cffi.requests.session import HttpMethod
 
-from wesearch.lib.custom_json import JSONValue
+from wesearch.lib.codec import PlainTree
 from wesearch.profile import parsedate_to_datetime_or_none
 
 
@@ -168,7 +168,7 @@ class ContentParams:
     method: HttpMethod = "GET"
     params: dict[str, str | int] | None = None
     data: dict[str, str] | None = None
-    json: JSONValue | NoBody = NO_BODY
+    json: PlainTree | NoBody = NO_BODY
     headers: dict[str, str] | None = None
     cookies: dict[str, str] | None = None
     raw_headers: bool = False

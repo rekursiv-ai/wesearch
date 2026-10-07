@@ -30,7 +30,7 @@ import os
 import threading
 import time
 
-from wesearch.lib.custom_json import convert, parse
+from wesearch.lib.codec import from_plain, loads
 from wesearch.lib.userdirs import data_dir
 
 
@@ -117,7 +117,7 @@ def _encode(profile: Profile) -> bytes:
 def _try_decode(raw: bytes) -> Profile | None:
     """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
     try:
-        obj = parse(raw, dict[str, object])
+        obj = from_plain(loads(raw), dict[str, object])
         ua = obj.get("ua")
         created = obj.get("created")
         if not isinstance(ua, str) or not isinstance(created, (int, float)):
@@ -134,7 +134,7 @@ def _try_decode(raw: bytes) -> Profile | None:
         )
         return Profile(
             ua=ua,
-            cookies=convert(cookies, dict[str, str]),
+            cookies=from_plain(cookies, dict[str, str]),
             created=float(created),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):

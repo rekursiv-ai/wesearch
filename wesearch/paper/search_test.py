@@ -19,7 +19,7 @@ from wesearch.paper.providers import (
 
 
 if TYPE_CHECKING:
-    from wesearch.lib.custom_json import MutableJSON, MutableJSONValue
+    from wesearch.lib.codec import MutablePlainTree
 
 
 def _rec(title: str, source: str) -> PaperRecord:
@@ -62,7 +62,7 @@ class TestSearchDispatch:
 
 class TestFusedSearch:
     def test_both_backends_fused(self) -> None:
-        s2_payload: MutableJSON = {
+        s2_payload: dict[str, MutablePlainTree] = {
             "total": 1,
             "data": [{"title": "s", "externalIds": {"DOI": "10.1/s"}}],
         }
@@ -238,7 +238,7 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
-        ) -> MutableJSON:
+        ) -> dict[str, MutablePlainTree]:
             del transport
             del path
             captured.update(params)
@@ -265,7 +265,7 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
-        ) -> MutableJSON:
+        ) -> dict[str, MutablePlainTree]:
             del transport
             del path
             captured.update(params)
@@ -285,7 +285,7 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
-        ) -> MutableJSON:
+        ) -> dict[str, MutablePlainTree]:
             del transport
             del path
             lim = params.get("limit")
@@ -306,14 +306,14 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
-        ) -> MutableJSON:
+        ) -> dict[str, MutablePlainTree]:
             del transport
             del path
             offset = int(params.get("offset", 0))
-            rows: list[MutableJSONValue] = [
+            rows: list[MutablePlainTree] = [
                 {"title": f"p{offset + i}"} for i in range(100)
             ]
-            body: MutableJSON = {"total": 250, "data": rows}
+            body: dict[str, MutablePlainTree] = {"total": 250, "data": rows}
             return body
 
         with patch.object(s2, "get", side_effect=fake_get):
