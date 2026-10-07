@@ -32,7 +32,6 @@ dependencies = [
     "trafilatura",
     "zendriver>=0.15.5",
     # serialization
-    "msgspec>=0.22.0",
     # containers
     "wrapt",
     # compression (Content-Encoding decode)
