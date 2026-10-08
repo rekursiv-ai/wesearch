@@ -3,6 +3,41 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.1.13 - 2026-10-07
+
+### Changed
+
+- **Breaking:** missing text on paper records is `""`, not `None`.
+  `PaperRecord.venue`, `doi`, `arxiv_id`, `abstract` and `open_access_pdf`,
+  and `AuthorRecord.homepage`, are typed `str` and default to `""`. Test
+  them for truthiness rather than `is None`. Numeric fields keep `None`.
+- **Breaking:** `ContentParams.params` and `ContentParams.cookies` default to
+  an empty dict instead of `None`, and `Field.schema_extra` defaults to an
+  empty mapping. Passing `None` is no longer accepted.
+- **Breaking:** the vendored `wesearch.lib.custom_json` is replaced by
+  `wesearch.lib.codec`. `ContentParams.json` and `fetch_web(json_body=...)`
+  take a `wesearch.lib.codec.PlainTree` (was `custom_json.JSONValue`); plain
+  JSON values are unaffected.
+- Provider responses (Semantic Scholar, OpenAlex, SearXNG, Reddit tokens,
+  stored browser profiles) are parsed with typed reads. A malformed field is
+  dropped or defaulted rather than aborting the result; a stored profile
+  missing its user agent or creation time is ignored and re-created.
+- Development: the bundled typeshed patch, pre-commit configuration and pytest
+  options are updated, and a worker-count helper is vendored as
+  `wesearch.lib.worker_count`. The supported Python versions (3.12+) are
+  unchanged.
+
+### Removed
+
+- The `msgspec` dependency.
+
+### Fixed
+
+- MCP tool descriptions are dedented consistently, so a tool's published
+  description no longer depends on the Python version's docstring handling.
+- `--help` on the bundled scripts works when module docstrings are stripped
+  (`python -OO`).
+
 ## 0.1.12 - 2026-10-03
 
 ### Added
