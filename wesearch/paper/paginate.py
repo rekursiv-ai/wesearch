@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from treekle.codec import MutablePlainTree
+from treekle import MutablePlainTree
 
 from wesearch.paper.errors import BackendError
 

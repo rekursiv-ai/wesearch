@@ -25,7 +25,7 @@ from wesearch.paper.providers import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 class TestCitations:

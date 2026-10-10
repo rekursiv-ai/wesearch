@@ -30,7 +30,7 @@ import os
 import threading
 import time
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 from wesearch.lib.userdirs import data_dir
 

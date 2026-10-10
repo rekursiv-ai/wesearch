@@ -19,7 +19,7 @@ from wesearch.paper.providers import (
 
 
 if TYPE_CHECKING:
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 def _rec(title: str, source: str) -> PaperRecord:

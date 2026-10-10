@@ -27,7 +27,7 @@ import random
 import stat
 import tempfile
 
-from treekle.codec import ReadError, from_plain, loads
+from treekle import ReadError, from_plain, loads
 
 from wesearch.chrome.headers import (
     chrome_user_agent,
