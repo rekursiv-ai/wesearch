@@ -14,7 +14,7 @@ from typing import Final
 import ast
 import functools
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 import yaml

@@ -14,7 +14,7 @@ from wesearch.paper.providers import s2
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 class TestAuthors:

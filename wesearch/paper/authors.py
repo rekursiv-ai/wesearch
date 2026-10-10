@@ -10,7 +10,7 @@ from typing import cast
 
 import functools
 
-from treekle.codec import MutablePlainTree, from_plain
+from treekle import MutablePlainTree, from_plain
 
 from wesearch.paper.custom_types import AuthorRecord
 from wesearch.paper.details import Listing

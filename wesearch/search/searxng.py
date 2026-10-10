@@ -20,7 +20,7 @@ import math
 import os
 import re
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 from wesearch.fetch import (
     ContentParams,

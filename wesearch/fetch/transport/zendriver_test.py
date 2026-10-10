@@ -31,7 +31,7 @@ import threading
 import time
 import warnings
 
-from treekle.codec import from_plain
+from treekle import from_plain
 from zendriver import Browser, Config, Tab
 from zendriver.cdp import fetch, network, page
 from zendriver.core.connection import Transaction

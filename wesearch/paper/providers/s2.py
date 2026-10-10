@@ -20,7 +20,7 @@ import functools
 import json
 import os
 
-from treekle.codec import MutablePlainTree, ReadError, from_plain
+from treekle import MutablePlainTree, ReadError, from_plain
 
 from wesearch.fetch import (
     ContentParams,

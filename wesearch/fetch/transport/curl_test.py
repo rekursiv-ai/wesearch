@@ -19,7 +19,7 @@ from curl_cffi import (
     requests as cc_requests,
 )
 from curl_cffi.requests import Response
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 
