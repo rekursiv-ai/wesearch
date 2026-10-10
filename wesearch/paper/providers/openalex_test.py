@@ -18,7 +18,7 @@ from wesearch.types.errors import FetchError
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from wesearch.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
 
 
 @pytest.fixture(autouse=True)

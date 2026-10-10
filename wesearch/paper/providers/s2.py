@@ -20,6 +20,8 @@ import functools
 import json
 import os
 
+from treekle.codec import MutablePlainTree, ReadError, from_plain
+
 from wesearch.fetch import (
     ContentParams,
     PolicyParams,
@@ -28,7 +30,6 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.codec import MutablePlainTree, ReadError, from_plain
 from wesearch.paper import paginate as paper_paginate
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error

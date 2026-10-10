@@ -27,11 +27,12 @@ import random
 import stat
 import tempfile
 
+from treekle.codec import ReadError, from_plain, loads
+
 from wesearch.chrome.headers import (
     chrome_user_agent,
     impersonate_version_platform,
 )
-from wesearch.lib.codec import ReadError, from_plain, loads
 
 
 _CWD: Final = Path(__file__).resolve().parent

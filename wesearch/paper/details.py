@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import functools
 
-from wesearch.lib.codec import MutablePlainTree, from_plain
+from treekle.codec import MutablePlainTree, from_plain
+
 from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.ids import s2_wire_id

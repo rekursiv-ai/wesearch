@@ -26,6 +26,8 @@ import json
 import os
 import re
 
+from treekle.codec import MutablePlainTree, ReadError, from_plain, loads
+
 from wesearch.fetch import (
     ContentParams,
     PolicyParams,
@@ -34,7 +36,6 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.codec import MutablePlainTree, ReadError, from_plain, loads
 from wesearch.paper.custom_types import IdType, PaperRecord
 from wesearch.paper.errors import (
     BackendError,

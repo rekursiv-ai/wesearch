@@ -55,4 +55,4 @@ jobs:
           uv run python -c "import wesearch"
           rm -rf dist
           uv build --out-dir dist
-          wheels=(dist/wesearch-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" python -P -c "import wesearch; print(wesearch.__file__)"
+          wheels=(dist/wesearch-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "treekle @ git+https://github.com/rekursiv-ai/treekle" python -P -c "import wesearch; print(wesearch.__file__)"

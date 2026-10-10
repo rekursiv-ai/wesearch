@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING
 import re
 import time
 
-from wesearch.lib.codec import ReadError, from_plain
+from treekle.codec import ReadError, from_plain
+
 from wesearch.paper.errors import PaperError
 from wesearch.paper.providers import openalex, s2
 from wesearch.paper.search import search

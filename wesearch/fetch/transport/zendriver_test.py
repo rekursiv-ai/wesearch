@@ -31,6 +31,7 @@ import threading
 import time
 import warnings
 
+from treekle.codec import from_plain
 from zendriver import Browser, Config, Tab
 from zendriver.cdp import fetch, network, page
 from zendriver.core.connection import Transaction
@@ -44,7 +45,6 @@ from wesearch.fetch.transport.zendriver import (
     _Flags,
     _navigate,
 )
-from wesearch.lib.codec import from_plain
 from wesearch.lib.userdirs import data_dir
 
 
