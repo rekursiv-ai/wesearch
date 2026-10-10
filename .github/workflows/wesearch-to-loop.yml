@@ -255,7 +255,7 @@ jobs:
             --validation-command 'uv run python -c "import wesearch"' \
             --validation-command 'rm -rf dist' \
             --validation-command 'uv build --out-dir dist' \
-            --validation-command 'wheels=(dist/wesearch-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "treekle @ git+https://github.com/rekursiv-ai/treekle" python -P -c "import wesearch; print(wesearch.__file__)"' \
+            --validation-command 'wheels=(dist/wesearch-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "treekle @ git+https://github.com/rekursiv-ai/treekle@main" python -P -c "import wesearch; print(wesearch.__file__)"' \
             --open-pr false
 
       - name: Open or update target import PR
