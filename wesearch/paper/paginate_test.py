@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import cast
 from unittest.mock import MagicMock
 
+from treekle.codec import MutablePlainTree, from_plain
+
 import pytest
 
-from wesearch.lib.codec import MutablePlainTree, from_plain
 from wesearch.paper.errors import BackendError
 from wesearch.paper.paginate import Cursor, _cap, paginate
 

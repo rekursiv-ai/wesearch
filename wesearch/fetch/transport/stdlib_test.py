@@ -10,6 +10,8 @@ import gzip
 import socket
 import ssl
 
+from treekle.codec import from_plain
+
 import pytest
 
 from wesearch.fetch import (
@@ -28,7 +30,6 @@ from wesearch.fetch.transport.stdlib import (
     _widen_after_connect,
     fetch_stdlib,
 )
-from wesearch.lib.codec import from_plain
 from wesearch.types.errors import (
     FetchError,
 )

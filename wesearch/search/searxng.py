@@ -20,6 +20,8 @@ import math
 import os
 import re
 
+from treekle.codec import from_plain, loads
+
 from wesearch.fetch import (
     ContentParams,
     PolicyParams,
@@ -28,7 +30,6 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.lib.codec import from_plain, loads
 from wesearch.search.custom_types import (
     CodeResult,
     FileResult,

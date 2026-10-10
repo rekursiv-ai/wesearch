@@ -14,10 +14,10 @@ from typing import Final
 import ast
 import functools
 
+from treekle.codec import from_plain
+
 import pytest
 import yaml
-
-from wesearch.lib.codec import from_plain
 
 
 _THIS: Final = Path(__file__).resolve()

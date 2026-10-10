@@ -1702,6 +1702,11 @@ wheels = [
 ]
 
 [[package]]
+name = "treekle"
+version = "0.1.0"
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#5f9be5952799e7e16f05a95bdc96c263124a181a" }
+
+[[package]]
 name = "trove-classifiers"
 version = "2026.9.21.13"
 source = { registry = "https://pypi.org/simple" }
@@ -1959,6 +1964,7 @@ dependencies = [
     { name = "html2text" },
     { name = "markdownify" },
     { name = "trafilatura" },
+    { name = "treekle" },
     { name = "wrapt" },
     { name = "zendriver" },
     { name = "zstandard" },
@@ -2035,6 +2041,7 @@ requires-dist = [
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0.0" },
     { name = "trafilatura" },
+    { name = "treekle", git = "https://github.com/rekursiv-ai/treekle?branch=main" },
     { name = "wrapt" },
     { name = "zendriver", specifier = ">=0.15.5" },
     { name = "zstandard" },

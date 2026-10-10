@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import io
 
 from curl_cffi import requests as cc_requests
-
-from wesearch.lib.codec import from_plain
+from treekle.codec import from_plain
 
 
 try:

@@ -15,7 +15,7 @@ from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:
-    from wesearch.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
 
 
 _PDF = b"%PDF-1.5" + b"0" * 200

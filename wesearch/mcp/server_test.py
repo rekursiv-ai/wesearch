@@ -19,9 +19,9 @@ import pytest
 pytest.importorskip("mcp.server")
 
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from treekle.codec import from_plain
 
 from wesearch.fetch.custom_types import FetchBodyParamsSchema
-from wesearch.lib.codec import from_plain
 from wesearch.mcp import server
 from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord

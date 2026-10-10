@@ -23,6 +23,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    "treekle",
     # web client / scraping
     "beautifulsoup4",
     "curl-cffi>=0.15.0",
@@ -672,4 +673,5 @@ rekursiv-ai-typeshed = [
 compile-bytecode = true
 
 [tool.uv.sources]
+treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typeshed = { path = "packages/rekursiv-ai-typeshed" }

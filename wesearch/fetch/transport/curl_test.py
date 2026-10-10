@@ -19,6 +19,7 @@ from curl_cffi import (
     requests as cc_requests,
 )
 from curl_cffi.requests import Response
+from treekle.codec import from_plain
 
 import pytest
 
@@ -49,7 +50,6 @@ from wesearch.fetch.transport.curl import (
     seed_session_jar,
     set_session_cookies,
 )
-from wesearch.lib.codec import from_plain
 from wesearch.types.errors import (
     FetchError,
 )

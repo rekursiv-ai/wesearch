@@ -19,7 +19,7 @@ from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:
-    from wesearch.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
 
 
 @pytest.fixture(autouse=True)

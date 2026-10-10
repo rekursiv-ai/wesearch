@@ -43,8 +43,8 @@ import math
 import random
 
 from curl_cffi.requests.session import HttpMethod
+from treekle.codec import PlainTree
 
-from wesearch.lib.codec import PlainTree
 from wesearch.profile import parsedate_to_datetime_or_none
 
 

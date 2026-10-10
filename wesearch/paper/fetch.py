@@ -20,8 +20,9 @@ from typing import TYPE_CHECKING, cast
 
 import logging
 
+from treekle.codec import MutablePlainTree
+
 from wesearch.fetch import RequestParams, RetryParams, fetch
-from wesearch.lib.codec import MutablePlainTree
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.ids import s2_wire_id
 from wesearch.paper.providers import s2

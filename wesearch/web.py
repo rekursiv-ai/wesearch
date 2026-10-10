@@ -41,11 +41,12 @@ from wesearch.types.params import NO_BODY, NoBody
 
 
 if TYPE_CHECKING:
+    from treekle.codec import PlainTree
+
     import defusedxml.common as _defused_common
     import defusedxml.ElementTree as _defused_etree  # noqa: N813 -- The public web adapter preserves the external provider's API name.
 
     from wesearch.fetch.custom_types import HttpMethod
-    from wesearch.lib.codec import PlainTree
     from wesearch.types.extractor import Extract
 else:
     from wrapt import lazy_import
