@@ -20,8 +20,7 @@ import math
 import os
 import re
 
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 from wesearch.fetch import (
     ContentParams,

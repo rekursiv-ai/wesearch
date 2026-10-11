@@ -27,8 +27,7 @@ import random
 import stat
 import tempfile
 
-from treekle import ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import ReadError, from_plain, json_loads
 
 from wesearch.chrome.headers import (
     chrome_user_agent,

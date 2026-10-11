@@ -26,8 +26,7 @@ import json
 import os
 import re
 
-from treekle import MutablePlainTree, ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import MutablePlainTree, ReadError, from_plain, json_loads
 
 from wesearch.fetch import (
     ContentParams,
