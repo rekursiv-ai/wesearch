@@ -26,7 +26,8 @@ import json
 import os
 import re
 
-from treekle import MutablePlainTree, ReadError, from_plain, loads
+from treekle import MutablePlainTree, ReadError, from_plain
+from treekle.wire import json_loads
 
 from wesearch.fetch import (
     ContentParams,
@@ -445,7 +446,7 @@ def _get(
             f"OpenAlex request failed (timeout or connection error): {e}",
         ) from e
     try:
-        body = loads(raw)
+        body = json_loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise BackendError(f"OpenAlex returned invalid JSON: {e}") from e
     # A cast would let a bare list or ``null`` through to an AttributeError on
