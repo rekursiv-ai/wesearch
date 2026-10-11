@@ -20,7 +20,8 @@ import math
 import os
 import re
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 from wesearch.fetch import (
     ContentParams,
@@ -278,7 +279,7 @@ def searxng(
     # and the page reaches json.loads as a bare "line 1 column 1 (char 0)"
     # that names neither the backend nor the cause.
     try:
-        payload = loads(text)
+        payload = json_loads(text)
     except json.JSONDecodeError as e:
         raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
     # SearXNG is an external service: a malformed body or item degrades to fewer

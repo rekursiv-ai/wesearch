@@ -27,7 +27,8 @@ import random
 import stat
 import tempfile
 
-from treekle import ReadError, from_plain, loads
+from treekle import ReadError, from_plain
+from treekle.wire import json_loads
 
 from wesearch.chrome.headers import (
     chrome_user_agent,
@@ -180,7 +181,7 @@ def _download_records() -> list[object]:
             if attempt == 2:
                 raise
         attempt += 1
-    parsed = loads(gzip.decompress(body))
+    parsed = json_loads(gzip.decompress(body))
     if not isinstance(parsed, list):
         raise RuntimeError(  # noqa: TRY004 -- Dataset shape is a downloader contract error.
             "expected JSON array",
