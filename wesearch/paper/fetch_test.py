@@ -25,10 +25,6 @@ _HTML = b"<html><body>not a pdf</body></html>"
 """A body that fails ``looks_like_pdf``."""
 
 
-def _fetch_error(status: int) -> FetchError:
-    return FetchError("http://x", status, {}, b"err")
-
-
 class TestLooksLikePdf:
     def test_valid_magic_and_size(self) -> None:
         assert fetch.looks_like_pdf(_PDF)
@@ -166,7 +162,11 @@ class TestDownload:
 
     def test_all_sources_fail_raises_not_found(self) -> None:
         with (
-            patch.object(fetch, "fetch", side_effect=_fetch_error(404)),
+            patch.object(
+                fetch,
+                "fetch",
+                side_effect=FetchError("http://x", 404, {}, b"err"),
+            ),
             pytest.raises(NotFoundError),
         ):
             fetch.download("doi", "10.1/x", oa_url=None, oa_looked_up=True)
@@ -199,7 +199,11 @@ class TestDownload:
         # _s2_oa_lookup swallows any backend error -> no OA URL found.
         with (
             patch.object(s2, "get", side_effect=RuntimeError("down")),
-            patch.object(fetch, "fetch", side_effect=_fetch_error(404)),
+            patch.object(
+                fetch,
+                "fetch",
+                side_effect=FetchError("http://x", 404, {}, b"err"),
+            ),
             pytest.raises(NotFoundError),
         ):
             fetch.download("arxiv", "1706.03762")

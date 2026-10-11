@@ -119,7 +119,7 @@ def _encode(profile: Profile) -> bytes:
 def _try_decode(raw: bytes) -> Profile | None:
     """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
     try:
-        obj = from_plain(json_loads(raw), dict[str, object])
+        obj = json_loads(raw, dict[str, object])
         ua = obj.get("ua")
         created = obj.get("created")
         if not isinstance(ua, str) or not isinstance(created, (int, float)):
