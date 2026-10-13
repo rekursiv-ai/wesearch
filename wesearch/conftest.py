@@ -14,9 +14,9 @@ import pytest
 
 from wesearch.fetch.transport.curl import close_curl_sessions_except
 from wesearch.fetch.transport.zendriver import shutdown_browsers
-from wesearch.lib.testing.resource_markers import pytest_collection_modifyitems
-from wesearch.lib.testing.userdirs_fixture import (
+from wesearch.lib.testing.resources import (
     isolate_user_dirs,
+    pytest_collection_modifyitems,
     pytest_configure,
 )
 

@@ -377,6 +377,6 @@ def _cookie_lines(lines: tuple[str, ...]) -> list[str]:
 
 
 if __name__ == "__main__":
-    from wesearch.lib.testing.main import test_main
+    from wesearch.lib.testing.runner import test_main
 
     test_main(__file__)
