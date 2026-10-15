@@ -20,8 +20,6 @@ from wesearch.chrome import useragents
 from wesearch.chrome.headers import ChromePlatform, chrome_user_agent
 from wesearch.chrome.useragents import (
     UserAgentKind,
-    draw_user_agent,
-    impersonate_target,
     newest_chrome_major,
     user_agent_pool,
 )
@@ -65,20 +63,6 @@ class TestPools:
         )
 
 
-class TestDraw:
-    def test_draws_from_the_requested_pool(self) -> None:
-        assert draw_user_agent("chrome_desktop") in user_agent_pool("chrome_desktop")
-        assert draw_user_agent("chrome_android") in user_agent_pool("chrome_android")
-
-    @pytest.mark.parametrize("kind", ["chrome_desktop", "chrome_android"])
-    def test_draw_delegates_to_rng_choice(self, kind: UserAgentKind) -> None:
-        pool = user_agent_pool(kind)
-        with patch.object(useragents._RNG, "choice", return_value=pool[-1]) as choice:
-            assert draw_user_agent(kind) == pool[-1]
-
-        choice.assert_called_once_with(pool)
-
-
 class TestNewestChromeMajor:
     @pytest.mark.parametrize(
         ("platform", "major"),
@@ -105,24 +89,6 @@ class TestNewestChromeMajor:
     def test_shipped_pools_cover_every_platform(self) -> None:
         for platform in ("Windows", "Linux", "macOS", "Android"):
             assert newest_chrome_major(platform) > 0
-
-
-class TestImpersonateTarget:
-    def test_desktop_maps_to_chrome(self) -> None:
-        assert impersonate_target("chrome_desktop") == "chrome"
-
-    def test_android_maps_to_chrome_android(self) -> None:
-        assert impersonate_target("chrome_android") == "chrome_android"
-
-    def test_kind_for_impersonate_is_the_inverse(self) -> None:
-        # The impersonate<->kind bijection has ONE source of truth: the inverse
-        # must round-trip both kinds, so fetch.py can call it instead of
-        # inlining a parallel (drift-prone) mapping.
-        kind_for_impersonate = useragents.kind_for_impersonate
-        for kind in ("chrome_desktop", "chrome_android"):
-            assert kind_for_impersonate(impersonate_target(kind)) == kind
-        # An unknown impersonate target degrades to desktop.
-        assert kind_for_impersonate("chrome") == "chrome_desktop"
 
 
 class TestRefresh:
@@ -600,20 +566,19 @@ class TestDownload:
             headers={"User-Agent": "UA"},
         )
 
-    def test_refresh_user_agent_forwards_exact_kind_mapping(self) -> None:
-        with (
-            patch.object(
-                useragents,
-                "impersonate_target",
-                return_value="chrome_android",
-            ) as target,
-            patch.object(useragents, "newest_chrome_major", return_value=131) as major,
-            patch.object(useragents, "chrome_user_agent", return_value="UA") as ua,
-        ):
-            assert useragents._refresh_user_agent("chrome_android") == "UA"
-        target.assert_called_once_with("chrome_android")
-        major.assert_called_once_with("Android")
-        ua.assert_called_once_with(131, "Android")
+    @pytest.mark.parametrize(
+        ("kind", "platform"),
+        [("chrome_desktop", "Linux"), ("chrome_android", "Android")],
+    )
+    def test_refresh_user_agent_is_the_newest_chrome_for_its_kind(
+        self,
+        kind: UserAgentKind,
+        platform: ChromePlatform,
+    ) -> None:
+        assert useragents._refresh_user_agent(kind) == chrome_user_agent(
+            newest_chrome_major(platform),
+            platform,
+        )
 
     def test_download_uses_stdlib_with_fixed_identity(self) -> None:
         with patch.object(

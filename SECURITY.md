@@ -38,7 +38,7 @@ Security reports are especially useful for:
   attacker-controlled JavaScript in a context that leaks local state.
 - Scraping ethics and safety: fingerprint/rate-limit logic that could be
   abused to evade site protections at scale.
-- Exposure of local state (cookie/User-Agent profile jar, egress IP) in logs,
+- Exposure of local state (cookie profile jar, egress IP) in logs,
   errors, or fetched-content side channels.
 - Dependency, packaging, or supply-chain concerns in the published wheel or
   its dependency set (curl-cffi, zendriver, beautifulsoup4, brotli, zstandard).

@@ -47,11 +47,7 @@ from wesearch.chrome.headers import (
     is_google_property,
     is_identity_header,
 )
-from wesearch.chrome.useragents import (
-    draw_user_agent,
-    kind_for_impersonate,
-    newest_chrome_major,
-)
+from wesearch.chrome.useragents import newest_chrome_major
 from wesearch.fetch.common import (
     Observer,
     default_port,
@@ -1053,10 +1049,7 @@ def _send_as(
         store.save(
             egress,
             request.domain,
-            Profile(
-                ua=draw_user_agent(kind_for_impersonate(impersonate)),
-                cookies=captured,
-            ),
+            Profile(cookies=captured),
         )
     elif captured:
         store.update_cookies(egress, request.domain, captured)
@@ -1132,12 +1125,7 @@ def _send_via_zendriver(
             store.save(
                 egress,
                 landed_domain,
-                Profile(
-                    ua=draw_user_agent(
-                        kind_for_impersonate(request.session.impersonate),
-                    ),
-                    cookies=dict(result.cookies),
-                ),
+                Profile(cookies=dict(result.cookies)),
             )
         else:
             store.update_cookies(egress, landed_domain, result.cookies)

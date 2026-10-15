@@ -1,15 +1,10 @@
-"""Real-browser User-Agent pools, one per impersonated browser kind.
+"""Real-browser User-Agent pools: the Chrome versions real browsers run.
 
 Two maintained pools of real User-Agents, filtered from the ``intoli/user-agents``
 dataset: ``chrome_desktop`` (desktop Chrome) and ``chrome_android`` (Android
-Chrome). Each kind identifies a platform family and maps to its corresponding
-curl_cffi impersonation target (:func:`impersonate_target`). Pool entries retain
-real-world browser versions and device models; the mapping does not promise an
-exact version match with curl_cffi's TLS identity.
-
-The hot path (:func:`user_agent_pool`, :func:`draw_user_agent`,
-:func:`impersonate_target`) only reads local pool files. :func:`refresh`
-re-downloads and re-filters the dataset; run it as a maintenance step::
+Chrome). :func:`newest_chrome_major` reads the version a transport without
+its own Chrome claims. :func:`refresh` re-downloads and re-filters the
+dataset; run it as a maintenance step::
 
     python -m wesearch.chrome.useragents
 """
@@ -23,7 +18,6 @@ from urllib import error, request
 
 import gzip
 import logging
-import random
 import re
 import stat
 import tempfile
@@ -32,7 +26,6 @@ from treekle import ReadError, from_plain, json_loads
 
 from wesearch.chrome.headers import (
     ChromePlatform,
-    chrome_platform,
     chrome_user_agent,
     user_agent_platform,
 )
@@ -43,9 +36,6 @@ _CWD: Final = Path(__file__).resolve().parent
 
 __all__ = [
     "UserAgentKind",
-    "draw_user_agent",
-    "impersonate_target",
-    "kind_for_impersonate",
     "newest_chrome_major",
     "refresh",
     "refresh_all",
@@ -55,37 +45,6 @@ __all__ = [
 type UserAgentKind = Literal["chrome_desktop", "chrome_android"]
 
 logger = logging.getLogger(__name__)
-
-_RNG = random.SystemRandom()
-
-
-def impersonate_target(kind: UserAgentKind) -> str:
-    """Return the curl_cffi target for a User-Agent platform family.
-
-    Args:
-        kind: User-Agent platform family.
-
-    Returns:
-        target: Corresponding curl_cffi impersonation target.
-
-    """
-    return "chrome_android" if kind == "chrome_android" else "chrome"
-
-
-def kind_for_impersonate(impersonate: str) -> UserAgentKind:
-    """Return the platform-family pool for a curl_cffi target.
-
-    The inverse of :func:`impersonate_target`; an unknown target degrades to
-    the desktop pool.
-
-    Args:
-        impersonate: curl_cffi impersonation target.
-
-    Returns:
-        kind: Corresponding User-Agent platform family.
-
-    """
-    return "chrome_android" if impersonate == "chrome_android" else "chrome_desktop"
 
 
 @cache
@@ -121,19 +80,6 @@ def newest_chrome_major(platform: ChromePlatform) -> int:
         if user_agent_platform(ua) == platform
         for match in re.finditer(r"Chrome/(\d+)", ua)
     )
-
-
-def draw_user_agent(kind: UserAgentKind) -> str:
-    """Draw a random real User-Agent from one platform-family pool.
-
-    Args:
-        kind: User-Agent platform family.
-
-    Returns:
-        user_agent: Random entry from the requested pool.
-
-    """
-    return _RNG.choice(user_agent_pool(kind))
 
 
 def refresh(kind: UserAgentKind) -> None:
@@ -362,7 +308,7 @@ def _pool_path(kind: UserAgentKind) -> Path:
 
 def _refresh_user_agent(kind: UserAgentKind) -> str:
     """Return a coherent fixed identity for the maintenance download."""
-    platform = chrome_platform(impersonate_target(kind))
+    platform: ChromePlatform = "Android" if kind == "chrome_android" else "Linux"
     return chrome_user_agent(newest_chrome_major(platform), platform)
 
 

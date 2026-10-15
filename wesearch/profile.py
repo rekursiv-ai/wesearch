@@ -1,16 +1,16 @@
-"""Cross-process browser profiles: a per-``(egress_ip, domain)`` cookie + UA jar.
+"""Cross-process browser profiles: a per-``(egress_ip, domain)`` cookie jar.
 
 A scraper that presents as a brand-new anonymous client on every request looks
 exactly like a bot: it never sends back the session cookie a real browser keeps,
 so the server's per-session budget never applies and it trips the anti-scrape
-limit fast. A :class:`Profile` fixes that -- it persists the ``User-Agent`` and
-the cookie jar a domain handed us, keyed by the public egress IP so a VPN
+limit fast. A :class:`Profile` fixes that -- it persists the cookie jar a
+domain handed us, keyed by the public egress IP so a VPN
 rotation yields a fresh identity, and shared across processes (an ``fcntl``-locked
 JSON file under :func:`wesearch.userdirs.data_dir`) so several workers behind
 one exit IP behave like one user with several browser tabs open.
 
-This module is a pure data store and the cookie/UA vocabulary: it loads, saves,
-and merges profiles, and parses/draws the values a profile holds. It owns no
+This module is a pure data store and the cookie vocabulary: it loads, saves,
+and merges profiles, and parses the values a profile holds. It owns no
 orchestration and takes no dependency on ``fetch`` or egress resolution -- the
 orchestrator (:func:`wesearch.fetch.fetch`) drives it.
 """
@@ -84,17 +84,13 @@ def parse_set_cookie(header_value: str) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Profile:
-    """One browsing identity for a ``(egress_ip, domain)``: its UA and cookies.
+    """One browsing identity for a ``(egress_ip, domain)``: its cookies.
 
     Attributes:
-      ua: The ``User-Agent`` this identity presents. Frozen for its life so a
-        stable cookie never rides a shifting UA (a bot tell).
       cookies: Live cookie jar (``name -> value``) for the domain.
       created: Unix time the identity was minted, for TTL eviction.
 
     """
-
-    ua: str
 
     cookies: dict[str, str] = field(default_factory=dict)
 
@@ -105,7 +101,6 @@ def _encode(profile: Profile) -> bytes:
     """Serialize a profile to JSON bytes."""
     return json.dumps(
         {
-            "ua": profile.ua,
             "cookies": profile.cookies,
             "created": profile.created,
         },
@@ -119,9 +114,8 @@ def _try_decode(raw: bytes) -> Profile | None:
     """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
     try:
         obj = json_loads(raw, dict[str, object])
-        ua = obj.get("ua")
         created = obj.get("created")
-        if not isinstance(ua, str) or not isinstance(created, (int, float)):
+        if not isinstance(created, (int, float)):
             return None
         raw_cookies = obj.get("cookies")
         cookies = (
@@ -134,7 +128,6 @@ def _try_decode(raw: bytes) -> Profile | None:
             else {}
         )
         return Profile(
-            ua=ua,
             cookies=from_plain(cookies, dict[str, str]),
             created=float(created),
         )
@@ -240,8 +233,7 @@ class ProfileStore:
         """Merge ``cookies`` into an existing key's jar (locked read-modify-write).
 
         Preserves prior cookies (new names add, repeated names overwrite). A
-        no-op when no profile exists for the key -- a jar has no identity without
-        a User-Agent, and the store does not mint one; :meth:`save` establishes
+        no-op when no profile exists for the key; :meth:`save` establishes
         the profile first.
 
         Args:
@@ -264,7 +256,7 @@ class ProfileStore:
             self._write(
                 path,
                 _encode(
-                    Profile(ua=profile.ua, cookies=merged, created=profile.created),
+                    Profile(cookies=merged, created=profile.created),
                 ),
             )
 

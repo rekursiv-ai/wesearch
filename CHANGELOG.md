@@ -25,6 +25,9 @@ All notable wesearch changes are documented here. This project follows
 - A site is routed straight to the browser only after a block a browser can
   clear (a Cloudflare challenge, Google's JavaScript wall). A CAPTCHA, a
   Google `/sorry` page, or a cooldown no longer routes it there.
+- **Breaking:** `Profile` holds cookies only; its never-sent `ua` field is gone.
+  A stored profile written with one still loads. `useragents.draw_user_agent`,
+  `impersonate_target` and `kind_for_impersonate` are removed.
 
 ## 0.1.13 - 2026-10-07
 

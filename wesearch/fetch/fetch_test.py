@@ -1477,7 +1477,7 @@ class TestIdentityLayer:
         self._store().save(
             self._EGRESS,
             "x.com",
-            Profile(ua="StoredUA/9", cookies={"GSP": "s"}),
+            Profile(cookies={"GSP": "s"}),
         )
         with patch(
             "curl_cffi.requests.request",
@@ -1498,7 +1498,7 @@ class TestIdentityLayer:
         self._store().save(
             self._EGRESS,
             "x.com",
-            Profile(ua="StoredUA/9", cookies={"GSP": "s"}),
+            Profile(cookies={"GSP": "s"}),
         )
         stub = StubSession()
         with (
@@ -1570,7 +1570,7 @@ class TestIdentityLayer:
         self._store().save(
             self._EGRESS,
             "x.com",
-            Profile(ua="PoisonUA", cookies={"GSP": "old"}),
+            Profile(cookies={"GSP": "old"}),
         )
         blocked = self._curl_response(
             status=403,
@@ -1592,7 +1592,7 @@ class TestIdentityLayer:
         assert "GSP" not in got.cookies
 
     def test_second_burn_raises(self) -> None:
-        self._store().save(self._EGRESS, "x.com", Profile(ua="U", cookies={"GSP": "x"}))
+        self._store().save(self._EGRESS, "x.com", Profile(cookies={"GSP": "x"}))
         blocked = self._curl_response(
             status=403,
             content=b'<div class="g-recaptcha" data-sitekey="x"></div>',
@@ -1627,7 +1627,7 @@ class TestIdentityLayer:
         self._store().save(
             self._EGRESS,
             "x.com",
-            Profile(ua="StoredUA", cookies={"GSP": "s"}),
+            Profile(cookies={"GSP": "s"}),
         )
         with patch(
             "curl_cffi.requests.request",
@@ -2065,7 +2065,6 @@ class TestBrowserBackend:
         store.save.assert_called_once()
         saved_profile = _recorded_profile(store.save)
         assert saved_profile.cookies == {"cf_clearance": "tok"}
-        assert saved_profile.ua
 
 
 class TestCurlThenZendriverBackend:
@@ -2728,12 +2727,11 @@ class TestSendAsMutationCoverage:
             params=request.params,
             observer=Mock(),
         )
-        profile = Profile(ua="stored", cookies={"old": "1"})
+        profile = Profile(cookies={"old": "1"})
         with (
             patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
             patch.object(fetch_mod, "pinned_host", return_value=None),
             patch.object(fetch_mod, "egress_ip", return_value="198.51.100.7"),
-            patch.object(fetch_mod, "draw_user_agent", return_value="drawn"),
             patch.object(fetch_mod._Request, "send", request_send),
         ):
             assert (
@@ -2773,7 +2771,7 @@ class TestSendAsMutationCoverage:
             assert (
                 _send_as(
                     request,
-                    Profile(ua="u", cookies={"old": "1"}),
+                    Profile(cookies={"old": "1"}),
                     "198.51.100.7",
                     None,
                     {"new": "2"},
@@ -2997,7 +2995,7 @@ class TestFinalMutationCoverage:
             patch.object(fetch_mod, "_reseat", return_value=None) as reseat,
             patch.object(fetch_mod._Request, "send", return_value=b"ok") as send,
         ):
-            _send_as(request, Profile(ua="u"), "198.51.100.7", None, None)
+            _send_as(request, Profile(), "198.51.100.7", None, None)
             callback = send.call_args.kwargs["reseat"]
             assert callable(callback)
             callback("https://other.example/path")
@@ -3022,7 +3020,7 @@ class TestFinalMutationCoverage:
             final_url="https://x.example/path",
         )
         store = Mock()
-        store.load.return_value = Profile(ua="u", cookies={"old": "1"})
+        store.load.return_value = Profile(cookies={"old": "1"})
         with (
             patch.object(fetch_mod, "pinned_host", return_value=None),
             patch.object(fetch_mod, "egress_ip", side_effect=[None, "198.51.100.8"]),
@@ -3042,7 +3040,7 @@ class TestFinalMutationCoverage:
             session=FetchSession(impersonate="chrome133"),
             params=RequestParams(),
         )
-        profile = Profile(ua="u", cookies={"old": "1"})
+        profile = Profile(cookies={"old": "1"})
         store = Mock()
         store.load.return_value = profile
         send = Mock(side_effect=[BotDetectionError("blocked"), b"ok"])
@@ -3142,7 +3140,7 @@ class TestLastSurvivorCoverage:
             params=RequestParams(),
         )
         store = Mock()
-        store.load.return_value = Profile(ua="u", cookies={})
+        store.load.return_value = Profile(cookies={})
         egress = Mock(side_effect=_egress_value)
         send = Mock(side_effect=[BotDetectionError("blocked"), b"ok"])
         with (
@@ -3410,26 +3408,22 @@ class TestRemainingExactMutationCoverage:
             port=8443,
         )
 
-    def test_new_profile_saves_drawn_user_agent(self) -> None:
+    def test_new_profile_saves_only_its_cookies(self) -> None:
         request = _Request(
             url="https://x.example/",
-            session=FetchSession(impersonate="chrome133"),
+            session=FetchSession(),
             params=RequestParams(policy=PolicyParams(transport="stdlib")),
         )
         store = Mock()
         with (
             patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
-            patch.object(fetch_mod, "draw_user_agent", return_value="drawn"),
-            patch.object(
-                fetch_mod,
-                "kind_for_impersonate",
-                return_value="kind",
-            ) as kind,
             patch.object(fetch_mod._Request, "send", return_value=b"ok"),
         ):
             _send_as(request, None, "198.51.100.1", None, None)
-        kind.assert_called_once_with("chrome133")
-        assert _recorded_profile(store.save).ua == "drawn"
+        assert _recorded_profile(store.save) == Profile(
+            cookies={},
+            created=_recorded_profile(store.save).created,
+        )
 
     def test_browser_empty_landing_domain_does_not_persist(self) -> None:
         request = _Request(
@@ -3471,10 +3465,10 @@ class TestRemainingExactMutationCoverage:
             _send_via_zendriver(request, headers=None, cookies=None)
         observer.assert_called_once_with(200, {}, "https://x.example/")
 
-    def test_browser_profile_uses_request_impersonate_for_user_agent(self) -> None:
+    def test_browser_profile_saves_the_harvested_cookies(self) -> None:
         request = _Request(
             url="https://x.example/",
-            session=FetchSession(impersonate="chrome133"),
+            session=FetchSession(),
             params=RequestParams(),
         )
         result = BrowserResult(
@@ -3489,16 +3483,9 @@ class TestRemainingExactMutationCoverage:
             patch.object(fetch_mod, "egress_ip", return_value="198.51.100.1"),
             patch.object(fetch_mod.zendriver, "fetch_zendriver", return_value=result),
             patch.object(fetch_mod, "ProfileStore", shared=Mock(return_value=store)),
-            patch.object(fetch_mod, "draw_user_agent", return_value="drawn"),
-            patch.object(
-                fetch_mod,
-                "kind_for_impersonate",
-                return_value="kind",
-            ) as kind,
         ):
             _send_via_zendriver(request, headers=None, cookies=None)
-        kind.assert_called_once_with("chrome133")
-        assert _recorded_profile(store.save).ua == "drawn"
+        assert _recorded_profile(store.save).cookies == {"sid": "1"}
 
 
 class TestRetryAttemptCounterMutationCoverage:

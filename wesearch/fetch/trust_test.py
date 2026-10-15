@@ -69,7 +69,7 @@ def profiled_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     store.save(
         "203.0.113.1",
         "example.com",
-        Profile(ua="UA/1", cookies={"stored": "S"}),
+        Profile(cookies={"stored": "S"}),
     )
     return "203.0.113.1"
 

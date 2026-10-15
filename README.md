@@ -103,7 +103,7 @@ wesearch/
 │   ├── headers.py   Chrome request headers (incl. x-browser-validation)
 │   └── useragents.py  vendored, refreshable User-Agent pools
 ├── web.py           fetch_web(...): fetch + provider dispatch + extraction
-├── profile.py       cross-process per-(egress_ip, domain) cookie + UA jar
+├── profile.py       cross-process per-(egress_ip, domain) cookie jar
 └── scrape.py        get_element_content(html, selector)
 ```
 
@@ -117,7 +117,7 @@ wesearch/
   require it. One Chrome serves every process on the host: the first fetch launches it
   detached, later fetches attach over DevTools and work in their own tab.
 
-A persistent per-`(egress_ip, domain)` profile (cookies + User-Agent) is loaded and saved
+A persistent per-`(egress_ip, domain)` cookie profile is loaded and saved
 transparently. Every `fetch` is paced host-wide per site and IP (`fetch/gate.py` holds the
 per-site table). A block locks the site briefly; one caller then probes it, a success
 unlocks every caller, and a failure doubles the lock. Run `zendriver` to clear blocks by
@@ -143,7 +143,7 @@ or unlock a backend, and are all optional unless noted.
 - `SEARXNG_URL` -- optional. The base URL of a SearXNG instance you control or trust; enables
   the `"searxng"` backend and the category tabs.
 
-State (the cookie/User-Agent profile jar, cross-process rate-limit lockfiles, the browser
+State (the cookie profile jar, cross-process rate-limit lockfiles, the browser
 transport's persistent Chrome profile) is written under the OS's standard per-user data
 directory -- `XDG_DATA_HOME` (or `~/.local/share`) on Linux, `~/Library/Application Support` on
 macOS, `%LOCALAPPDATA%` on Windows -- namespaced per component (see `wesearch/lib/userdirs.py`).
