@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import importlib
 import io
+import re
 import warnings
 
 from curl_cffi import (
@@ -18,7 +19,7 @@ from curl_cffi import (
     CurlOpt,
     requests as cc_requests,
 )
-from curl_cffi.requests import Response
+from curl_cffi.requests import Response, impersonate
 from treekle import from_plain
 
 import pytest
@@ -1398,6 +1399,32 @@ def test_curl_is_unavailable_where_its_native_library_fails(
     finally:
         curl.curl_available.cache_clear()
     assert caplog.text.count("curl_cffi is unavailable") == 1
+
+
+@pytest.mark.parametrize(
+    ("target", "resolved"),
+    [
+        ("chrome", impersonate.DEFAULT_CHROME),
+        ("chrome_android", impersonate.DEFAULT_CHROME_ANDROID),
+        ("chrome146", "chrome146"),
+        ("chrome131_android", "chrome131_android"),
+    ],
+)
+def test_the_chrome_major_is_the_one_curl_impersonates(
+    target: str,
+    resolved: str,
+) -> None:
+    match = re.search(r"\d+", resolved)
+    assert match is not None
+    assert curl.curl_chrome_major(target) == int(match.group())
+
+
+def test_a_non_chrome_target_has_no_chrome_major() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^Unsupported impersonate target 'safari'\.$",
+    ):
+        curl.curl_chrome_major("safari")
 
 
 if __name__ == "__main__":

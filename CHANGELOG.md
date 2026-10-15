@@ -15,6 +15,16 @@ All notable wesearch changes are documented here. This project follows
 - Every `fetch` is paced and recovered by one host-wide gate, keyed by site and
   egress IP: a block locks the site briefly, then one caller probes it while
   the rest get `CooldownError`. A success unlocks every caller.
+- **Breaking:** the transport owns the browser identity. A caller's
+  `User-Agent`, `sec-ch-ua*`, `x-browser-*` or `x-client-data` header is
+  dropped unless `raw_headers=True`. The Google search backend no longer sends
+  an Android user agent.
+- The curl transport claims the Chrome version curl_cffi impersonates, and the
+  stdlib transport the newest version in the bundled user-agent pool. Both
+  name the host's OS. No Chrome version is written in the source.
+- A site is routed straight to the browser only after a block a browser can
+  clear (a Cloudflare challenge, Google's JavaScript wall). A CAPTCHA, a
+  Google `/sorry` page, or a cooldown no longer routes it there.
 
 ## 0.1.13 - 2026-10-07
 

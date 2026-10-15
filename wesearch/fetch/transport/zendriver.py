@@ -1135,10 +1135,7 @@ def _continue(
 # so there is nothing here to remove.
 #
 # An override that DOES fire is therefore reserved for the one case worth its
-# unreliability: a caller credential the tab cannot hold. It is not a way to restore
-# Chrome's own headers -- interception already costs every client hint (measured: a
-# guarded navigation sends no ``sec-ch-ua`` at all, with or without an override), and no
-# CDP verb adds one header without replacing the set.
+# unreliability: a caller credential the tab cannot hold.
 def _carried_headers(
     request_headers: Mapping[str, str],
     caller_headers: dict[str, str] | None,
@@ -1176,14 +1173,6 @@ def _carried_headers(
 # restated: Chrome follows its own redirects, so this transport applies the rule itself
 # instead of through that function, and a second copy is how the two legs came to
 # disagree.
-#
-# Only ``authorization`` and ``cookie`` are live here. The set also names the extended
-# client hints, which matter on the header transports because THOSE build the hints
-# themselves; an intercepted navigation carries none to begin with (measured: zero
-# ``sec-ch-ua`` headers reach the wire, with or without an override), so for this leg
-# those entries are inert. Borrowing the shared set anyway is deliberate -- it cannot
-# drift from the contract, and a hint that Chrome someday does emit under interception
-# is then already covered.
 def _origin_bound() -> frozenset[str]:
     """Return the header names a cross-origin hop may not carry."""
     default = cast(

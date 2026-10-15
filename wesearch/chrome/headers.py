@@ -19,17 +19,11 @@ Two layers, split by where a real Chrome sends them:
   ``x-browser-validation`` is the reverse-engineered integrity token:
   ``base64(sha1(platform_api_key + UA))``.
 
-These values go stale as Chrome ships. To resync them against a real browser::
+No Chrome version is written here: callers pass the major their transport
+presents, and the brand list is derived from it. The parity test checks the rest
+against a real browser::
 
-    # 1. What does a real Chrome actually send?
     uv run --frozen pytest -m integration wesearch/chrome/
-
-The parity test drives a headless Chrome through
-:func:`wesearch.chrome.capture.drive_chrome` and asserts our
-request carries the same headers in the same order. When it fails, Chrome moved:
-read the captured names/values out of the failure and update the tables here.
-That test is the only thing keeping this file honest -- nothing else can tell
-you a hand-maintained fingerprint has drifted.
 
 References:
     https://github.com/dsekz/chrome-x-browser-validation-header
@@ -39,48 +33,144 @@ References:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Final, Literal
 
 import base64
 import hashlib
+import sys
 
 
 __all__ = [
     "ChromePlatform",
+    "chrome_brands",
     "chrome_client_hints",
     "chrome_headers_for_google",
+    "chrome_identity_headers",
     "chrome_navigation_headers",
+    "chrome_platform",
     "chrome_user_agent",
-    "impersonate_version_platform",
     "is_google_property",
+    "is_identity_header",
+    "user_agent_platform",
 ]
 
 type ChromePlatform = Literal["Windows", "Linux", "macOS", "Android"]
 
-# The Chrome major version + platform each curl_cffi ``impersonate`` target
-# presents (its UA + basic client hints), so the extended hints we add agree
-# with what curl already put on the wire. Keep in step with the installed
-# curl_cffi's DEFAULT_CHROME as it advances.
-_IMPERSONATE: Final[dict[str, tuple[int, ChromePlatform]]] = {
-    "chrome": (146, "macOS"),
-    "chrome_android": (131, "Android"),
-}
 
+def chrome_platform(impersonate: str, *, host: str = sys.platform) -> ChromePlatform:
+    """Return the OS a Chrome impersonating ``impersonate`` presents.
 
-def impersonate_version_platform(impersonate: str) -> tuple[int, ChromePlatform]:
-    """Resolve a curl_cffi impersonate target to its (major, platform).
-
-    Falls back to the desktop-Chrome default for an unrecognized target, so an
-    unknown value degrades to a coherent desktop identity rather than raising.
+    A desktop target names THIS host's OS, so a cookie the local Chrome earned
+    returns from a browser naming the same OS.
 
     Args:
-      impersonate: curl_cffi impersonate target (e.g., 'chrome', 'chrome_android').
+      impersonate: curl_cffi target or alias (``chrome``, ``chrome131_android``).
+      host: ``sys.platform`` of the machine a desktop target presents as.
 
     Returns:
-      result: Tuple of (Chrome_major_version, platform) for that target.
+      platform: ``"Android"`` for an Android target, else the host's OS.
 
     """
-    return _IMPERSONATE.get(impersonate, _IMPERSONATE["chrome"])
+    if impersonate.endswith("android"):
+        return "Android"
+    platforms: dict[str, ChromePlatform] = {"darwin": "macOS", "win32": "Windows"}
+    return platforms.get(host, "Linux")
+
+
+def chrome_brands(major: int, *, full_version: str = "") -> str:
+    """Return Chrome's ``sec-ch-ua`` brand list for ``major``.
+
+    Chromium derives the GREASE brand, its version, and the list order from the
+    major version alone (``GenerateBrandVersionList``), so no release needs a
+    table entry.
+
+    Args:
+      major: Chrome major version.
+      full_version: Full version for ``sec-ch-ua-full-version-list``; empty
+        gives the ``sec-ch-ua`` form, which carries majors only.
+
+    Returns:
+      brands: The header value.
+
+    """
+    chars = " (:-./);=?_"
+    grease = f"Not{chars[major % 11]}A{chars[(major + 1) % 11]}Brand"
+    grease_version = ("8", "99", "24")[major % 3] + (".0.0.0" if full_version else "")
+    version = full_version or str(major)
+    named = (
+        (grease, grease_version),
+        ("Chromium", version),
+        ("Google Chrome", version),
+    )
+    order = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))[
+        major % 6
+    ]
+    placed = sorted(zip(order, named, strict=True))
+    return ", ".join(f'"{brand}";v="{v}"' for _, (brand, v) in placed)
+
+
+def chrome_identity_headers(*, major: int, platform: ChromePlatform) -> dict[str, str]:
+    """Return the basic client hints and User-Agent, cased as Chrome sends them.
+
+    Args:
+      major: Chrome major version.
+      platform: The impersonated OS.
+
+    Returns:
+      headers: ``sec-ch-ua``, ``-mobile``, ``-platform``, and ``User-Agent``.
+
+    """
+    return {
+        "sec-ch-ua": chrome_brands(major),
+        "sec-ch-ua-mobile": "?1" if platform == "Android" else "?0",
+        "sec-ch-ua-platform": f'"{platform}"',
+        "User-Agent": chrome_user_agent(major, platform),
+    }
+
+
+def user_agent_platform(user_agent: str) -> ChromePlatform | None:
+    """Return the OS a Chrome User-Agent names, or ``None`` for any other OS.
+
+    Args:
+      user_agent: A Chrome User-Agent string.
+
+    Returns:
+      platform: The platform its OS token names.
+
+    """
+    os_token = user_agent.partition("(")[2].partition(")")[0]
+    if "Android" in os_token:
+        return "Android"
+    prefixes: dict[str, ChromePlatform] = {
+        "Windows NT": "Windows",
+        "X11; Linux": "Linux",
+        "Macintosh": "macOS",
+    }
+    return next(
+        (
+            platform
+            for prefix, platform in prefixes.items()
+            if os_token.startswith(prefix)
+        ),
+        None,
+    )
+
+
+def is_identity_header(name: str) -> bool:
+    """Whether ``name`` describes the browser rather than the request.
+
+    Args:
+      name: Header name, any case.
+
+    Returns:
+      owned: True for the User-Agent, client hints, and Google integrity set.
+
+    """
+    lowered = name.lower()
+    return lowered in ("user-agent", "x-client-data") or lowered.startswith(
+        ("sec-ch-ua", "x-browser-"),
+    )
 
 
 # Per-platform Google API keys hard-coded in chrome.dll, used as the prefix when
@@ -160,16 +250,12 @@ def chrome_navigation_headers(
       headers: The ordered Chrome header map.
 
     """
-    h: dict[str, str] = {
-        "sec-ch-ua": (
-            f'"Chromium";v="{major}", "Not-A.Brand";v="24", "Google Chrome";v="{major}"'
-        ),
-        "sec-ch-ua-mobile": "?1" if platform == "Android" else "?0",
-        "sec-ch-ua-platform": f'"{platform}"',
-    }
+    identity = chrome_identity_headers(major=major, platform=platform)
+    user_agent = identity.pop("User-Agent")
+    h = identity
     if method in ("GET", "HEAD"):
         h["Upgrade-Insecure-Requests"] = "1"
-        h["User-Agent"] = chrome_user_agent(major, platform)
+        h["User-Agent"] = user_agent
         h["Accept"] = (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,image/apng,*/*;q=0.8,"
@@ -180,7 +266,7 @@ def chrome_navigation_headers(
         h["Sec-Fetch-User"] = "?1"
         h["Sec-Fetch-Dest"] = "document"
     else:
-        h["User-Agent"] = chrome_user_agent(major, platform)
+        h["User-Agent"] = user_agent
         h["Accept"] = "*/*"
         if content_type:
             h["Content-Type"] = content_type
@@ -224,15 +310,10 @@ def chrome_client_hints(
     """
     if platform not in _UA_OS:
         raise ValueError(f"Unsupported platform {platform!r}.")
-    version = full_version or f"{major}.0.0.0"
     mobile = platform == "Android"
-    # The full-version-list brand token must match curl_cffi's own sec-ch-ua
-    # brand exactly ("Not-A.Brand";v="24" for chrome146) -- a real Chrome's
-    # sec-ch-ua and -full-version-list always carry the same brand string.
-    full_list = (
-        f'"Chromium";v="{version}", "Not-A.Brand";v="24.0.0.0", '
-        f'"Google Chrome";v="{version}"'
-    )
+    # Same GREASE brand and order as sec-ch-ua: a real Chrome derives both lists
+    # from one brand set, so a mismatch between them is itself a tell.
+    full_list = chrome_brands(major, full_version=full_version or f"{major}.0.0.0")
     # Key order mirrors a real Chrome's opted-in wire order exactly:
     # arch, platform-version, model, bitness, wow64, full-version-list.
     return {
@@ -307,7 +388,7 @@ def chrome_headers_for_google(
     """
     return {
         "x-browser-channel": "stable",
-        "x-browser-year": "2026",
+        "x-browser-year": str(datetime.now(UTC).year),
         "x-browser-validation": _validation(
             chrome_user_agent(major, platform),
             platform,

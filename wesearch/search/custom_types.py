@@ -14,10 +14,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, TypeAlias
 
-import hashlib
 import re
-
-from wesearch.chrome.useragents import user_agent_pool
 
 
 if TYPE_CHECKING:
@@ -282,28 +279,3 @@ def clean_text(text: str) -> str:
 
     """
     return re.sub(r"\s+([,.;:!?])", r"\1", " ".join(text.split()))
-
-
-def gsa_headers_for_query(query: str) -> dict[str, str]:
-    """Build request headers with a query-stable Android-Chrome UA.
-
-    Known coherence debt (REV2A-001): this Android/mobile UA is paired with
-    ``fetch``'s default ``impersonate="chrome"`` (a DESKTOP TLS/JA4/HTTP2
-    fingerprint + desktop ``sec-ch-ua-mobile: ?0`` / ``sec-ch-ua-platform:
-    "macOS"``), so the UA and the wire fingerprint disagree -- normally a bot
-    tell. A coherent fix (``impersonate="chrome_android"`` + mobile hints) is
-    DEFERRED and UNVERIFIED: Google now JS-gates HTML scraping (the enablejs
-    shell) independently of the fingerprint -- a coherent identity did NOT clear
-    the wall in offline testing -- so a fingerprint change is unverifiable and
-    likely valueless until the JS gate is addressed. Left as-is deliberately.
-
-    Args:
-      query: The search query; hashed to pick a stable User-Agent per query.
-
-    Returns:
-      headers: A one-entry ``User-Agent`` header dict.
-
-    """
-    pool = user_agent_pool("chrome_android")
-    idx = int.from_bytes(hashlib.sha256(query.encode()).digest()[:8]) % len(pool)
-    return {"User-Agent": f"{pool[idx]} NSTNWV"}

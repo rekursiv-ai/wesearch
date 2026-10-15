@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import functools
 import importlib
 import logging
+import re
 import threading
 
 from wesearch.fetch.challenge import classify_http_error
@@ -50,6 +51,7 @@ __all__ = [
     "close_curl_session",
     "close_curl_sessions_except",
     "curl_available",
+    "curl_chrome_major",
     "curl_session",
     "fetch_curl",
     "seed_session_jar",
@@ -73,6 +75,29 @@ def curl_available() -> bool:
         logger.warning("curl_cffi is unavailable; fetching with the stdlib transport.")
         return False
     return True
+
+
+def curl_chrome_major(impersonate: str) -> int:
+    """Return the Chrome major curl_cffi impersonates for ``impersonate``.
+
+    Args:
+      impersonate: curl_cffi target or alias (``chrome``, ``chrome146``).
+
+    Returns:
+      major: The version in the target curl_cffi resolves the name to.
+
+    Raises:
+      ValueError: When ``impersonate`` names no Chrome target.
+
+    """
+    target = curl_cffi.requests.impersonate.REAL_TARGET_MAP.get(
+        impersonate,
+        impersonate,
+    )
+    match = re.fullmatch(r"chrome(\d+)(?:_android)?", target)
+    if match is None:
+        raise ValueError(f"Unsupported impersonate target {impersonate!r}.")
+    return int(match[1])
 
 
 # Pool identity: egress, registrable domain, impersonation target, SSRF pin,

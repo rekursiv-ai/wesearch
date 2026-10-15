@@ -24,14 +24,17 @@ from urllib import error, request
 import gzip
 import logging
 import random
+import re
 import stat
 import tempfile
 
 from treekle import ReadError, from_plain, json_loads
 
 from wesearch.chrome.headers import (
+    ChromePlatform,
+    chrome_platform,
     chrome_user_agent,
-    impersonate_version_platform,
+    user_agent_platform,
 )
 
 
@@ -43,6 +46,7 @@ __all__ = [
     "draw_user_agent",
     "impersonate_target",
     "kind_for_impersonate",
+    "newest_chrome_major",
     "refresh",
     "refresh_all",
     "user_agent_pool",
@@ -71,9 +75,8 @@ def impersonate_target(kind: UserAgentKind) -> str:
 def kind_for_impersonate(impersonate: str) -> UserAgentKind:
     """Return the platform-family pool for a curl_cffi target.
 
-    The inverse of :func:`impersonate_target`, kept beside it as the ONE source
-    of truth for the impersonate<->kind mapping (an unknown target degrades to
-    the desktop pool, matching :func:`impersonate_version_platform`).
+    The inverse of :func:`impersonate_target`; an unknown target degrades to
+    the desktop pool.
 
     Args:
         impersonate: curl_cffi impersonation target.
@@ -97,6 +100,27 @@ def user_agent_pool(kind: UserAgentKind) -> tuple[str, ...]:
 
     """
     return tuple(line for line in _pool_path(kind).read_text().splitlines() if line)
+
+
+def newest_chrome_major(platform: ChromePlatform) -> int:
+    """Return the newest Chrome major the pool records for ``platform``.
+
+    Args:
+      platform: The OS whose real-browser entries to consider.
+
+    Returns:
+      major: The highest ``Chrome/<major>`` among them.
+
+    """
+    kind: UserAgentKind = (
+        "chrome_android" if platform == "Android" else "chrome_desktop"
+    )
+    return max(
+        int(match.group(1))
+        for ua in user_agent_pool(kind)
+        if user_agent_platform(ua) == platform
+        for match in re.finditer(r"Chrome/(\d+)", ua)
+    )
 
 
 def draw_user_agent(kind: UserAgentKind) -> str:
@@ -338,8 +362,8 @@ def _pool_path(kind: UserAgentKind) -> Path:
 
 def _refresh_user_agent(kind: UserAgentKind) -> str:
     """Return a coherent fixed identity for the maintenance download."""
-    major, platform = impersonate_version_platform(impersonate_target(kind))
-    return chrome_user_agent(major, platform)
+    platform = chrome_platform(impersonate_target(kind))
+    return chrome_user_agent(newest_chrome_major(platform), platform)
 
 
 if __name__ == "__main__":

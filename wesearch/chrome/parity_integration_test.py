@@ -38,6 +38,13 @@ import pytest
 
 from wesearch.chrome.capture import chrome_available, drive_chrome
 from wesearch.chrome.echo import EchoOracle
+from wesearch.chrome.headers import (
+    chrome_brands,
+    chrome_identity_headers,
+    chrome_platform,
+    user_agent_platform,
+)
+from wesearch.chrome.useragents import newest_chrome_major
 from wesearch.fetch import (
     ContentParams,
     FetchSession,
@@ -47,7 +54,10 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.fetch.transport.curl import close_curl_sessions_except
+from wesearch.fetch.transport.curl import (
+    close_curl_sessions_except,
+    curl_chrome_major,
+)
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 
 
@@ -81,19 +91,10 @@ _INTENT_VALUES = (
     "upgrade-insecure-requests",
 )
 
-# The build-identity values (user-agent, sec-ch-ua, sec-ch-ua-platform) are
-# deliberately NOT compared to the local Chrome: the harness browser is
-# whatever the host installed (and announces HeadlessChrome/), while we
-# impersonate a fixed target. Pinning them would fail on browser upgrades
-# instead of on drift. What must hold is that OUR values agree with EACH
-# OTHER -- a UA naming one OS beside a platform hint naming another is the
-# incoherence that gives a bot away.
-_UA_OS_TOKEN = {
-    "Windows": "Windows NT",
-    "Linux": "X11; Linux",
-    "macOS": "Macintosh",
-    "Android": "Android",
-}
+# The version each transport claims comes from its own source (curl's from the
+# target curl_cffi impersonates, stdlib's from the User-Agent pool), so it is
+# compared to that source; the OS is compared to the local Chrome.
+_IDENTITY_VALUES = ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "user-agent")
 
 _needs_chrome = pytest.mark.skipif(
     not chrome_available(),
@@ -137,14 +138,16 @@ def test_fetch_wire_request_matches_chrome(
     backend: Transport,
     oracle: EchoOracle,
 ) -> None:
-    """Our wire request has the same headers, in the same order, as Chrome's.
+    """Our wire request is a real Chrome's: headers, order, intent, and OS.
 
     Drives the public :func:`wesearch.fetch.fetch` API exactly as a caller
-    would, proving the API reproduces a real Chrome request. The curl path
-    (curl_cffi impersonation owns the fingerprint) and the stdlib path (the same
-    Chrome header set hand-built by ``chrome_navigation_headers``) must each
-    match Chrome's ordered wire headers, modulo the curl HTTP/1.1 ``Priority``
-    quirk.
+    would, then compares against a live headless Chrome on this host:
+
+    - header names and order equal Chrome's, modulo curl's HTTP/1.1 ``Priority``;
+    - navigation-intent values equal Chrome's;
+    - ``sec-ch-ua-platform`` equals Chrome's;
+    - User-Agent and client hints name the version this transport presents,
+      with the brand list Chrome derives for it.
     """
     omit = _HTTP2_ONLY if backend == "curl" else frozenset[str]()
     chrome = _drop(_chrome_headers(oracle), omit)
@@ -172,7 +175,7 @@ def test_fetch_wire_request_matches_chrome(
             f"  chrome: {_value(chrome_lines, name)}\n"
             f"  ours:   {_value(ours_lines, name)}"
         )
-    _assert_identity_is_coherent(ours_lines, backend=backend)
+    _assert_identity_matches(ours_lines, chrome_lines, backend=backend)
 
 
 @pytest.mark.browser_chrome
@@ -318,23 +321,36 @@ def _drive(oracle: EchoOracle) -> bool:
     )
 
 
-# A request whose ``sec-ch-ua-platform`` says one OS while its User-Agent names another
-# is provably not a real browser, and no header ORDER check can see it -- both headers
-# are present and correctly placed.
-def _assert_identity_is_coherent(lines: tuple[str, ...], *, backend: str) -> None:
-    """Our UA, platform hint, and brand version must describe one browser."""
-    user_agent = _value(lines, "user-agent")
-    platform = _value(lines, "sec-ch-ua-platform").strip('"')
-    assert platform in _UA_OS_TOKEN, f"unknown platform hint {platform!r}"
-    assert _UA_OS_TOKEN[platform] in user_agent, (
-        f"sec-ch-ua-platform says {platform!r} but the User-Agent does not "
-        f"(transport={backend}).\n  user-agent: {user_agent}"
+def _assert_identity_matches(
+    ours: tuple[str, ...],
+    chrome: tuple[str, ...],
+    *,
+    backend: str,
+) -> None:
+    """Our identity names this host's OS and the version our transport presents."""
+    platform = chrome_platform("chrome")
+    major = (
+        curl_chrome_major("chrome")
+        if backend == "curl"
+        else newest_chrome_major(platform)
     )
-    major = user_agent.split("Chrome/", 1)[-1].split(".", 1)[0]
-    assert f'v="{major}"' in _value(lines, "sec-ch-ua"), (
-        f"sec-ch-ua brand version disagrees with the User-Agent's Chrome/{major} "
-        f"(transport={backend}).\n  sec-ch-ua: {_value(lines, 'sec-ch-ua')}"
-    )
+    expected = {
+        name.lower(): value
+        for name, value in chrome_identity_headers(
+            major=major,
+            platform=platform,
+        ).items()
+    }
+    for name in _IDENTITY_VALUES:
+        assert _value(ours, name) == expected[name], (
+            f"{name} diverged from the {backend} identity.\n"
+            f"  expected: {expected[name]}\n  ours:     {_value(ours, name)}"
+        )
+    assert _value(ours, "sec-ch-ua-platform") == _value(chrome, "sec-ch-ua-platform")
+    chrome_ua = _value(chrome, "user-agent")
+    assert user_agent_platform(chrome_ua) == platform
+    chrome_major = int(chrome_ua.split("Chrome/", 1)[1].split(".", 1)[0])
+    assert _value(chrome, "sec-ch-ua") == chrome_brands(chrome_major)
 
 
 def _drop_lines(lines: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]:

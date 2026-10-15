@@ -38,13 +38,20 @@ import threading
 import time
 
 from wesearch.chrome.headers import (
+    ChromePlatform,
     chrome_client_hints,
     chrome_headers_for_google,
+    chrome_identity_headers,
     chrome_navigation_headers,
-    impersonate_version_platform,
+    chrome_platform,
     is_google_property,
+    is_identity_header,
 )
-from wesearch.chrome.useragents import draw_user_agent, kind_for_impersonate
+from wesearch.chrome.useragents import (
+    draw_user_agent,
+    kind_for_impersonate,
+    newest_chrome_major,
+)
 from wesearch.fetch.common import (
     Observer,
     default_port,
@@ -57,6 +64,7 @@ from wesearch.fetch.transport.curl import (
     close_curl_session,
     close_curl_sessions_except,
     curl_available,
+    curl_chrome_major,
     curl_session,
     fetch_curl,
     seed_session_jar,
@@ -689,12 +697,8 @@ def _fetch_once(
             time.sleep(delay_sec)
 
 
-# On the high-level curl transport, curl_cffi's ``impersonate`` supplies the coherent
-# Chrome fingerprint (User-Agent, ``sec-ch-ua`` hints, Accept, Sec-Fetch-*, Priority)
-# matching its TLS/HTTP-2 profile exactly. Overriding those with hand-built values makes
-# the identities disagree -- a bot tell -- so that path emits ONLY the structural
-# headers curl does not set (Origin/Content-Type on a POST), the extended client hints
-# an origin opted into via ``Accept-CH``, and caller extras.
+# curl_cffi's impersonation supplies the Accept, Sec-Fetch-*, and Priority headers
+# matching its TLS/HTTP-2 profile; the curl path adds only what that omits.
 def _build_headers(
     *,
     method: str,
@@ -707,52 +711,47 @@ def _build_headers(
     accept_ch: Mapping[str, frozenset[str]],
 ) -> dict[str, str]:
     """Build canonical-order Chrome request headers."""
-    # Host and Content-Length are omitted: http.client auto-adds both first on
-    # the wire (the connection path overrides Host when validated_hosts splits
-    # SNI/IP); curl adds them itself.
     if raw_headers:
         return dict(extra or {})
+    kept = {k: v for k, v in (extra or {}).items() if not is_identity_header(k)}
+    platform = chrome_platform(impersonate)
     if use_curl:
         return _curl_structural_headers(
             method=method,
             url=url,
             content_type=content_type,
-            extra=extra,
-            impersonate=impersonate,
+            extra=kept,
+            major=curl_chrome_major(impersonate),
+            platform=platform,
             accept_ch=accept_ch,
         )
-    # The stdlib path gets no impersonation-injected request headers, so it
-    # reproduces the full Chrome header set by hand -- from the SAME source
-    # (chrome_navigation_headers, matched to the impersonate target) the
-    # high-level curl path's fingerprint uses, so every transport presents one
-    # coherent identity, not drifting ones.
     parsed = urlparse(url)
-    major, platform = impersonate_version_platform(impersonate)
+    major = newest_chrome_major(platform)
     h = chrome_navigation_headers(
         major=major,
         platform=platform,
         method=method,
         content_type=content_type or "",
         origin=f"{parsed.scheme}://{parsed.netloc}",
-        # This branch is reached only by the stdlib path, which is HTTP/1.1; a
-        # real Chrome omits the HTTP/2-only Priority header there.
         http2=False,
     )
-    h.update(_google_headers(url, impersonate))
-    # Caller wins; dict.update preserves slot for existing keys and
-    # appends new ones at the end.
-    h.update(extra or {})
+    h.update(_google_headers(url, major=major, platform=platform))
+    h.update(kept)
     return h
 
 
 # A real Chrome sends ``x-browser-*`` / ``x-client-data`` only to Google properties, so
 # :func:`fetch` adds them by host -- every transport, no caller wiring -- and nothing to
 # any other origin.
-def _google_headers(url: str, impersonate: str) -> dict[str, str]:
+def _google_headers(
+    url: str,
+    *,
+    major: int,
+    platform: ChromePlatform,
+) -> dict[str, str]:
     """Return the Google-only integrity headers for ``url``, empty off a Google host."""
     if not is_google_property(urlparse(url).hostname or ""):
         return {}
-    major, platform = impersonate_version_platform(impersonate)
     return chrome_headers_for_google(major=major, platform=platform)
 
 
@@ -765,29 +764,28 @@ def _accept_ch_hints(resp_headers: dict[str, str]) -> frozenset[str]:
     return frozenset(name for name in chrome_client_hints(major=1) if name in wanted)
 
 
-# Verified on Linux against real Chrome (146, the impersonate target): the FIRST request
-# to an origin sends only the core set curl_cffi's impersonate reproduces (UA, the three
-# basic ``sec-ch-ua`` hints, Accept, Sec-Fetch-*, Priority, Accept-Encoding/Language).
-# It adds the EXTENDED client hints (``sec-ch-ua-arch`` etc.) only AFTER the server opts
-# in via ``Accept-CH``, on subsequent same-origin requests. We mirror that exactly: a
-# cold origin gets nothing extra (adding hints an unrequesting site never asked for is
-# itself a tell), and an origin that has sent Accept-CH gets precisely the hints it
-# requested, version-matched to the impersonate target. Only a POST's Origin/Content-
-# Type and caller extras follow (Cookie is merged by caller).
+# Verified on Linux against real Chrome: the FIRST request to an origin sends only the
+# core set (UA, the three basic ``sec-ch-ua`` hints, Accept, Sec-Fetch-*, Priority,
+# Accept-Encoding/Language). It adds the EXTENDED client hints (``sec-ch-ua-arch``
+# etc.) only AFTER the server opts in via ``Accept-CH``, on subsequent same-origin
+# requests, so a cold origin gets none.
+#
+# curl_cffi's desktop targets name macOS; the identity headers here name the host OS
+# instead. curl keeps each overridden header in its impersonated wire slot (measured).
 def _curl_structural_headers(
     *,
     method: str,
     url: str,
     content_type: str | None,
-    extra: Mapping[str, str] | None,
-    impersonate: str,
+    extra: Mapping[str, str],
+    major: int,
+    platform: ChromePlatform,
     accept_ch: Mapping[str, frozenset[str]],
 ) -> dict[str, str]:
     """Headers for the curl path: what impersonate omits + Accept-CH opt-ins."""
-    h: dict[str, str] = {}
+    h = chrome_identity_headers(major=major, platform=platform)
     wanted = accept_ch.get(origin(url), frozenset[str]())
     if wanted:
-        major, platform = impersonate_version_platform(impersonate)
         hints = chrome_client_hints(major=major, platform=platform)
         h.update({name: value for name, value in hints.items() if name in wanted})
     if method not in ("GET", "HEAD"):
@@ -795,8 +793,8 @@ def _curl_structural_headers(
             h["Content-Type"] = content_type
         parsed = urlparse(url)
         h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
-    h.update(_google_headers(url, impersonate))
-    h.update(extra or {})
+    h.update(_google_headers(url, major=major, platform=platform))
+    h.update(extra)
     return h
 
 
@@ -922,8 +920,8 @@ def _fetch_with_identity(
                 caller_headers=caller_headers,
                 caller_cookies=caller_cookies,
             )
-        except BotDetectionError:
-            if request.domain:
+        except BotDetectionError as block:
+            if request.domain and block.browser_clears:
                 transport_routing.remember_zendriver_domain(request.domain)
             return _validated_body(
                 request,

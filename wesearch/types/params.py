@@ -156,7 +156,9 @@ class ContentParams:
       json: JSON-serializable body, sent as application/json. Mutually exclusive
         with ``data``. Defaults to :data:`NO_BODY` -- the absence of a body --
         so that ``json=None`` sends the JSON literal ``null``.
-      headers: Extra headers, merged over the session identity (these win).
+      headers: Extra headers. Headers naming the browser (User-Agent, client
+        hints, Google integrity headers) are dropped: the transport presents
+        its own. ``raw_headers`` sends them as given.
       cookies: Cookies to send, merged over the session jar (these win). On the
         curl path these are written INTO the pooled jar, which outlives the
         call, so a per-call override persists to later requests on the same

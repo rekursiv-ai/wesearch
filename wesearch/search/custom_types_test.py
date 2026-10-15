@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-import hashlib
-
 from bs4 import BeautifulSoup
 
 from wesearch.search.custom_types import (
     ImageResult,
     clean_text,
-    gsa_headers_for_query,
     strip_scripts,
 )
 
@@ -28,25 +23,6 @@ def test_strip_scripts_removes_every_script() -> None:
     )
     strip_scripts(soup)
     assert str(soup) == "<p>keep</p>"
-
-
-def test_gsa_headers_are_query_stable_and_have_suffix() -> None:
-    headers = gsa_headers_for_query("same query")
-    assert headers == gsa_headers_for_query("same query")
-    assert set(headers) == {"User-Agent"}
-    assert headers["User-Agent"].endswith(" NSTNWV")
-
-
-def test_gsa_headers_use_the_first_eight_digest_bytes() -> None:
-    pool = tuple(f"ua{i}" for i in range(7))
-    with patch("wesearch.search.custom_types.user_agent_pool", return_value=pool):
-        for query in ("a", "b", "cats", "a longer query"):
-            digest_index = int.from_bytes(
-                hashlib.sha256(query.encode()).digest()[:8],
-            ) % len(pool)
-            assert gsa_headers_for_query(query) == {
-                "User-Agent": f"{pool[digest_index]} NSTNWV",
-            }
 
 
 def test_result_shapes_preserve_base_and_category_fields() -> None:

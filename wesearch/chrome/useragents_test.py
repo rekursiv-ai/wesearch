@@ -17,10 +17,12 @@ import tempfile
 import pytest
 
 from wesearch.chrome import useragents
+from wesearch.chrome.headers import ChromePlatform, chrome_user_agent
 from wesearch.chrome.useragents import (
     UserAgentKind,
     draw_user_agent,
     impersonate_target,
+    newest_chrome_major,
     user_agent_pool,
 )
 
@@ -75,6 +77,34 @@ class TestDraw:
             assert draw_user_agent(kind) == pool[-1]
 
         choice.assert_called_once_with(pool)
+
+
+class TestNewestChromeMajor:
+    @pytest.mark.parametrize(
+        ("platform", "major"),
+        [("Linux", 152), ("Windows", 156), ("Android", 151)],
+    )
+    def test_is_the_newest_pool_entry_for_the_platform(
+        self,
+        tmp_path: Path,
+        platform: ChromePlatform,
+        major: int,
+    ) -> None:
+        (tmp_path / "chrome_desktop_useragents.txt").write_text(
+            f"{chrome_user_agent(150, 'Linux')}\n"
+            f"{chrome_user_agent(152, 'Linux')}\n"
+            f"{chrome_user_agent(156, 'Windows')}\n"
+            "Mozilla/5.0 (X11; CrOS x86_64 1.0) Chrome/160.0.0.0 Safari/537.36\n",
+        )
+        (tmp_path / "chrome_android_useragents.txt").write_text(
+            f"{chrome_user_agent(151, 'Android')}\n",
+        )
+        with patch.object(useragents, "_CWD", tmp_path):
+            assert newest_chrome_major(platform) == major
+
+    def test_shipped_pools_cover_every_platform(self) -> None:
+        for platform in ("Windows", "Linux", "macOS", "Android"):
+            assert newest_chrome_major(platform) > 0
 
 
 class TestImpersonateTarget:
@@ -577,16 +607,12 @@ class TestDownload:
                 "impersonate_target",
                 return_value="chrome_android",
             ) as target,
-            patch.object(
-                useragents,
-                "impersonate_version_platform",
-                return_value=(131, "Android"),
-            ) as version,
+            patch.object(useragents, "newest_chrome_major", return_value=131) as major,
             patch.object(useragents, "chrome_user_agent", return_value="UA") as ua,
         ):
             assert useragents._refresh_user_agent("chrome_android") == "UA"
         target.assert_called_once_with("chrome_android")
-        version.assert_called_once_with("chrome_android")
+        major.assert_called_once_with("Android")
         ua.assert_called_once_with(131, "Android")
 
     def test_download_uses_stdlib_with_fixed_identity(self) -> None:

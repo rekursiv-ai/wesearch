@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import shlex
 
 
@@ -46,7 +48,17 @@ class FetchError(Exception):
 
 
 class BotDetectionError(FetchError):
-    """A site served an automated-access challenge instead of content."""
+    """A site served an automated-access challenge instead of content.
+
+    Attributes:
+      browser_clears: Whether a real browser engine gets past this block where
+        curl cannot, so the domain should route to the browser from now on.
+        False for a block that is about the IP or needs a human; routing those
+        to the browser only moves the same failure onto the slower transport.
+
+    """
+
+    browser_clears: ClassVar[bool] = False
 
     guidance = (
         "The site served an automated-access block. RetryParams later or from a "
@@ -114,6 +126,8 @@ class PuzzleChallengeError(BotDetectionError):
 class CloudflareChallengeError(BotDetectionError):
     """Cloudflare served a managed challenge."""
 
+    browser_clears = True
+
     guidance = (
         "Cloudflare served a managed challenge (Turnstile / 'Just a moment'). "
         "It clears by running the page JS in a real browser engine or from a "
@@ -142,6 +156,8 @@ class CooldownError(BotDetectionError):
 
 class GoogleJavascriptRequiredError(BotDetectionError):
     """Google Search served its JavaScript-required shell."""
+
+    browser_clears = True
 
     guidance = (
         "Google served its enablejs shell (an HTTP-200 page with no results that "

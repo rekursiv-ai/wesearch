@@ -17,6 +17,14 @@ from curl_cffi import requests as cc_requests
 import pytest
 
 from wesearch import fetch
+from wesearch.chrome.headers import (
+    chrome_headers_for_google,
+    chrome_identity_headers,
+    chrome_navigation_headers,
+    chrome_platform,
+    chrome_user_agent,
+)
+from wesearch.chrome.useragents import newest_chrome_major
 from wesearch.fetch import (
     ContentParams,
     FetchSession,
@@ -54,6 +62,7 @@ from wesearch.fetch.testing import (
     zstd_compress,
 )
 from wesearch.fetch.transport import transport_routing, zendriver
+from wesearch.fetch.transport.curl import curl_chrome_major
 from wesearch.fetch.transport.zendriver import BrowserResult
 from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import (
@@ -62,6 +71,7 @@ from wesearch.types.errors import (
     CooldownError,
     FetchError,
     GoogleJavascriptRequiredError,
+    GoogleSorryError,
     PuzzleChallengeError,
 )
 
@@ -120,6 +130,96 @@ def test_ip_family_validation_is_exact() -> None:
     assert not _is_valid_ip_address("invalid", ipv6=True)
 
 
+def _identity(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        k: v for k, v in headers.items() if k.lower().startswith(("sec-ch", "user"))
+    }
+
+
+@pytest.mark.parametrize("use_curl", [True, False])
+def test_each_transport_presents_its_own_chrome_on_the_host_os(use_curl: bool) -> None:
+    major = curl_chrome_major("chrome") if use_curl else newest_chrome_major("Linux")
+    with patch.object(fetch_mod, "chrome_platform", return_value="Linux"):
+        headers = _build_headers(
+            method="GET",
+            url="https://example.com/",
+            content_type=None,
+            extra=None,
+            raw_headers=False,
+            impersonate="chrome",
+            use_curl=use_curl,
+            accept_ch={},
+        )
+    assert _identity(headers) == chrome_identity_headers(major=major, platform="Linux")
+
+
+@pytest.mark.parametrize("use_curl", [True, False])
+def test_a_caller_cannot_override_the_browser_identity(use_curl: bool) -> None:
+    caller = {
+        "User-Agent": "Android GSA",
+        "sec-ch-ua-platform": '"Android"',
+        "x-browser-validation": "forged",
+        "Accept-Language": "de-DE",
+        "Authorization": "Bearer t",
+    }
+    bare, overridden = (
+        _build_headers(
+            method="GET",
+            url="https://www.google.com/search",
+            content_type=None,
+            extra=extra,
+            raw_headers=False,
+            impersonate="chrome",
+            use_curl=use_curl,
+            accept_ch={},
+        )
+        for extra in (None, caller)
+    )
+    assert overridden == {
+        **bare,
+        "Accept-Language": "de-DE",
+        "Authorization": "Bearer t",
+    }
+
+
+def test_raw_headers_keep_a_caller_identity() -> None:
+    assert _build_headers(
+        method="GET",
+        url="https://example.com",
+        content_type=None,
+        extra={"User-Agent": "loop-paper"},
+        raw_headers=True,
+        impersonate="chrome",
+        use_curl=True,
+        accept_ch={},
+    ) == {"User-Agent": "loop-paper"}
+
+
+def test_google_validation_hashes_the_user_agent_actually_sent() -> None:
+    headers = _build_headers(
+        method="GET",
+        url="https://www.google.com/",
+        content_type=None,
+        extra=None,
+        raw_headers=False,
+        impersonate="chrome",
+        use_curl=False,
+        accept_ch={},
+    )
+    expected = chrome_headers_for_google(
+        major=newest_chrome_major(chrome_platform("chrome")),
+        platform=chrome_platform("chrome"),
+    )
+    assert headers["x-browser-validation"] == expected["x-browser-validation"]
+    assert (
+        headers["User-Agent"]
+        .split("Chrome/")[1]
+        .startswith(
+            f"{newest_chrome_major(chrome_platform('chrome'))}.",
+        )
+    )
+
+
 def test_build_headers_raw_returns_only_explicit_headers() -> None:
     assert _build_headers(
         method="GET",
@@ -134,24 +234,33 @@ def test_build_headers_raw_returns_only_explicit_headers() -> None:
 
 
 def test_curl_structural_headers_adds_post_fields_and_extras() -> None:
-    with patch.object(fetch_mod, "_google_headers", return_value={"X-Google": "yes"}):
-        assert _curl_structural_headers(
-            method="POST",
-            url="https://example.com/path",
-            content_type="application/json",
-            extra={"X-Test": "yes"},
-            impersonate="chrome",
-            accept_ch={},
-        ) == {
-            "Content-Type": "application/json",
-            "Origin": "https://example.com",
-            "X-Google": "yes",
-            "X-Test": "yes",
-        }
+    headers = _curl_structural_headers(
+        method="POST",
+        url="https://example.com/path",
+        content_type="application/json",
+        extra={"X-Test": "yes"},
+        major=150,
+        platform="Linux",
+        accept_ch={},
+    )
+    assert headers == {
+        **chrome_identity_headers(major=150, platform="Linux"),
+        "Content-Type": "application/json",
+        "Origin": "https://example.com",
+        "X-Test": "yes",
+    }
 
 
 def test_google_headers_are_empty_off_google() -> None:
-    assert _google_headers("https://example.com", "chrome") == {}
+    assert _google_headers("https://example.com", major=150, platform="Linux") == {}
+
+
+def test_google_headers_name_the_identity_they_were_given() -> None:
+    assert _google_headers(
+        "https://www.google.com/search",
+        major=150,
+        platform="Linux",
+    ) == chrome_headers_for_google(major=150, platform="Linux")
 
 
 def test_request_fetch_passes_raw_header_mode_and_seeded_cookies() -> None:
@@ -796,17 +905,18 @@ class TestHeaderOrder:
 
     def test_caller_override_preserves_slot(self) -> None:
         headers = self._capture_headers(
-            ContentParams(headers={"User-Agent": "Custom/1.0"}),
+            ContentParams(headers={"Accept-Language": "de-DE"}),
         )
         keys = list(headers)
-        assert headers["User-Agent"] == "Custom/1.0"
-        # Slot is the same as the default User-Agent slot (after
-        # Upgrade-Insecure-Requests, before Accept).
-        assert (
-            keys.index("Upgrade-Insecure-Requests")
-            < keys.index("User-Agent")
-            < keys.index("Accept")
+        assert headers["Accept-Language"] == "de-DE"
+        assert keys.index("Accept-Encoding") + 1 == keys.index("Accept-Language")
+
+    def test_caller_user_agent_is_dropped(self) -> None:
+        bare = self._capture_headers(ContentParams())
+        overridden = self._capture_headers(
+            ContentParams(headers={"User-Agent": "Custom/1.0"}),
         )
+        assert overridden == bare
 
     def test_caller_new_header_appended(self) -> None:
         headers = self._capture_headers(ContentParams(headers={"X-Trace": "abc"}))
@@ -1361,12 +1471,9 @@ class TestIdentityLayer:
     def _store(self) -> ProfileStore:
         return ProfileStore.shared()
 
-    def test_delegates_ua_and_cookie_jar_to_curl_session(self) -> None:
-        # On the curl path curl_cffi's impersonate emits a coherent User-Agent
-        # (matching its TLS fingerprint), so fetch does NOT send a User-Agent
-        # header. The stored jar is NOT seeded into the Cookie header either --
-        # the pooled curl session's own jar persists + resends cookies, so
-        # header-seeding them too would duplicate the Cookie header (a bot tell).
+    def test_delegates_cookie_jar_to_curl_session(self) -> None:
+        # The stored jar is NOT seeded into the Cookie header: the pooled curl
+        # session's own jar resends it, and both would duplicate the header.
         self._store().save(
             self._EGRESS,
             "x.com",
@@ -1381,10 +1488,13 @@ class TestIdentityLayer:
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
         sent = _recorded_headers(req)
-        assert "User-Agent" not in sent
-        assert "Cookie" not in sent  # `jar` carries the stored cookie, not the header.
+        assert sent["User-Agent"] == chrome_user_agent(
+            curl_chrome_major("chrome"),
+            chrome_platform("chrome"),
+        )
+        assert "Cookie" not in sent
 
-    def test_caller_ua_and_cookie_override_profile(self) -> None:
+    def test_caller_cookie_overrides_profile_but_not_the_user_agent(self) -> None:
         self._store().save(
             self._EGRESS,
             "x.com",
@@ -1408,14 +1518,12 @@ class TestIdentityLayer:
                 ),
             )
         sent = _recorded_headers(req)
-        assert sent["User-Agent"] == "Mine/1"
+        assert sent["User-Agent"] != "Mine/1"
         # The caller cookie overrides the profile's GSP in the jar (single source).
         assert ("GSP", "caller") in {(c.name, c.value) for c in stub.cookies.jar}
         assert ("GSP", "s") not in {(c.name, c.value) for c in stub.cookies.jar}
 
-    def test_no_profile_delegates_ua_to_impersonate(self) -> None:
-        # First contact, no profile: still no seeded User-Agent header on the
-        # curl path -- impersonate supplies a coherent one at the transport.
+    def test_no_profile_still_presents_the_curl_chrome(self) -> None:
         with patch(
             "curl_cffi.requests.request",
             return_value=self._curl_response(headers={}),
@@ -1424,7 +1532,10 @@ class TestIdentityLayer:
                 "https://x.com/p",
                 request=RequestParams(policy=PolicyParams(transport="curl")),
             )
-        assert "User-Agent" not in _recorded_headers(req)
+        assert _recorded_headers(req)["User-Agent"] == chrome_user_agent(
+            curl_chrome_major("chrome"),
+            chrome_platform("chrome"),
+        )
 
     def test_set_cookie_is_persisted(self) -> None:
         with patch(
@@ -2097,9 +2208,41 @@ class TestCurlThenZendriverBackend:
         via.assert_called_once()
         remember.assert_called_once_with("walled.example")
 
+    @pytest.mark.parametrize(
+        "block",
+        [
+            CooldownError(),
+            PuzzleChallengeError(),
+            GoogleSorryError(),
+            BotDetectionError(),
+        ],
+        ids=type,
+    )
+    def test_a_block_no_browser_clears_is_not_remembered(
+        self,
+        block: BotDetectionError,
+    ) -> None:
+        result = BrowserResult(body=b"rendered", cookies={}, final_url="")
+        with (
+            patch.object(fetch_mod, "_send_as", side_effect=block),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+            patch(
+                "wesearch.fetch.fetch.zendriver.fetch_zendriver",
+                return_value=result,
+            ),
+        ):
+            fetch.fetch(
+                "https://walled.example/",
+                request=RequestParams(
+                    policy=PolicyParams(transport="curl-then-zendriver"),
+                ),
+            )
+        remember.assert_not_called()
+
     def test_bot_block_remembers_domain_even_when_browser_still_fails(self) -> None:
         with (
-            patch.object(fetch_mod, "_send_as", side_effect=PuzzleChallengeError()),
+            patch.object(fetch_mod, "_send_as", side_effect=CloudflareChallengeError()),
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch.object(
                 transport_routing,
@@ -2293,6 +2436,10 @@ class TestFetchCoreMutationCoverage:
             "https://example.com/path?q=a+b#frag",
             method="POST",
             headers={
+                **chrome_identity_headers(
+                    major=133,
+                    platform=chrome_platform("chrome133"),
+                ),
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Origin": "https://example.com",
                 "X-Test": "yes",
@@ -2375,6 +2522,10 @@ class TestFetchCoreMutationCoverage:
         headers = _recorded_headers(backend)
         assert headers["Cookie"] == "a=header; b=header; c=param"
         assert set(headers) == {
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-platform",
+            "User-Agent",
             "Content-Type",
             "Cookie",
             "Origin",
@@ -2517,87 +2668,49 @@ class TestHeaderMutationCoverage:
             assert _accept_ch_hints({"accept-ch": "hint-1, hint-2"}) == {"hint-1"}
         hints.assert_called_once_with(major=1)
 
-    def test_google_headers_forward_exact_identity(self) -> None:
-        with (
-            patch.object(
-                fetch_mod,
-                "impersonate_version_platform",
-                return_value=(133, "linux"),
-            ) as identity,
-            patch.object(
-                fetch_mod,
-                "chrome_headers_for_google",
-                return_value={"X": "google"},
-            ) as google,
-        ):
-            assert _google_headers("https://www.google.com/search", "chrome133") == {
-                "X": "google",
-            }
-        identity.assert_called_once_with("chrome133")
-        google.assert_called_once_with(major=133, platform="linux")
-
-    def test_build_headers_forwards_stdlib_identity_and_http_version(self) -> None:
-        nav = Mock(return_value={"A": "b"})
-        with (
-            patch.object(fetch_mod, "chrome_navigation_headers", nav),
-            patch.object(fetch_mod, "_google_headers", return_value={"G": "h"}),
-            patch.object(
-                fetch_mod,
-                "impersonate_version_platform",
-                return_value=(133, "linux"),
-            ),
-        ):
-            assert _build_headers(
+    def test_stdlib_headers_are_chrome_navigation_headers_plus_extras(self) -> None:
+        with patch.object(fetch_mod, "chrome_platform", return_value="Linux"):
+            headers = _build_headers(
                 method="GET",
                 url="https://x.example/path",
                 content_type=None,
                 extra={"E": "f"},
                 raw_headers=False,
-                impersonate="chrome133",
+                impersonate="chrome",
                 use_curl=False,
                 accept_ch={},
-            ) == {"A": "b", "G": "h", "E": "f"}
-        nav.assert_called_once_with(
-            major=133,
-            platform="linux",
-            method="GET",
-            content_type="",
-            origin="https://x.example",
-            http2=False,
-        )
+            )
+        assert headers == {
+            **chrome_navigation_headers(
+                major=newest_chrome_major("Linux"),
+                platform="Linux",
+                origin="https://x.example",
+            ),
+            "E": "f",
+        }
 
-    def test_curl_structural_headers_distinguish_get_head_and_post(self) -> None:
-        with patch.object(fetch_mod, "_google_headers", return_value={}):
-            assert (
-                _curl_structural_headers(
-                    method="GET",
-                    url="https://x.example/p",
-                    content_type="text/plain",
-                    extra=None,
-                    impersonate="chrome",
-                    accept_ch={},
-                )
-                == {}
-            )
-            assert (
-                _curl_structural_headers(
-                    method="HEAD",
-                    url="https://x.example/p",
-                    content_type="text/plain",
-                    extra=None,
-                    impersonate="chrome",
-                    accept_ch={},
-                )
-                == {}
-            )
-            assert _curl_structural_headers(
-                method="POST",
-                url="https://x.example/p",
-                content_type="text/plain",
-                extra=None,
-                impersonate="chrome",
-                accept_ch={},
-            ) == {"Content-Type": "text/plain", "Origin": "https://x.example"}
+    @pytest.mark.parametrize(
+        ("method", "extra_headers"),
+        [
+            ("GET", {}),
+            ("HEAD", {}),
+            ("POST", {"Content-Type": "text/plain", "Origin": "https://x.example"}),
+        ],
+    )
+    def test_curl_structural_headers_distinguish_get_head_and_post(
+        self,
+        method: str,
+        extra_headers: dict[str, str],
+    ) -> None:
+        assert _curl_structural_headers(
+            method=method,
+            url="https://x.example/p",
+            content_type="text/plain",
+            extra={},
+            major=150,
+            platform="Linux",
+            accept_ch={},
+        ) == {**chrome_identity_headers(major=150, platform="Linux"), **extra_headers}
 
 
 class TestSendAsMutationCoverage:
@@ -2814,35 +2927,22 @@ class TestFetchRetryAndTransportMutationCoverage:
 
 
 class TestRemainingHeaderAndBrowserMutationCoverage:
-    def test_curl_headers_forward_hints_and_google_identity(self) -> None:
-        with (
-            patch.object(
-                fetch_mod,
-                "impersonate_version_platform",
-                return_value=(133, "linux"),
-            ) as identity,
-            patch.object(
-                fetch_mod,
-                "chrome_client_hints",
-                return_value={"Hint": "v"},
-            ) as hints,
-            patch.object(
-                fetch_mod,
-                "_google_headers",
-                return_value={"Google": "v"},
-            ) as google,
-        ):
-            assert _curl_structural_headers(
-                method="GET",
-                url="https://www.google.com/path",
-                content_type=None,
-                extra={"Extra": "v"},
-                impersonate="chrome133",
-                accept_ch={"https://www.google.com": frozenset({"Hint"})},
-            ) == {"Hint": "v", "Google": "v", "Extra": "v"}
-        identity.assert_called_once_with("chrome133")
-        hints.assert_called_once_with(major=133, platform="linux")
-        google.assert_called_once_with("https://www.google.com/path", "chrome133")
+    def test_curl_headers_add_requested_hints_then_google_then_extras(self) -> None:
+        headers = _curl_structural_headers(
+            method="GET",
+            url="https://www.google.com/path",
+            content_type=None,
+            extra={"Extra": "v"},
+            major=150,
+            platform="Linux",
+            accept_ch={"https://www.google.com": frozenset({"sec-ch-ua-arch"})},
+        )
+        assert headers == {
+            **chrome_identity_headers(major=150, platform="Linux"),
+            "sec-ch-ua-arch": '"x86"',
+            **chrome_headers_for_google(major=150, platform="Linux"),
+            "Extra": "v",
+        }
 
     def test_browser_call_forwards_trust_redirect_and_profile_path(
         self,
@@ -2975,14 +3075,17 @@ class TestFinalMutationCoverage:
 class TestLastSurvivorCoverage:
     def test_build_headers_forwards_each_curl_argument(self) -> None:
         structural = Mock(return_value={"ok": "yes"})
-        with patch.object(fetch_mod, "_curl_structural_headers", structural):
+        with (
+            patch.object(fetch_mod, "_curl_structural_headers", structural),
+            patch.object(fetch_mod, "chrome_platform", return_value="macOS"),
+        ):
             assert _build_headers(
                 method="PATCH",
                 url="https://x.example/path",
                 content_type="application/json",
                 extra={"X": "y"},
                 raw_headers=False,
-                impersonate="chrome133",
+                impersonate="chrome146",
                 use_curl=True,
                 accept_ch={"https://x.example": frozenset({"Hint"})},
             ) == {"ok": "yes"}
@@ -2991,7 +3094,8 @@ class TestLastSurvivorCoverage:
             url="https://x.example/path",
             content_type="application/json",
             extra={"X": "y"},
-            impersonate="chrome133",
+            major=146,
+            platform="macOS",
             accept_ch={"https://x.example": frozenset({"Hint"})},
         )
 
@@ -3055,7 +3159,7 @@ class TestLastSurvivorCoverage:
 
     def test_google_hostname_fallback_is_empty(self) -> None:
         with patch.object(fetch_mod, "is_google_property", return_value=True) as google:
-            _google_headers("https:///path", "chrome")
+            _google_headers("https:///path", major=150, platform="Linux")
         google.assert_called_once_with("")
 
     def test_browser_fallback_calls_cache_false_and_not_true_twice(self) -> None:
@@ -3075,30 +3179,6 @@ class TestLastSurvivorCoverage:
 
 
 class TestExactForwardedMutationCoverage:
-    def test_build_headers_forwards_url_and_impersonate_to_both_helpers(self) -> None:
-        identity = Mock(return_value=(131, "linux"))
-        google = Mock(return_value={})
-        with (
-            patch.object(fetch_mod, "impersonate_version_platform", identity),
-            patch.object(fetch_mod, "_google_headers", google),
-            patch.object(fetch_mod, "chrome_navigation_headers", return_value={}),
-        ):
-            assert (
-                _build_headers(
-                    method="GET",
-                    url="https://x.example/path",
-                    content_type=None,
-                    extra=None,
-                    raw_headers=False,
-                    impersonate="chrome131",
-                    use_curl=False,
-                    accept_ch={},
-                )
-                == {}
-            )
-        identity.assert_called_once_with("chrome131")
-        google.assert_called_once_with("https://x.example/path", "chrome131")
-
     def test_fetch_once_forwards_raw_headers_and_impersonate_exactly(self) -> None:
         params = RequestParams(policy=PolicyParams(transport="curl"))
         build = Mock(return_value={})

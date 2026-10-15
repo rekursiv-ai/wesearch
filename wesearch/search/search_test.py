@@ -30,7 +30,6 @@ from wesearch.search.custom_types import (
     SearxngCategory,
     TorrentResult,
     VideoResult,
-    gsa_headers_for_query,
     strip_scripts,
 )
 from wesearch.search.duckduckgo import (
@@ -173,16 +172,6 @@ class TestSearchDispatch:
             pytest.raises(ValueError, match="num_results"),
         ):
             search("cats", backend="searxng", num_results=-1)
-
-
-class TestGsaHeaders:
-    def test_query_selects_stable_user_agent(self) -> None:
-        with patch(
-            "wesearch.search.custom_types.user_agent_pool",
-            return_value=("ua0", "ua1", "ua2"),
-        ):
-            assert gsa_headers_for_query("same") == gsa_headers_for_query("same")
-            assert gsa_headers_for_query("same")["User-Agent"].endswith(" NSTNWV")
 
 
 class TestSearchSearxng:
