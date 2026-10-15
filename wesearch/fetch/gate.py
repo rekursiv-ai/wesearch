@@ -1,4 +1,4 @@
-"""Host-wide pacing and block recovery for every :func:`fetch`.
+"""Host-wide pacing and block recovery for outbound requests.
 
 Every agent on a host fetches from one egress IP, and a site paces and blocks
 that IP, not a process. So the gate is cross-process (``fcntl``-locked files)
