@@ -5,6 +5,7 @@ from typing import Final
 
 import errno
 import os
+import time
 
 import pytest
 
@@ -50,9 +51,10 @@ def test_default_remember_does_not_modify_bundled_manifest(
 
     after = bundled.read_bytes() if bundled.exists() else None
     assert after == before
-    assert (
-        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
-    ).read_text() == "learned.example\n"
+    learned = state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
+    assert [line.split("\t")[0] for line in learned.read_text().splitlines()] == [
+        "learned.example",
+    ]
     assert "learned.example" in zendriver_domains()
 
 
@@ -68,8 +70,69 @@ def test_remembered_domains_are_normalized_sorted_and_deduplicated(
     remember_zendriver_domain("a.example", path=path)
     remember_zendriver_domain("b.example", path=path)
 
-    assert path.read_text() == "a.example\nb.example\n"
+    assert _names(path) == ["a.example", "b.example"]
     assert zendriver_domains(path=path) == frozenset({"a.example", "b.example"})
+
+
+def test_learned_entry_expires_after_its_ttl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One block must not pin a domain to the browser forever."""
+    path = tmp_path / "domains.txt"
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+    remember_zendriver_domain("walled.example", path=path)
+
+    monkeypatch.setattr(time, "time", lambda: 1_099.0)
+    assert zendriver_domains(path=path, ttl_sec=100) == {"walled.example"}
+    monkeypatch.setattr(time, "time", lambda: 1_101.0)
+    assert zendriver_domains(path=path, ttl_sec=100) == frozenset()
+
+
+def test_relearning_refreshes_the_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "domains.txt"
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+    remember_zendriver_domain("walled.example", path=path)
+    monkeypatch.setattr(time, "time", lambda: 1_090.0)
+    remember_zendriver_domain("walled.example", path=path)
+
+    monkeypatch.setattr(time, "time", lambda: 1_150.0)
+    assert zendriver_domains(path=path, ttl_sec=100) == {"walled.example"}
+    assert path.read_text() == "walled.example\t1090\n"
+
+
+def test_untimestamped_learned_entry_reads_as_expired(tmp_path: Path) -> None:
+    """A learned list written before expiry existed must not route forever."""
+    path = tmp_path / "domains.txt"
+    path.write_text("stale.example\n")
+
+    assert zendriver_domains(path=path) == frozenset()
+
+
+def test_bundled_list_never_expires() -> None:
+    """The bundled roster is curated, untimestamped, and always routes."""
+    bundled = _CWD / "zendriver-domains.txt"
+    if not bundled.exists():
+        pytest.skip("no bundled list in this build")
+    first = bundled.read_text().split()[0]
+
+    assert first in zendriver_domains(ttl_sec=0)
+
+
+def test_reader_proxy_is_never_learned(tmp_path: Path) -> None:
+    """The reader proxy is the fallback for a wall; routing it to Chrome breaks that."""
+    path = tmp_path / "domains.txt"
+    remember_zendriver_domain("r.jina.ai", path=path)
+
+    assert not path.exists()
+
+
+def _names(path: Path) -> list[str]:
+    """Return the domain column of a learned list, in file order."""
+    return [line.split("\t")[0] for line in path.read_text().splitlines()]
 
 
 def test_newline_domain_is_rejected(tmp_path: Path) -> None:
@@ -82,7 +145,7 @@ def test_read_casefolds_existing_entries(tmp_path: Path) -> None:
     # bundled or hand-edited mixed-case entry must still match. The writer
     # casefolds; the reader must too.
     path = tmp_path / "domains.txt"
-    path.write_text("Foo.Example\nBar.EXAMPLE\n")
+    path.write_text(f"Foo.Example\t{time.time():.0f}\nBar.EXAMPLE\t{time.time():.0f}\n")
 
     assert zendriver_domains(path=path) == frozenset({"foo.example", "bar.example"})
 
@@ -105,7 +168,7 @@ def test_remember_preserves_domains_past_the_read_chunk(tmp_path: Path) -> None:
     path = tmp_path / "domains.txt"
     # 50k * 25 bytes/line ~= 1.25 MiB, safely past the old 1 MiB read cap.
     many = [f"dom-{i:07d}.example.test" for i in range(50_000)]
-    path.write_text("".join(f"{d}\n" for d in many))
+    path.write_text("".join(f"{d}\t{time.time():.0f}\n" for d in many))
     assert path.stat().st_size > (1 << 20)
 
     remember_zendriver_domain("fresh.example", path=path)
@@ -253,7 +316,7 @@ def test_read_domains_uses_close_on_exec_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "domains.txt"
-    path.write_text("good.example\n")
+    path.write_text(f"good.example\t{time.time():.0f}\n")
     calls: list[tuple[object, ...]] = []
     real_open = os.open
 
@@ -337,7 +400,7 @@ def test_remember_truncates_before_rewriting(
     remember_zendriver_domain("new.example", path=path)
 
     assert sizes == [0]
-    assert path.read_text() == "new.example\nold.example\n"
+    assert _names(path) == ["new.example", "old.example"]
 
 
 if __name__ == "__main__":

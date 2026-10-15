@@ -48,6 +48,10 @@ from treekle import PlainTree
 from wesearch.profile import parsedate_to_datetime_or_none
 
 
+# Type-only: curl_cffi is optional at runtime, and the stdlib transport stands in
+# when it cannot load.
+
+
 __all__ = [
     "NO_BODY",
     "ContentParams",

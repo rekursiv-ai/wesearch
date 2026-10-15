@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from wesearch.types.errors import CooldownError
+
 
 if TYPE_CHECKING:
     from wesearch.types.errors import FetchError
@@ -82,7 +84,7 @@ def translate_http_error(
     """
     if e.status == 404 and treat_404_as_missing:
         return NotFoundError(f"{backend}: not found.")
-    if e.status == 429:
+    if e.status == 429 or isinstance(e, CooldownError):
         return RateLimitError(
             rate_limit_message or f"{backend} rate limit hit; retry shortly.",
         )

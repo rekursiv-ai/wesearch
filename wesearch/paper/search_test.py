@@ -52,8 +52,8 @@ class TestSearchDispatch:
 
     def test_transport_forwarded_to_provider(self) -> None:
         with patch.object(openalex, "search", return_value=([], 0, True)) as provider:
-            search.search("q", source="openalex", transport="stdlib")
-        assert provider.call_args.kwargs["transport"] == "stdlib"
+            search.search("q", source="openalex", transport="zendriver")
+        assert provider.call_args.kwargs["transport"] == "zendriver"
 
     def test_unknown_source_raises(self) -> None:
         with pytest.raises(PaperError, match="Unknown search source"):
@@ -335,14 +335,14 @@ def test_fused_forwards_all_options_and_computes_partial_completeness() -> None:
             year_from=2000,
             year_to=2020,
             open_access_only=True,
-            transport="stdlib",
+            transport="zendriver",
         )
     expected = {
         "limit": 3,
         "year_from": 2000,
         "year_to": 2020,
         "open_access_only": True,
-        "transport": "stdlib",
+        "transport": "zendriver",
     }
     assert s2_search.call_args.args == ("query",)
     assert s2_search.call_args.kwargs == expected
@@ -379,7 +379,7 @@ def test_single_backend_forwards_all_options() -> None:
             year_from=2001,
             year_to=2002,
             open_access_only=True,
-            transport="stdlib",
+            transport="zendriver",
         )
     assert provider.call_args.args == ("query",)
     assert provider.call_args.kwargs == {
@@ -387,7 +387,7 @@ def test_single_backend_forwards_all_options() -> None:
         "year_from": 2001,
         "year_to": 2002,
         "open_access_only": True,
-        "transport": "stdlib",
+        "transport": "zendriver",
     }
     assert result == search.SearchResult(
         records=list(result_value[0]),
@@ -406,7 +406,7 @@ def test_s2_search_passes_exact_params_to_provider() -> None:
             year_from=2001,
             year_to=2002,
             open_access_only=True,
-            transport="stdlib",
+            transport="zendriver",
         )
     assert provider.call_args.args == (
         {
@@ -416,7 +416,7 @@ def test_s2_search_passes_exact_params_to_provider() -> None:
             "openAccessPdf": "",
         },
     )
-    assert provider.call_args.kwargs == {"limit": 4, "transport": "stdlib"}
+    assert provider.call_args.kwargs == {"limit": 4, "transport": "zendriver"}
     assert len(records) == 1
     assert total == 7
     assert complete is False

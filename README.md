@@ -38,7 +38,7 @@ from wesearch.search.search import search
 from wesearch.fetch import RequestParams, Retry, fetch
 from wesearch.scrape import get_element_content
 
-# Web search (DuckDuckGo by default)
+# Web search: walks DEFAULT_SEARCH_CHAIN; first non-empty answer wins
 hits = search("denoising recursion models", num_results=10)
 for r in hits:
     print(r.title, r.url)
@@ -75,6 +75,7 @@ wesearch/
 │   └── errors.py    FetchError, BotDetectionError + subclasses
 ├── fetch/           the sole HTTP egress
 │   ├── fetch.py     fetch(url, request=RequestParams(...)) -> (body, session)
+│   ├── gate.py      host-wide per-site pacing and block recovery
 │   ├── transport/   how bytes are retrieved
 │   │   ├── curl.py      curl-cffi transport (TLS/JA3 browser impersonation)
 │   │   ├── stdlib.py    dependency-free urllib transport
@@ -103,7 +104,6 @@ wesearch/
 │   └── useragents.py  vendored, refreshable User-Agent pools
 ├── web.py           fetch_web(...): fetch + provider dispatch + extraction
 ├── profile.py       cross-process per-(egress_ip, domain) cookie + UA jar
-├── ratelimit.py     cross-process, per-domain rate limiting
 └── scrape.py        get_element_content(html, selector)
 ```
 
@@ -113,12 +113,19 @@ wesearch/
 
 - **curl-cffi** (default): TLS/JA3 browser impersonation, no browser process.
 - **stdlib**: dependency-free `urllib` fallback.
-- **zendriver**: an opt-in headless-Chrome backend for JavaScript-gated pages, used only for
-  domains that require it.
+- **zendriver**: a headless Chrome for JavaScript-gated pages, used only for domains that
+  require it. One Chrome serves every process on the host: the first fetch launches it
+  detached, later fetches attach over DevTools and work in their own tab.
 
 A persistent per-`(egress_ip, domain)` profile (cookies + User-Agent) is loaded and saved
-transparently, and cross-process rate limiting paces requests so concurrent workers stay under
-each site's threshold.
+transparently. Every `fetch` is paced host-wide per site and IP (`fetch/gate.py` holds the
+per-site table). A block locks the site briefly; one caller then probes it, a success
+unlocks every caller, and a failure doubles the lock. Run `zendriver` to clear blocks by
+hand: it opens a tab per challenge-locked site, and each site you load there is unlocked. Search results are cached host-wide for an hour, and a domain
+learned to need the browser is re-probed after a week.
+
+Check backend health with `python -m wesearch.tools` (add `--processes 12` to load-test the
+shared browser).
 
 ## API keys & configuration
 
@@ -131,9 +138,10 @@ or unlock a backend, and are all optional unless noted.
 - `OPENALEX_EMAIL` -- optional. Identifies you to OpenAlex's "polite pool" for more headroom than
   anonymous requests.
 - `OPENALEX_API_KEY` -- optional. A higher OpenAlex request budget.
-- `SEARXNG_URL` -- required only to use a `"searxng"` backend (`search(..., backend="searxng")`
-  or `paper.search(..., source="searxng")`); the base URL of a SearXNG instance you control or
-  trust.
+- `BRAVE_API_KEY` -- optional. Enables the Brave Search API, last in the default
+  search chain because it bills per request.
+- `SEARXNG_URL` -- optional. The base URL of a SearXNG instance you control or trust; enables
+  the `"searxng"` backend and the category tabs.
 
 State (the cookie/User-Agent profile jar, cross-process rate-limit lockfiles, the browser
 transport's persistent Chrome profile) is written under the OS's standard per-user data

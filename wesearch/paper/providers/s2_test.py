@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -15,27 +15,11 @@ from wesearch.paper import paginate as paper_paginate
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
 from wesearch.paper.paginate import Cursor
 from wesearch.paper.providers import s2
-from wesearch.types.errors import FetchError
+from wesearch.types.errors import CooldownError, FetchError
 
 
 if TYPE_CHECKING:
     from treekle import MutablePlainTree
-
-
-@pytest.fixture(autouse=True)
-def mock_limiter() -> Iterator[_FakeLimiter]:
-    """Inject a fake shared gate so the S2 client never waits on real time.
-
-    Yields:
-      limiter: The fake gate, exposing what the client asked of it.
-
-    """
-    limiter = _FakeLimiter()
-    with patch(
-        "wesearch.paper.providers.s2.cross_process_limiter",
-        return_value=limiter,
-    ):
-        yield limiter
 
 
 class TestFields:
@@ -79,28 +63,29 @@ class TestGet:
 
 
 class TestBackoff:
-    def test_429_retries_then_raises_rate_limit(
-        self,
-        mock_limiter: _FakeLimiter,
-    ) -> None:
-        # Every attempt 429s: after the retry budget it surfaces RateLimitError,
-        # and each retry records a growing backoff into the shared cooldown.
+    def test_an_exhausted_429_raises_rate_limit(self) -> None:
         err = FetchError("u", 429, {}, b"slow down")
         with (
             patch("wesearch.paper.providers.s2.fetch", side_effect=err),
             pytest.raises(RateLimitError),
         ):
             s2.get("/paper/search", {})
-        # Two retries -> two backoff triggers (1s, 2s); acquire once per attempt.
-        assert mock_limiter.cooldowns == [1.0, 2.0]
-        assert mock_limiter.acquires == 3
 
-    def test_429_then_success_recovers(self, mock_limiter: _FakeLimiter) -> None:
-        err = FetchError("u", 429, {}, b"slow")
-        ok = (json.dumps({"title": "ok"}).encode(), FetchSession())
-        with patch("wesearch.paper.providers.s2.fetch", side_effect=[err, ok]):
-            assert s2.get("/paper/x", {}) == {"title": "ok"}
-        assert mock_limiter.cooldowns == [1.0]
+    def test_a_429_is_retried_by_fetch(self) -> None:
+        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
+            s2.get("/paper/x", {})
+        assert fetch.requests[0].retry.retries == 2
+
+    def test_a_cooldown_raises_rate_limit(self) -> None:
+        with (
+            patch(
+                "wesearch.paper.providers.s2.fetch",
+                side_effect=CooldownError("api.semanticscholar.org is cooling down."),
+            ),
+            pytest.raises(RateLimitError),
+        ):
+            s2.get("/paper/x", {})
 
 
 class TestBatch:
@@ -305,21 +290,6 @@ class TestRecordMapping:
 type _Fetch = Callable[..., tuple[bytes, FetchSession]]
 
 
-class _FakeLimiter:
-    """Records what the S2 client asks of its gate, instead of sleeping."""
-
-    def __init__(self) -> None:
-        self.acquires = 0
-        self.cooldowns: list[float] = []
-
-    def acquire(self) -> None:
-        self.acquires += 1
-
-    def trigger_cooldown(self, backoff_sec: float | None = None) -> None:
-        assert backoff_sec is not None
-        self.cooldowns.append(backoff_sec)
-
-
 class _RecordingFetch:
     """A ``fetch`` stand-in that replays canned responses and records requests."""
 
@@ -367,10 +337,7 @@ class TestExactInternals:
                 "/paper/x",
                 {"fields": "title"},
                 base="https://base",
-                source="src",
-                interval_sec=0.25,
-                max_retries=0,
-                backoff_base_sec=3.0,
+                retries=0,
                 timeout_sec=4.5,
                 transport="curl",
             ) == {"ok": True}
@@ -378,6 +345,7 @@ class TestExactInternals:
         assert fetch.urls == ["https://base/paper/x"]
         assert request.content.params == {"fields": "title"}
         assert request.content.headers == {"Accept": "application/json"}
+        assert request.retry.retries == 0
         assert request.retry.timeout_sec == 4.5
         assert request.policy.transport == "curl"
 
@@ -390,22 +358,6 @@ class TestExactInternals:
             ),
         ):
             s2.get("/paper/x", {})
-
-    def test_attempt_uses_custom_backoff_and_budget(
-        self,
-        mock_limiter: _FakeLimiter,
-    ) -> None:
-        err = FetchError("u", 429, {}, b"slow")
-        with pytest.raises(RateLimitError, match=r"^Semantic Scholar rate limit hit"):
-            s2._attempt(
-                lambda: (_ for _ in ()).throw(err),
-                source="custom",
-                interval_sec=2.0,
-                max_retries=1,
-                backoff_base_sec=3.0,
-            )
-        assert mock_limiter.cooldowns == [3.0]
-        assert mock_limiter.acquires == 2
 
     def test_fetch_offset_page_adds_offset_and_limit(self) -> None:
         with patch("wesearch.paper.providers.s2.get", return_value={}) as get_mock:
@@ -536,44 +488,23 @@ class TestExactInternals:
     def test_author_record_from_ignores_non_string_homepage(self) -> None:
         assert s2.author_record_from({"homepage": 1}).homepage == ""
 
-    def test_get_forwards_every_attempt_option(self) -> None:
-        with patch.object(s2, "_attempt", return_value=b"{}") as attempt:
-            s2.get(
-                "/paper/x",
-                {"fields": "title"},
-                base="https://base",
-                source="custom",
-                interval_sec=2.5,
-                max_retries=4,
-                backoff_base_sec=3.5,
-                timeout_sec=5.5,
-                transport="curl",
-            )
-        assert attempt.call_args.kwargs["source"] == "custom"
-        assert attempt.call_args.kwargs["interval_sec"] == 2.5
-        assert attempt.call_args.kwargs["max_retries"] == 4
-        assert attempt.call_args.kwargs["backoff_base_sec"] == 3.5
-
-    def test_batch_forwards_every_attempt_option_and_scalar_miss(self) -> None:
-        payload = json.dumps([{"x": 1}, 7, None]).encode()
-        with patch.object(s2, "_attempt", return_value=payload) as attempt:
+    def test_batch_forwards_retries_and_drops_scalar_miss(self) -> None:
+        fetch = _RecordingFetch(
+            (json.dumps([{"x": 1}, 7, None]).encode(), FetchSession()),
+        )
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
             result = s2.batch(
                 ["a", "b", "c"],
                 "title",
                 endpoint="author",
                 base="https://base",
-                source="custom",
-                interval_sec=2.5,
-                max_retries=4,
-                backoff_base_sec=3.5,
+                retries=4,
                 timeout_sec=5.5,
                 transport="curl",
             )
         assert result == [{"x": 1}, None, None]
-        assert attempt.call_args.kwargs["source"] == "custom"
-        assert attempt.call_args.kwargs["interval_sec"] == 2.5
-        assert attempt.call_args.kwargs["max_retries"] == 4
-        assert attempt.call_args.kwargs["backoff_base_sec"] == 3.5
+        assert fetch.requests[0].retry.retries == 4
+        assert fetch.requests[0].retry.timeout_sec == 5.5
 
     def test_get_default_request_contract(self) -> None:
         fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
@@ -581,18 +512,9 @@ class TestExactInternals:
             assert s2.get("/paper/x", {}) == {"ok": True}
         request = fetch.requests[0]
         assert fetch.urls == ["https://api.semanticscholar.org/graph/v1/paper/x"]
+        assert request.retry.retries == 2
         assert request.retry.timeout_sec == 10.0
         assert request.policy.transport == "auto"
-
-    def test_get_default_attempt_options(self) -> None:
-        with patch.object(s2, "_attempt", return_value=b"{}") as attempt:
-            s2.get("/paper/x", {})
-        assert attempt.call_args.kwargs == {
-            "source": "s2",
-            "interval_sec": 1.0,
-            "max_retries": 2,
-            "backoff_base_sec": 1.0,
-        }
 
     def test_get_invalid_json_error_names_path(self) -> None:
         with (
@@ -607,24 +529,15 @@ class TestExactInternals:
         ):
             s2.get("/paper/x", {})
 
-    def test_batch_default_attempt_options(self) -> None:
-        with patch.object(s2, "_attempt", return_value=b"[]") as attempt:
-            assert s2.batch(["a"], "title") == []
-        assert attempt.call_args.kwargs == {
-            "source": "s2",
-            "interval_sec": 1.0,
-            "max_retries": 2,
-            "backoff_base_sec": 1.0,
-        }
-
     def test_batch_default_request_options(self) -> None:
         fetch = _RecordingFetch((b"[]", FetchSession()))
         with (
             patch.dict("os.environ", {"SEMANTIC_SCHOLAR_API_KEY": ""}),
             patch("wesearch.paper.providers.s2.fetch", fetch),
         ):
-            s2.batch(["a"], "title")
+            assert s2.batch(["a"], "title") == []
         request = fetch.requests[0]
+        assert request.retry.retries == 2
         assert request.retry.timeout_sec == 10.0
         assert request.policy.transport == "auto"
 
@@ -654,56 +567,37 @@ class TestExactInternals:
         assert request.content.headers == {"Accept": "application/json"}
         assert request.policy.transport == "curl"
 
-    def test_attempt_default_gate_arguments(self) -> None:
-        limiter = MagicMock()
-        with patch.object(s2, "cross_process_limiter", return_value=limiter) as gate:
-            assert s2._attempt(lambda: b"ok") == b"ok"
-        gate.assert_called_once_with("s2", per_seconds=1.0)
-        limiter.acquire.assert_called_once_with()
-
-    def test_attempt_negative_budget_has_exact_terminal_error(self) -> None:
-        with pytest.raises(
-            AssertionError,
-            match=r"^_attempt retry loop exited without returning$",
-        ):
-            s2._attempt(lambda: b"ok", max_retries=-1)
-
-    def test_attempt_translates_rate_limit_with_exact_message(self) -> None:
+    def test_send_translates_rate_limit_with_exact_message(self) -> None:
         err = FetchError("u", 429, {}, b"slow")
-        with pytest.raises(
-            RateLimitError,
-            match=r"^Semantic Scholar rate limit hit \(shared 1 req/sec gate\)\. Set SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly\.",
+        with (
+            patch("wesearch.paper.providers.s2.fetch", side_effect=err),
+            pytest.raises(
+                RateLimitError,
+                match=r"^Semantic Scholar rate limit hit \(shared 1 req/sec gate\)\. Set SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly\.",
+            ),
         ):
-            s2._attempt(lambda: (_ for _ in ()).throw(err), max_retries=0)
+            s2._send("u", RequestParams())
 
-    def test_attempt_translates_connection_error_with_exact_message(self) -> None:
-        with pytest.raises(
-            BackendError,
-            match=r"^Semantic Scholar request failed \(timeout or connection error\): down$",
+    def test_send_translates_connection_error_with_exact_message(self) -> None:
+        with (
+            patch(
+                "wesearch.paper.providers.s2.fetch",
+                side_effect=TimeoutError("down"),
+            ),
+            pytest.raises(
+                BackendError,
+                match=r"^Semantic Scholar request failed \(timeout or connection error\): down$",
+            ),
         ):
-            s2._attempt(lambda: (_ for _ in ()).throw(TimeoutError("down")))
+            s2._send("u", RequestParams())
 
-    def test_attempt_rate_limit_uses_backend_name(self) -> None:
+    def test_send_names_the_backend_on_http_errors(self) -> None:
         err = FetchError("u", 500, {}, b"broken")
-        with pytest.raises(BackendError, match=r"^Semantic Scholar HTTP 500: broken$"):
-            s2._attempt(lambda: (_ for _ in ()).throw(err), max_retries=0)
-
-    def test_attempt_default_retry_budget_and_backoff(
-        self,
-        mock_limiter: _FakeLimiter,
-    ) -> None:
-        errors = iter([FetchError("u", 429, {}, b"slow")] * 3 + [None])
-
-        def do_fetch() -> bytes:
-            error = next(errors)
-            if error is not None:
-                raise error
-            return b"ok"
-
-        with pytest.raises(RateLimitError):
-            s2._attempt(do_fetch)
-        assert mock_limiter.acquires == 3
-        assert mock_limiter.cooldowns == [1.0, 2.0]
+        with (
+            patch("wesearch.paper.providers.s2.fetch", side_effect=err),
+            pytest.raises(BackendError, match=r"^Semantic Scholar HTTP 500: broken$"),
+        ):
+            s2._send("u", RequestParams())
 
     def test_loads_invalid_json_preserves_context(self) -> None:
         with pytest.raises(

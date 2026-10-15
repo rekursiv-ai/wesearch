@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from http import client
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 from urllib.parse import urlparse
 
+import socket
 import ssl
 
 from wesearch.fetch.challenge import classify_http_error
@@ -216,10 +217,9 @@ class _ValidatedHTTPSConnection(client.HTTPSConnection):
     @override
     def connect(self) -> None:
         client.HTTPConnection.connect(self)
-        if self.sock is None:
-            raise ValueError("Expected self.sock is not None.")
+        # ``HTTPConnection.connect`` sets ``sock`` or raises.
         self.sock = self._ssl_context.wrap_socket(
-            self.sock,
+            cast(socket.socket, self.sock),
             server_hostname=self._server_hostname,
         )
 

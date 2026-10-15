@@ -87,7 +87,7 @@ dev = [
 
 [project.scripts]
 wesearch-mcp = "wesearch.mcp.server:main"
-fetch-zendriver = "wesearch.fetch.transport.zendriver:main"
+zendriver = "wesearch.fetch.transport.zendriver:main"
 
 [project.urls]
 Homepage = "https://www.rekursiv.ai"

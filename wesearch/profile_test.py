@@ -21,10 +21,6 @@ from wesearch.profile import (
 )
 
 
-def _store(tmp_path: Path, *, ttl_sec: float = 3600.0) -> ProfileStore:
-    return ProfileStore(base_dir=tmp_path, ttl_sec=ttl_sec)
-
-
 def _loaded(store: ProfileStore, ip: str, domain: str) -> Profile:
     got = store.load(ip, domain)
     assert got is not None
@@ -41,7 +37,7 @@ class TestProfileRoundTrip:
         assert ProfileStore()._base == tmp_path / "rekursiv-ai" / "wesearch"
 
     def test_save_then_load_returns_equal_profile(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         p = Profile(ua="UA/1.0", cookies={"GSP": "abc", "NID": "xyz"})
         store.save("1.2.3.4", "scholar.google.com", p)
         got = store.load("1.2.3.4", "scholar.google.com")
@@ -50,10 +46,16 @@ class TestProfileRoundTrip:
         assert got.cookies == {"GSP": "abc", "NID": "xyz"}
 
     def test_missing_key_loads_none(self, tmp_path: Path) -> None:
-        assert _store(tmp_path).load("9.9.9.9", "nowhere.com") is None
+        assert (
+            ProfileStore(base_dir=tmp_path, ttl_sec=3600.0).load(
+                "9.9.9.9",
+                "nowhere.com",
+            )
+            is None
+        )
 
     def test_keys_are_isolated_by_ip_and_domain(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.1.1.1", "a.com", Profile(ua="A", cookies={"k": "1"}))
         store.save("2.2.2.2", "a.com", Profile(ua="B", cookies={"k": "2"}))
         store.save("1.1.1.1", "b.com", Profile(ua="C", cookies={"k": "3"}))
@@ -64,13 +66,13 @@ class TestProfileRoundTrip:
 
 class TestProfileTtl:
     def test_expired_profile_loads_none(self, tmp_path: Path) -> None:
-        store = _store(tmp_path, ttl_sec=10.0)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=10.0)
         stale = Profile(ua="old", cookies={}, created=time.time() - 100.0)
         store.save("1.2.3.4", "x.com", stale)
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_fresh_profile_within_ttl_loads(self, tmp_path: Path) -> None:
-        store = _store(tmp_path, ttl_sec=100.0)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=100.0)
         fresh = Profile(ua="new", cookies={}, created=time.time() - 5.0)
         store.save("1.2.3.4", "x.com", fresh)
         assert store.load("1.2.3.4", "x.com") is not None
@@ -78,33 +80,40 @@ class TestProfileTtl:
 
 class TestProfileDiscard:
     def test_discard_removes_profile(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.2.3.4", "x.com", Profile(ua="u", cookies={"k": "v"}))
         store.discard("1.2.3.4", "x.com")
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_discard_absent_is_noop(self, tmp_path: Path) -> None:
-        _store(tmp_path).discard("1.2.3.4", "absent.com")  # Must not raise.
+        ProfileStore(base_dir=tmp_path, ttl_sec=3600.0).discard(
+            "1.2.3.4",
+            "absent.com",
+        )  # Must not raise.
 
 
 class TestPathKeyCollision:
     def test_ipv6_domain_does_not_collide(self, tmp_path: Path) -> None:
         # REV2A-004: the key is colon-joined; an IPv6 domain injects colons, so
         # naive f"{egress}:{domain}" collides distinct (egress, domain) pairs.
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         a = store._path("1.1.1.1", "::1")
         b = store._path("1.1.1.1:", ":1")
         assert a != b, f"distinct keys collided to one path: {a.name}"
 
     def test_path_percent_encodes_both_parts(self, tmp_path: Path) -> None:
-        assert _store(tmp_path)._path("2001:db8::1", "a/b").name == (
-            "2001%3Adb8%3A%3A1|a%2Fb.json"
+        assert ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)._path(
+            "2001:db8::1",
+            "a/b",
+        ).name == ("2001%3Adb8%3A%3A1|a%2Fb.json")
+        assert (
+            ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)._path("a/b", "x.com").name
+            == "a%2Fb|x.com.json"
         )
-        assert _store(tmp_path)._path("a/b", "x.com").name == "a%2Fb|x.com.json"
 
     def test_ipv6_egress_and_domain_roundtrip(self, tmp_path: Path) -> None:
         # A v6 egress + v6 domain must save and load back to the same profile.
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("2001:db8::1", "::1", Profile(ua="u", cookies={"k": "v"}))
         got = store.load("2001:db8::1", "::1")
         assert got is not None
@@ -113,7 +122,7 @@ class TestPathKeyCollision:
 
 class TestCookieMerge:
     def test_update_cookies_merges_preserving_prior(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         created = time.time()
         store.save(
             "1.2.3.4",
@@ -128,7 +137,7 @@ class TestCookieMerge:
         assert got.cookies == {"a": "1", "b": "2"}
 
     def test_update_cookies_overwrites_same_name(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.2.3.4", "x.com", Profile(ua="u", cookies={"a": "1"}))
         store.update_cookies("1.2.3.4", "x.com", {"a": "2"})
         assert _loaded(store, "1.2.3.4", "x.com").cookies == {"a": "2"}
@@ -136,7 +145,7 @@ class TestCookieMerge:
     def test_update_cookies_on_absent_is_noop(self, tmp_path: Path) -> None:
         # No profile => no identity to attach cookies to; the store does not mint
         # one (it has no User-Agent source). The caller saves a profile first.
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.update_cookies("1.2.3.4", "x.com", {"GSP": "z"})
         assert store.load("1.2.3.4", "x.com") is None
 
@@ -161,21 +170,21 @@ class TestCorruptFileResilience:
         )
 
     def test_load_truncated_json_returns_none(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'{"ua": "x", "cook')  # crash-truncated write.
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_load_wrong_shape_returns_none(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"{}")  # Valid JSON, missing keys.
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_corrupt_file_self_heals_on_next_save(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"not json at all")
@@ -185,7 +194,7 @@ class TestCorruptFileResilience:
         assert loaded.ua == "fresh"
 
     def test_update_cookies_on_corrupt_is_noop(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'{"ua": "x"')  # Truncated.
@@ -194,7 +203,7 @@ class TestCorruptFileResilience:
     def test_no_partial_file_left_when_write_interrupted(self, tmp_path: Path) -> None:
         # An interrupted write must never expose a partial file at the key path:
         # atomic replace means the reader sees either the old file or the new one.
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.2.3.4", "x.com", Profile(ua="v1", cookies={"a": "1"}))
         # No temp/partial siblings linger after a successful save.
         siblings = list(tmp_path.glob("*.json*"))
@@ -202,7 +211,7 @@ class TestCorruptFileResilience:
 
     def test_write_creates_nested_parent_and_private_file(self, tmp_path: Path) -> None:
         base = tmp_path / "nested" / "profiles"
-        store = _store(base)
+        store = ProfileStore(base_dir=base, ttl_sec=3600.0)
         real_open = os.open
         open_mock = Mock(wraps=real_open)
         monkeypatch = pytest.MonkeyPatch()
@@ -219,7 +228,7 @@ class TestCorruptFileResilience:
         assert mode == 0o600
 
     def test_read_uses_close_on_exec(self, tmp_path: Path) -> None:
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.2.3.4", "x.com", Profile(ua="u"))
         open_mock = Mock(wraps=os.open)
         monkeypatch = pytest.MonkeyPatch()
@@ -295,7 +304,7 @@ class TestTtlEviction:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        store = _store(tmp_path, ttl_sec=10.0)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=10.0)
         store.save("1.2.3.4", "x.com", Profile(ua="u", created=100.0))
         monkeypatch.setattr("wesearch.profile.time.time", lambda: 110.0)
         assert store.load("1.2.3.4", "x.com") is not None
@@ -305,7 +314,7 @@ class TestTtlEviction:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        store = _store(tmp_path, ttl_sec=10.0)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=10.0)
         store.save("1.2.3.4", "x.com", Profile(ua="old", created=0.0))
 
         def ignore_unlink(**_kwargs: object) -> None:
@@ -318,7 +327,7 @@ class TestTtlEviction:
         assert unlink_mock.call_args.kwargs["missing_ok"] is True
 
     def test_expired_profile_file_unlinked_on_load(self, tmp_path: Path) -> None:
-        store = _store(tmp_path, ttl_sec=10.0)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=10.0)
         stale = Profile(ua="old", cookies={}, created=time.time() - 100.0)
         store.save("1.2.3.4", "x.com", stale)
         path = store._path("1.2.3.4", "x.com")
@@ -354,7 +363,7 @@ class TestConcurrentSafety:
     def test_interleaved_saves_do_not_corrupt(self, tmp_path: Path) -> None:
         # Two threads hammering the same key must leave a readable profile, never
         # a half-written file (fcntl-guarded read-modify-write).
-        store = _store(tmp_path)
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.2.3.4", "x.com", Profile(ua="u", cookies={}))
 
         # 12 rounds x 4 threads = 48 interleaved read-modify-writes. The race

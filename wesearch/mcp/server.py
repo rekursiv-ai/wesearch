@@ -357,12 +357,12 @@ def web_search(
 ) -> list[dict[str, object]]:
     """Web search.
 
-    Omitting ``backend`` takes this build's default, which is DuckDuckGo in the public
-    package. Pass ``backend="searxng"`` explicitly for a SearXNG instance; it reads
-    ``SEARXNG_URL`` and fails without it. ``categories`` selects a SearXNG result tab,
-    which selects that backend when none is named and is rejected alongside an explicit
-    non-SearXNG one. The list at the end describes each parameter, including every
-    tab and what it returns.
+    Omitting ``backend`` tries DuckDuckGo, SearXNG (needs ``SEARXNG_URL``), then
+    Brave (needs ``BRAVE_API_KEY``), skipping any that is blocked, unconfigured, or
+    empty; repeat queries are served from a host-wide cache. ``categories`` selects a
+    SearXNG result tab, which selects that backend when none is named and is rejected
+    alongside an explicit non-SearXNG one. The list at the end describes each
+    parameter, including every tab and what it returns.
 
     Args:
       query: Search terms.

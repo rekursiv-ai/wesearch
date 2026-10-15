@@ -106,6 +106,10 @@ def test_the_package_conftest_binds_browser_teardown() -> None:
         "wesearch/conftest.py names shutdown_browsers but never calls it; a "
         "test file that launches Chrome now leaks for the whole run"
     )
+    assert _calls(fixture, "close_launched_browsers"), (
+        "the shared Chrome is detached and outlives a disconnect; without "
+        "close_launched_browsers every isolated test profile leaves one running"
+    )
 
 
 def _fixture_def(path: Path, *, name: str) -> ast.FunctionDef:

@@ -328,7 +328,7 @@ def test_fetch_web_forwards_policy_to_reader_fallback() -> None:
     Each rung fetches a URL of its own (the proxy's), so a rung that dropped the
     policy would silently fetch it unvalidated.
     """
-    policy = PolicyParams(transport="stdlib", trust="internal")
+    policy = PolicyParams(transport="curl", trust="internal")
     with patch("wesearch.web.fetch_with_reader_fallback") as fallback:
         fallback.return_value = (b"<html></html>", False)
         fetch_web("https://example.com/x", policy=policy)
@@ -545,7 +545,7 @@ def test_extract_text_json_detection_accepts_leading_whitespace() -> None:
 
 
 def test_fetch_body_forwards_url_policy_and_request_fields() -> None:
-    policy = PolicyParams(transport="stdlib", trust="internal")
+    policy = PolicyParams(transport="curl", trust="internal")
     with patch("wesearch.web.fetch", return_value=(b"ok", None)) as mock_fetch:
         body, kind = _fetch_body(
             "https://api.example/x",
@@ -619,7 +619,7 @@ def test_format_rss_exactly_handles_missing_channel_and_namespaces() -> None:
 
 
 def test_fetch_body_forwards_provider_urls_and_policies() -> None:
-    policy = PolicyParams(transport="stdlib", trust="internal")
+    policy = PolicyParams(transport="curl", trust="internal")
     with (
         patch("wesearch.web.google_news.matches", return_value=True),
         patch(

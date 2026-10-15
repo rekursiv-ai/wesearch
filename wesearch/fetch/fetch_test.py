@@ -59,6 +59,7 @@ from wesearch.profile import Profile, ProfileStore
 from wesearch.types.errors import (
     BotDetectionError,
     CloudflareChallengeError,
+    CooldownError,
     FetchError,
     GoogleJavascriptRequiredError,
     PuzzleChallengeError,
@@ -71,6 +72,10 @@ if TYPE_CHECKING:
 
     import logging
     import types
+
+    from curl_cffi.requests.session import HttpMethod
+
+    from wesearch.types.params import Transport
 
 
 fetch_mod = cast("_FetchModule", importlib.import_module("wesearch.fetch.fetch"))
@@ -837,92 +842,6 @@ class TestOnResponse:
     transports. It is the seam a cookie jar uses to observe Set-Cookie.
     """
 
-    def _stdlib_resp(
-        self,
-        status: int,
-        headers: list[tuple[str, str]],
-        body: bytes = b"ok",
-    ) -> Mock:
-        r = Mock(spec=client.HTTPResponse)
-        r.status = status
-        r.read.return_value = body
-        r.getheaders.return_value = [("content-encoding", "identity"), *headers]
-        return r
-
-    def test_stdlib_success_reports_status_and_headers(self) -> None:
-        conn = Mock(request=Mock())
-        conn.getresponse.return_value = self._stdlib_resp(
-            200,
-            [("set-cookie", "GSP=abc")],
-        )
-        seen: list[tuple[int, dict[str, str]]] = []
-        with (
-            patch(
-                "wesearch.fetch.transport.stdlib._open_connection",
-                return_value=conn,
-            ),
-        ):
-            fetch.fetch(
-                "https://x.com",
-                request=RequestParams(
-                    observe=ObserveParams(on_response=lambda s, h: seen.append((s, h))),
-                    policy=PolicyParams(transport="stdlib"),
-                ),
-            )
-        assert len(seen) == 1
-        status, headers = seen[0]
-        assert status == 200
-        assert headers.get("set-cookie") == "GSP=abc"
-
-    def test_stdlib_fires_per_redirect_hop_then_final(self) -> None:
-        redir = self._stdlib_resp(
-            302,
-            [("location", "https://x.com/2"), ("set-cookie", "a=1")],
-            b"",
-        )
-        final = self._stdlib_resp(200, [("set-cookie", "b=2")])
-        conn = Mock(request=Mock())
-        conn.getresponse.side_effect = [redir, final]
-        seen: list[int] = []
-        with (
-            patch(
-                "wesearch.fetch.transport.stdlib._open_connection",
-                return_value=conn,
-            ),
-        ):
-            fetch.fetch(
-                "https://x.com/1",
-                request=RequestParams(
-                    observe=ObserveParams(on_response=lambda s, _h: seen.append(s)),
-                    policy=PolicyParams(transport="stdlib"),
-                ),
-            )
-        assert seen == [302, 200]
-
-    def test_stdlib_error_reports_before_raising(self) -> None:
-        conn = Mock(request=Mock())
-        conn.getresponse.return_value = self._stdlib_resp(
-            404,
-            [("set-cookie", "x=1")],
-            b"nope",
-        )
-        seen: list[int] = []
-        with (
-            patch(
-                "wesearch.fetch.transport.stdlib._open_connection",
-                return_value=conn,
-            ),
-            pytest.raises(FetchError),
-        ):
-            fetch.fetch(
-                "https://x.com",
-                request=RequestParams(
-                    observe=ObserveParams(on_response=lambda s, _h: seen.append(s)),
-                    policy=PolicyParams(transport="stdlib"),
-                ),
-            )
-        assert seen == [404]
-
     def test_curl_success_reports_status_and_headers(self) -> None:
         resp = Mock()
         resp.status_code = 200
@@ -942,86 +861,6 @@ class TestOnResponse:
         assert len(seen) == 1
         assert seen[0][0] == 200
         assert seen[0][1].get("set-cookie") == "GSP=xyz"
-
-
-class TestTransportConsistency:
-    """The curl and stdlib transports must behave IDENTICALLY on the redirect.
-
-    Contract (cap -> return 3xx body; cross-origin -> Origin rewritten). These tests run
-    the SAME scenario through both and assert equality, so the two remaining redirect
-    loops cannot silently drift (the class of bug that recurred across several review
-    rounds).
-    """
-
-    def _stdlib_result(
-        self,
-        hops: list[tuple[int, bytes, dict[str, str]]],
-        *,
-        max_redirects: int = 10,
-    ) -> bytes:
-        resps: list[Mock] = []
-        for status, body, hdrs in hops:
-            r = Mock(spec=client.HTTPResponse)
-            r.status = status
-            r.read.return_value = body
-            r.getheaders.return_value = [
-                ("content-encoding", "identity"),
-                *hdrs.items(),
-            ]
-            resps.append(r)
-        mock_conn = Mock()
-        mock_conn.request = Mock()
-        mock_conn.getresponse.side_effect = resps
-        with (
-            patch(
-                "wesearch.fetch.transport.stdlib._open_connection",
-                return_value=mock_conn,
-            ),
-        ):
-            return fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(
-                    retry=RetryParams(max_redirects=max_redirects),
-                    policy=PolicyParams(transport="stdlib"),
-                ),
-            )[0]
-
-    def _curl_result(
-        self,
-        hops: list[tuple[int, bytes, dict[str, str]]],
-        *,
-        max_redirects: int = 10,
-    ) -> bytes:
-        resps: list[Mock] = []
-        for status, body, hdrs in hops:
-            r = Mock()
-            r.status_code = status
-            r.content = body
-            r.headers = hdrs
-            resps.append(r)
-        with (
-            patch("curl_cffi.requests.request", side_effect=resps),
-        ):
-            return fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(retry=RetryParams(max_redirects=max_redirects)),
-            )[0]
-
-    def test_cap_returns_3xx_body_identically(self) -> None:
-        # max_redirects=0: both transports return the 3xx body, neither raises.
-        hops: list[tuple[int, bytes, dict[str, str]]] = [
-            (302, b"the 3xx body", {"location": "https://a.com/next"}),
-        ]
-        assert self._stdlib_result(hops, max_redirects=0) == b"the 3xx body"
-        assert self._curl_result(hops, max_redirects=0) == b"the 3xx body"
-
-    def test_followed_redirect_returns_final_body_identically(self) -> None:
-        hops: list[tuple[int, bytes, dict[str, str]]] = [
-            (302, b"", {"location": "https://a.com/2"}),
-            (200, b"final", {}),
-        ]
-        assert self._stdlib_result(hops) == b"final"
-        assert self._curl_result(hops) == b"final"
 
 
 class TestFetchSession:
@@ -1915,6 +1754,46 @@ class TestBrowserBackend:
     def test_auto_uses_curl_for_post(self) -> None:
         assert resolve_transport("auto", method="POST") == "curl"
 
+    @pytest.mark.parametrize(
+        ("transport", "method", "resolved"),
+        [
+            ("auto", "POST", "stdlib"),
+            ("curl", "GET", "stdlib"),
+            ("auto", "GET", "curl-then-zendriver"),
+            ("zendriver", "GET", "zendriver"),
+        ],
+    )
+    def test_stdlib_stands_in_for_curl_when_curl_cannot_load(
+        self,
+        transport: Transport,
+        method: HttpMethod,
+        resolved: Transport,
+    ) -> None:
+        with patch.object(fetch_mod, "curl_available", return_value=False):
+            assert resolve_transport(transport, method=method) == resolved
+
+    def test_the_curl_leg_of_a_browser_fallback_also_falls_back(self) -> None:
+        request = _Request(
+            url="https://x.example/",
+            session=FetchSession(),
+            params=RequestParams(policy=PolicyParams(transport="curl-then-zendriver")),
+        )
+        sent: list[str] = []
+
+        def send(req: _Request, *_args: object) -> bytes:
+            sent.append(req.params.policy.transport)
+            return b"ok"
+
+        with (
+            patch.object(fetch_mod, "curl_available", return_value=False),
+            patch.object(fetch_mod, "_send_as", send),
+        ):
+            assert (
+                _fetch_with_identity(request, caller_headers=None, caller_cookies=None)
+                == b"ok"
+            )
+        assert sent == ["stdlib"]
+
     def test_auto_uses_curl_for_get_body(self) -> None:
         with patch.object(
             fetch_mod,
@@ -2614,7 +2493,9 @@ class TestIdentityMutationCoverage:
         egress.assert_called_once_with(cache=True)
         browser.assert_called_once()
         assert browser.call_args.args[0] == "https://a.example/path?q=x+y"
-        assert browser.call_args.kwargs["egress"] == "198.51.100.8"
+        # One shared Chrome per profile, not per egress: the browser follows
+        # the OS route, and the egress keys only the cookie profile below.
+        assert "egress" not in browser.call_args.kwargs
         assert browser.call_args.kwargs["timeout_sec"] == 11.0
         assert browser.call_args.kwargs["headers"] == {"X": "h"}
         assert browser.call_args.kwargs["cookies"] == {"c": "v"}
@@ -2994,7 +2875,6 @@ class TestRemainingHeaderAndBrowserMutationCoverage:
             assert _send_via_zendriver(request, headers=None, cookies=None) == b"ok"
         assert browser.call_args.kwargs == {
             "profile_dir": tmp_path / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
-            "egress": "",
             "timeout_sec": 9.0,
             "headers": None,
             "cookies": None,
@@ -3613,6 +3493,43 @@ class TestRetryAttemptCounterMutationCoverage:
             )
         assert backend.call_count == 4
         assert sleeps.call_args_list == [((1.0,), {}), ((2.0,), {}), ((4.0,), {})]
+
+
+class TestGate:
+    def test_a_final_block_locks_the_site_for_the_next_fetch(self) -> None:
+        def challenge(body: bytes) -> None:
+            raise PuzzleChallengeError(body.decode(), url="https://gated.example/")
+
+        blocked = RequestParams(
+            observe=ObserveParams(body_validator=challenge),
+            policy=PolicyParams(transport="curl"),
+        )
+        with (
+            patch.object(fetch_mod, "_fetch_once", return_value=b"wall"),
+            pytest.raises(PuzzleChallengeError),
+        ):
+            fetch.fetch("https://gated.example/", request=blocked)
+        with (
+            patch.object(fetch_mod, "_fetch_once", return_value=b"ok") as sent,
+            pytest.raises(CooldownError),
+        ):
+            fetch.fetch("https://gated.example/")
+        sent.assert_not_called()
+
+    def test_a_curl_block_the_browser_clears_does_not_lock(self) -> None:
+        def wall_on_curl(body: bytes) -> None:
+            if body == b"wall":
+                raise PuzzleChallengeError("challenge")
+
+        request = RequestParams(observe=ObserveParams(body_validator=wall_on_curl))
+        with (
+            patch.object(fetch_mod, "_fetch_once", return_value=b"wall"),
+            patch.object(fetch_mod, "_send_via_zendriver", return_value=b"page"),
+        ):
+            assert fetch.fetch("https://gated.example/", request=request)[0] == b"page"
+        curl = RequestParams(policy=PolicyParams(transport="curl"))
+        with patch.object(fetch_mod, "_fetch_once", return_value=b"ok"):
+            assert fetch.fetch("https://gated.example/", request=curl)[0] == b"ok"
 
 
 if __name__ == "__main__":

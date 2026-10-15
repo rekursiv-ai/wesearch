@@ -6,13 +6,11 @@ instance is configured.
 
 from __future__ import annotations
 
-from functools import cache
 from typing import TYPE_CHECKING, Final
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import logging
 
-from wesearch.chrome.useragents import user_agent_pool
 from wesearch.fetch import (
     ContentParams,
     ObserveParams,
@@ -51,9 +49,9 @@ def duckduckgo(
     headers: dict[str, str] | None = None,
     *,
     max_query_chars: int = 499,
-    timeout_sec: float = 30.0,
+    timeout_sec: float = 10.0,
     connect_timeout_sec: float = 3.0,
-    retries: int = 2,
+    retries: int = 1,
     transport: Transport = "auto",
 ) -> list[SearchResult]:
     """Scrape DuckDuckGo's HTML-only endpoint.
@@ -67,7 +65,8 @@ def duckduckgo(
       headers: Optional override headers forwarded to fetch.
       max_query_chars: Reject a query longer than this. DuckDuckGo's HTML
         endpoint silently drops overlong queries, so fail loudly instead.
-      timeout_sec: HTTP ceiling per attempt.
+      timeout_sec: Ceiling per attempt, browser leg included. The page is a
+        few tens of KB, so a slower answer means a dropped egress, not a slow one.
       connect_timeout_sec: Ceiling on the handshake alone, so an unroutable
         egress is detected in a handshake rather than a full request. A dropped
         SYN draws no RST, so only the clock reports it. Sized against the slow
@@ -93,47 +92,32 @@ def duckduckgo(
         raise SearchError(
             f"DuckDuckGo query exceeds {max_query_chars} characters (got {len(query)}).",
         )
-    request_headers = {
-        "User-Agent": _duckduckgo_user_agent(),
-        "Accept": "*/*",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-User": "?1",
-        "Accept-Language": "all,all-ALL;q=0.7",
-        "Referer": _DUCKDUCKGO_URL,
-    }
-    request_headers.update(headers or {})
     # The query goes in the URL, not a POST body: DuckDuckGo's HTML endpoint now
     # drops a POSTed query and serves its empty homepage (``body--home``),
     # yielding zero results. A GET with ``q`` in the query string returns the
     # real results page. ``kl=wt-wt`` keeps the region-neutral ("no region")
     # results the POST form sent.
     params = urlencode({"q": _duckduckgo_quote_bangs(query), "kl": "wt-wt"})
-    # Send exactly these headers: the GSA mobile User-Agent must not be paired
-    # with fetch's default desktop Chrome ``sec-ch-ua``/``sec-ch-ua-platform``,
-    # whose drift from the UA can trip DuckDuckGo's bot check.
+    # No identity headers of our own: fetch's identity layer sends the coherent
+    # Chrome set curl impersonates and keeps DDG's cookies per egress. A
+    # hand-built set needs ``raw_headers``, which skipped that layer and pinned
+    # the request to bare curl -- DDG then blocked it in 0.16s with no browser
+    # fallback to escalate to.
     body, _ = fetch(
         f"{_DUCKDUCKGO_URL}?{params}",
         request=RequestParams(
-            content=ContentParams(headers=request_headers, raw_headers=True),
+            content=ContentParams(
+                headers={"Referer": _DUCKDUCKGO_URL, **(headers or {})},
+            ),
             retry=RetryParams(
                 retries=retries,
                 timeout_sec=timeout_sec,
                 connect_timeout_sec=connect_timeout_sec,
             ),
-            # The challenge check runs INSIDE fetch. DDG serves its puzzle
-            # with HTTP 200, so a check made here turns that into a typed
-            # ``PuzzleChallengeError`` rather than the silent empty result a
-            # post-hoc check of the parsed body produces.
-            #
-            # It does NOT reach Zendriver, unlike Google's. ``raw_headers``
-            # resolves this request to plain ``curl`` (never
-            # ``curl-then-zendriver``), and the zendriver transport refuses a
-            # ``raw_headers`` request outright, so for this backend there is no
-            # domain learning, no browser retry and no fallback: the caller
-            # gets the typed error and nothing more. Restoring an escalation
-            # path is an open design question, not work in progress.
+            # The challenge check runs INSIDE fetch. DDG serves its puzzle with
+            # HTTP 200, so a check here turns that into a typed
+            # ``PuzzleChallengeError``, which ``auto`` answers by retrying in the
+            # browser and learning the domain.
             observe=ObserveParams(body_validator=_duckduckgo_validate_body),
             policy=PolicyParams(transport=transport),
         ),
@@ -235,15 +219,3 @@ def _duckduckgo_parse(
         else:
             logger.warning("No results parsed -- DDG may have changed markup.")
     return results
-
-
-# DuckDuckGo derives its ``vqd`` anti-bot token from ``(query, User-Agent)`` and treats
-# a UA that shifts between the results page and its follow-ups as a bot (which lowers
-# the IP's reputation and triggers CAPTCHAs). A stable UA keeps the token valid across
-# requests -- unlike the per-query UA the Google path uses. Cached, so the whole process
-# presents one consistent DDG client.
-@cache
-def _duckduckgo_user_agent() -> str:
-    """Return a PROCESS-STABLE User-Agent for DuckDuckGo (drawn once, reused)."""
-    pool = user_agent_pool("chrome_android")
-    return f"{pool[0]} NSTNWV"

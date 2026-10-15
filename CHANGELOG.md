@@ -3,6 +3,19 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking:** the `fetch-zendriver` console script is renamed `zendriver`.
+  Its Chrome profile directory keeps its name, so seated logins carry over.
+- `zendriver` opens a tab for each site a bot challenge has locked, and
+  unlocks each site as soon as you load a page there. Pages loaded by fetches
+  sharing the window never unlock a site.
+- Every `fetch` is paced and recovered by one host-wide gate, keyed by site and
+  egress IP: a block locks the site briefly, then one caller probes it while
+  the rest get `CooldownError`. A success unlocks every caller.
+
 ## 0.1.13 - 2026-10-07
 
 ### Changed

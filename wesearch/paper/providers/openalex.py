@@ -1,9 +1,9 @@
 """OpenAlex backend for :mod:`wesearch.paper`.
 
 Queries OpenAlex ``/works`` via the ``title_and_abstract.search`` filter and
-maps each work onto the backend-agnostic :class:`PaperRecord`. Sync, paced
-through the shared ``openalex`` cross-process gate. Adds broad, non-CS coverage
-and an independent quota so it degrades independently of S2.
+maps each work onto the backend-agnostic :class:`PaperRecord`. Sync; paced by
+:func:`wesearch.fetch.fetch` on OpenAlex's host. Adds broad, non-CS
+coverage and an independent quota so it degrades independently of S2.
 
 Tunable knobs are literal-default keyword-only kwargs on the functions that
 consume them (NOT module state); a caller needing different limits overrides
@@ -11,10 +11,7 @@ via the signature. Named here once so the rationale lives in one place:
   base="https://api.openalex.org" -- API base URL.
   timeout_sec=10.0    -- HTTP timeout; matches the S2 ceiling so this leg cannot
                          silently hang a turn after a sibling returned.
-  interval_sec=0.1    -- min seconds between requests. OpenAlex's cap is a daily
-                         credit budget, so a light steady pace smooths bursts.
   per_page_max=200    -- OpenAlex ``per-page`` ceiling.
-  source="openalex"   -- rate-limit gate key.
 The ``select`` field list is built inline by :func:`_select`.
 """
 
@@ -43,7 +40,6 @@ from wesearch.paper.errors import (
     translate_http_error,
 )
 from wesearch.paper.paginate import Cursor, Page, paginate
-from wesearch.ratelimit import cross_process_limiter
 from wesearch.types.errors import FetchError
 
 
@@ -395,24 +391,15 @@ def _get(
     params: dict[str, str | int],
     *,
     base: str = "https://api.openalex.org",
-    source: str = "openalex",
-    interval_sec: float = 0.1,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
 ) -> dict[str, MutablePlainTree]:
-    """GET an OpenAlex path, gated, with polite UA + optional key; parse JSON."""
+    """GET an OpenAlex path with polite UA + optional key; parse JSON."""
     # A premium key raises the daily credit budget far above the anonymous
     # ~1000/day; send it when configured.
     api_key = os.environ.get("OPENALEX_API_KEY", "")
     if api_key:
         params = {**params, "api_key": api_key}
-    try:
-        cross_process_limiter(source, per_seconds=interval_sec).acquire()
-    except OSError as e:
-        # The gate is a lock file; a filesystem failure here is a backend
-        # failure like any other. Left raw it escapes the caller's PaperError
-        # handler, and a fused search would abort rather than degrade to S2.
-        raise BackendError(f"OpenAlex rate-limit gate failed: {e}") from e
     try:
         raw, _ = fetch(
             url=f"{base}{path}",

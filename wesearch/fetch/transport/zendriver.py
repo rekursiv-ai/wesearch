@@ -13,8 +13,15 @@ wall. Select it per call with
 persistent Chrome profile, so cookies you seat (e.g. by logging in) carry
 across fetches.
 
-Run ``fetch-zendriver URL`` to open that URL in a HEADED Chrome on the same
-profile -- to debug a fetch that errored, or to seat a login.
+One Chrome serves every process on the host. The first fetch launches it
+DETACHED (its own session, owned by no caller), and every fetch -- from any
+process -- attaches over DevTools and works in its own tab. Chrome allows one
+owner per profile, so the alternative, a Chrome per process, made each new
+process evict the last one's browser mid-fetch.
+
+Run ``zendriver URL`` to open that URL in a HEADED Chrome on the same
+profile -- to debug a fetch that errored, to clear a site's block, or to seat a
+login.
 '''
 # fmt: on
 
@@ -23,31 +30,29 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine, Generator, Iterator, Mapping
 from html import unescape
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Protocol, TypeVar, cast, override
+from typing import TYPE_CHECKING, Final, NamedTuple, Protocol, TypeVar, cast
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import argparse
 import asyncio
 import atexit
 import contextlib
-import hashlib
+import fcntl
 import inspect
 import logging
 import os
 import re
 import socket
-import socketserver
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import warnings
 
 from wesearch.fetch.challenge import classify_challenge
 from wesearch.fetch.common import apply_redirect, origin, pinned_host
+from wesearch.fetch.gate import challenged_urls, clear_host
 from wesearch.lib.userdirs import cache_dir, data_dir
-from wesearch.ratelimit import clear_domain_cooldowns
 
 
 if TYPE_CHECKING:
@@ -72,6 +77,7 @@ else:
 __all__ = [
     "BrowserResult",
     "BrowserUnavailableError",
+    "close_launched_browsers",
     "fetch_zendriver",
     "open_instance",
     "shutdown_browsers",
@@ -121,7 +127,6 @@ def fetch_zendriver(
     url: str,
     *,
     profile_dir: Path,
-    egress: str,
     timeout_sec: float = 30.0,
     headless: bool = True,
     headers: dict[str, str] | None = None,
@@ -130,21 +135,22 @@ def fetch_zendriver(
     max_redirects: int = 10,
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
-    """Fetch ``url`` in a pooled headless Chrome; return its body and cookies.
+    """Fetch ``url`` in a tab of the shared headless Chrome; return body and cookies.
 
-    Navigates a warm browser (one per ``(egress, profile_dir)``) to ``url``,
-    waits for the load to complete, then returns the rendered HTML and the
-    cookies the browser acquired for the URL's domain. Page-state validation
-    belongs to the provider consuming the rendered response.
+    Attaches to the host's one Chrome on ``profile_dir`` (launching it detached
+    if none runs), navigates a fresh tab to ``url``, waits for the load to
+    complete, then returns the rendered HTML and the cookies the browser holds
+    for the URL's domain. Page-state validation belongs to the provider
+    consuming the rendered response.
 
     Args:
       url: Fully-qualified URL to navigate to.
       profile_dir: Chrome ``user_data_dir`` supplying the logged-in identity.
-      egress: Public egress IP the pooled browser is keyed to (a rotation keys
-        a fresh browser).
       timeout_sec: Overall budget for navigation + load, in seconds.
       headless: Run Chrome headless (the default); ``False`` opens a window.
-      headers: Extra headers applied to this tab before navigation.
+      headers: Extra headers for this tab. Browser-identity headers
+        (User-Agent, Accept*, Sec-*, Referer, ...) are dropped: Chrome sends
+        its own, and overriding them is what gets a real browser walled.
       cookies: Cookies seeded for ``url`` before navigation.
       trust: Provenance of the URL. Under ``"untrusted"`` every DOCUMENT request
         -- the navigation and each redirect hop Chrome follows itself -- is
@@ -166,10 +172,9 @@ def fetch_zendriver(
         _navigate(
             url,
             profile_dir=profile_dir,
-            egress=egress,
             timeout_sec=timeout_sec,
             headless=headless,
-            headers=headers,
+            headers=_without_browser_identity(headers),
             cookies=cookies,
             trust=trust,
             max_redirects=max_redirects,
@@ -182,13 +187,12 @@ def fetch_zendriver(
 
 
 def shutdown_browsers() -> None:
-    """Close every pooled browser and stop the pool's loop thread.
+    """Disconnect this process from every shared Chrome and stop the pool's loop.
 
+    Disconnects only: the Chrome stays up for every other process using it.
     Idempotent, and a NO-OP when no pool has been created -- it must never
-    construct one just to tear it down (that would spin up a Chrome-driving loop
-    thread only to stop it, and on an egress rotation before any browser fetch it
-    would poison the not-yet-used singleton). Only an existing pool is shut down;
-    the singleton is then cleared so the next browser fetch builds a fresh pool.
+    construct one just to tear it down. The singleton is cleared so the next
+    browser fetch builds a fresh pool.
     """
     global _pool_singleton  # noqa: PLW0603 -- reset the shared pool after teardown.
     with _pool_lock:
@@ -198,16 +202,37 @@ def shutdown_browsers() -> None:
         pool.shutdown()
 
 
+def close_launched_browsers() -> None:
+    """Terminate every shared Chrome THIS process launched, and reap it.
+
+    Production never calls this -- a shared Chrome must outlive the process that
+    happened to launch it. A test run does, so the Chromes its isolated profiles
+    started do not outlive the run.
+    """
+    while _launched:
+        process = _launched.pop()
+        with contextlib.suppress(OSError):
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
 def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
     """Open a HEADED Chrome on the profile dir at ``url``; block until closed.
 
-    Launches a visible Chrome under ``profile_dir`` (the fresh dedicated dir by
-    default), navigates to ``url``, and blocks until the user closes the window.
-    Use it to eyeball a URL the headless :func:`fetch_zendriver` backend failed on
-    -- you see exactly what Chrome renders (a challenge, a login wall, a broken
-    page) under the SAME profile the backend uses, and any cookies you seat while
-    there (e.g. by logging in) persist for later headless fetches. Runs OUTSIDE
-    the pool (a one-shot headed browser owned by this call).
+    Closes the shared headless Chrome (a profile has one owner), launches a
+    visible one under ``profile_dir``, navigates to ``url``, and blocks until the
+    user closes the window. Use it to eyeball a URL the headless
+    :func:`fetch_zendriver` backend failed on, or to seat a login: cookies set
+    there persist for later headless fetches. Fetches made meanwhile attach to
+    the visible window; the next one after it closes relaunches headless.
+
+    Every site a bot challenge locked opens in its own tab. Each site the user
+    loads in the window -- never one an agent's tab loads -- has its lock lifted
+    on load and again when the window closes.
 
     Args:
       url: The page to open -- typically the URL whose headless fetch you are
@@ -221,11 +246,15 @@ def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
         if profile_dir is None
         else profile_dir
     )
-    _request_pool_release(target)
-    _pool().run(_open_instance(url, target))
-    domain = urlparse(url).hostname
-    if domain is not None:
-        clear_domain_cooldowns(domain)
+    # Held across close AND launch: a fetch landing between them would relaunch
+    # headless and take the profile lock the headed launch needs.
+    with _launch_lock(target):
+        _close_shared_browser(target)
+        browser = _pool().run(_launch_browser(target, headless=False))
+    # Cleared again at close: an agent may have relocked a site while the user
+    # was still solving its challenge.
+    for host in _pool().run(_open_instance(url, browser)):
+        clear_host(host)
 
 
 # Chrome's generated viewer: a color-scheme meta it inserts itself, then the
@@ -267,19 +296,6 @@ def _process_command(pid: int, *, proc_root: Path, platform: str) -> str:
     return result.stdout
 
 
-class _PoolControlHandler(socketserver.StreamRequestHandler):
-    @override
-    def handle(self) -> None:
-        if self.rfile.readline(64) != b"release\n":
-            return
-        cast(_PoolControlServer, self.server).release()
-
-
-async def _close_browser_on_port(port: int) -> None:
-    browser = await zendriver.start(host="127.0.0.1", port=port)
-    await browser.stop()
-
-
 # Chrome's setuid sandbox refuses to start as root, so a root context (CI, containers)
 # must pass ``--no-sandbox``. A normal desktop user keeps the sandbox -- disabling it
 # there needlessly weakens security AND makes Chrome show a persistent "unsupported
@@ -292,51 +308,27 @@ def _command_flag(command: str, marker: str) -> str:
     return suffix.partition(" --")[0].strip()
 
 
-def _close_orphan_browser(profile_dir: Path) -> None:
-    """Close a live Chrome whose owning pool no longer serves control."""
-    port = _devtools_port(profile_dir)
-    if port is None:
-        return
-    try:
-        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
-    except OSError:
-        return
-    connection.close()
-    asyncio.run(_close_browser_on_port(port))
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            connection = socket.create_connection(("127.0.0.1", port), timeout=0.1)
-        except OSError:
-            return
-        connection.close()
-        time.sleep(0.05)
-    # A capability condition, not a fetch fault: it blocks every later browser
-    # fetch, so it must be the error such callers already catch.
-    raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
-
-
 class _BrowserPool:
-    """Pooled headless browsers over one persistent event loop on a daemon thread.
+    """Connections to shared Chromes over one persistent event loop on a daemon thread.
 
     zendriver browsers bind to the loop running their coroutines, so a stable
     loop is a hard requirement for reuse across sync calls. This pool owns that
     loop on a background thread and dispatches every browser coroutine to it via
-    :meth:`run`, keeping one warm :class:`zendriver.Browser` per
-    ``(egress, profile_dir)`` key and rejecting incompatible launch modes.
+    :meth:`run`, keeping one live DevTools connection per profile.
 
-    The hot spare justifies this lifecycle machinery: eight matched
-    ``https://example.com/`` requests measured a 0.130-second median with one
-    reused browser versus 4.196 seconds when launching Chrome per request, a
-    32.28x speedup.
+    It owns connections, never Chromes: a Chrome is shared by every process on
+    the host (see :func:`_shared_browser`), so closing this pool disconnects
+    and leaves the browser running for everyone else.
+
+    Reuse justifies the machinery: eight matched ``https://example.com/``
+    requests measured a 0.130-second median on a warm browser versus 4.196
+    seconds when launching Chrome per request, a 32.28x speedup.
     """
 
-    def __init__(self, *, serve_control: bool = True) -> None:
+    def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
-        self._serve_control = serve_control
-        self._controls: dict[str, _PoolControlServer] = {}
-        self._browsers: dict[tuple[str, str], tuple[bool, zendriver.Browser]] = {}
-        self._launch_lock = asyncio.Lock()
+        self._browsers: dict[str, tuple[bool, zendriver.Browser]] = {}
+        self._connect_lock = asyncio.Lock()
         self._lock = threading.Lock()
         # Started LAST, so every field _run_loop touches exists before it runs.
         self._thread = threading.Thread(
@@ -372,105 +364,70 @@ class _BrowserPool:
             future.cancel()
             raise
 
-    async def browser(
-        self,
-        egress: str,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> zendriver.Browser:
-        """Return the warm browser for one egress and profile.
+    async def browser(self, profile_dir: Path, *, headless: bool) -> zendriver.Browser:
+        """Return a live connection to the shared Chrome on ``profile_dir``.
 
         Args:
-          egress: Egress IP or identifier string.
           profile_dir: Chrome user-data directory path.
-          headless: Whether to launch headless (vs headed).
+          headless: Launch mode, used only if no Chrome is running yet. A
+            running headed Chrome (an operator's ``zendriver`` window)
+            serves headless requests as well.
 
         Returns:
-          browser: Warm zendriver.Browser instance, cached or launched.
+          browser: A connected zendriver.Browser, reused while it stays live.
 
         """
-        # Resolved, matching ``_control_address``: two spellings of one profile
-        # are one user-data dir, and Chrome allows it a single owner.
-        key = (egress, str(profile_dir.resolve()))  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
-        async with self._launch_lock:
-            control_key = _control_address(profile_dir)
-            with self._lock:
-                owns_profile = control_key in self._controls
-            if self._serve_control and not owns_profile:
-                await asyncio.to_thread(_request_pool_release, profile_dir)
-            self._ensure_control(profile_dir)
+        # Resolved: two spellings of one profile are one user-data dir, and
+        # Chrome allows it a single owner.
+        key = str(profile_dir.resolve())  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
+        async with self._connect_lock:
             with self._lock:
                 existing = self._browsers.get(key)
-            if existing is not None and not existing[1].stopped:
+            if existing is not None and _is_live(existing[1]):
                 if existing[0] != headless:
                     raise RuntimeError(
                         "Cannot change Zendriver launch mode for a live profile.",
                     )
                 return existing[1]
-            launched = await self._launch(profile_dir, headless=headless)
+            connected = await self._connect(profile_dir, headless=headless)
             with self._lock:
-                self._browsers[key] = (headless, launched)
-            return launched
+                self._browsers[key] = (headless, connected)
+            return connected
 
     def shutdown(self, *, budget_sec: float = 5.0) -> None:
-        """Close every pooled browser and stop the loop thread (idempotent).
+        """Disconnect from every shared Chrome and stop the loop thread (idempotent).
 
         Args:
-          budget_sec: TOTAL ceiling on closing every pooled browser, shared
-            across them rather than applied to each. Sized to stay well inside
-            the grace period a supervisor typically allows between SIGTERM and
-            SIGKILL, so teardown finishes rather than being cut short.
+          budget_sec: TOTAL ceiling on closing every connection, shared across
+            them rather than applied to each, so teardown fits inside the grace
+            period a supervisor allows between SIGTERM and SIGKILL.
 
         """
         if self._loop.is_closed():
             return
         with self._lock:
             browsers = [browser for _, browser in self._browsers.values()]
-            controls = list(self._controls.values())
             self._browsers.clear()
-            self._controls.clear()
-        # ONE deadline across every browser, not 30s each: this runs from
-        # ``atexit``, and a supervisor that follows SIGTERM with SIGKILL after
-        # a few seconds would cut a per-browser wait short and leak exactly
-        # what this loop exists to close. A browser still open when the budget
-        # is spent is killed outright -- a browser we SIGKILL on the way out is
-        # not a leak, whereas one we were still politely asking to close is.
         deadline = time.monotonic() + budget_sec
         for browser in browsers:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _kill_browser_process(browser)
-                continue
+                break
             try:
-                self.run(browser.stop(), timeout_sec=remaining)
+                self.run(_disconnect(browser), timeout_sec=remaining)
             except Exception:
-                logger.warning("browser stop failed during shutdown", exc_info=True)
-                _kill_browser_process(browser)
+                logger.warning(
+                    "browser disconnect failed during shutdown",
+                    exc_info=True,
+                )
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
         self._loop.close()
-        for control in controls:
-            control.close()
 
-    def _ensure_control(self, profile_dir: Path) -> None:
-        """Serve graceful cross-process release requests for ``profile_dir``."""
-        if not self._serve_control:
-            return
-        key = _control_address(profile_dir)
-        with self._lock:
-            if key in self._controls:
-                return
-            self._controls[key] = _PoolControlServer(profile_dir, shutdown_browsers)
-
-    async def _launch(
-        self,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> zendriver.Browser:
-        """Launch one Chrome under ``profile_dir`` on the pool's loop."""
-        return await _launch_browser(profile_dir, headless=headless)
+    async def _connect(self, profile_dir: Path, *, headless: bool) -> zendriver.Browser:
+        """Attach to the shared Chrome on ``profile_dir``, launching it if needed."""
+        port = await asyncio.to_thread(_shared_browser, profile_dir, headless=headless)
+        return await _attach(port)
 
     # zendriver's CDP dispatch calls the deprecated ``asyncio.iscoroutinefunction``
     # (connection.py) and leaves reader pipes for the GC to close, emitting a
@@ -491,6 +448,148 @@ class _BrowserPool:
             )
             warnings.filterwarnings("ignore", category=ResourceWarning)
             self._loop.run_forever()
+
+
+# A connection is dead when its websocket closed (Chrome exited, or an operator closed
+# the headed window): zendriver then clears ``websocket``, and its listener task ends.
+# ``Browser.stopped`` cannot say so -- it reads the Popen handle, which an attached
+# connection never has.
+def _is_live(browser: zendriver.Browser) -> bool:
+    """Whether an attached connection can still carry commands."""
+    connection = browser.connection
+    return (
+        connection is not None
+        and not connection.closed
+        and connection.listener is not None
+        and connection.listener.running
+    )
+
+
+async def _attach(port: int) -> zendriver.Browser:
+    """Connect to the Chrome serving DevTools on ``port``."""
+    _tolerate_late_cdp_replies()
+    try:
+        return await zendriver.start(
+            host="127.0.0.1",
+            port=port,
+            browser_connection_timeout=0.5,
+            browser_connection_max_tries=6,
+        )
+    except Exception as error:
+        # ``zendriver`` raises a bare ``Exception`` when DevTools never answers.
+        raise BrowserUnavailableError(
+            f"Could not attach to Chrome on DevTools port {port}: {error}",
+        ) from error
+
+
+# Disconnects WITHOUT ``Browser.stop``: stop sends ``Browser.close``, which would shut
+# Chrome down for every other process attached to it.
+async def _disconnect(browser: zendriver.Browser) -> None:
+    """Drop this process's connection, leaving the shared Chrome running."""
+    connection = browser.connection
+    if connection is not None:
+        await connection.aclose()
+
+
+# Serialized across processes by a lock file beside the profile, so two processes
+# arriving together launch one Chrome, not two fighting over the profile lock.
+def _shared_browser(profile_dir: Path, *, headless: bool) -> int:
+    """Return the DevTools port of the shared Chrome, launching it if none runs."""
+    with _launch_lock(profile_dir):
+        port = _devtools_port(profile_dir)
+        if port is not None and _port_answers(port):
+            return port
+        return _launch_detached(profile_dir, headless=headless)
+
+
+@contextlib.contextmanager
+def _launch_lock(profile_dir: Path) -> Generator[None]:
+    """Hold the host-wide lock serializing Chrome launches on ``profile_dir``."""
+    profile_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = profile_dir.parent / f".{profile_dir.name}.launch.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _port_answers(port: int) -> bool:
+    """Whether something accepts connections on the DevTools ``port``."""
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+    except OSError:
+        return False
+    return True
+
+
+# ``start_new_session`` puts Chrome in its own session and process group, so a caller's
+# exit, a Ctrl-C to its terminal, or a group kill of its tree leaves the shared browser
+# running. Port 0 lets Chrome pick a free port and report it in ``DevToolsActivePort``,
+# which avoids the race of choosing one here and binding it later.
+def _launch_detached(
+    profile_dir: Path,
+    *,
+    headless: bool,
+    connect_timeout_sec: float = 3.0,
+) -> int:
+    """Launch a Chrome no caller owns on ``profile_dir``; return its DevTools port."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "DevToolsActivePort").unlink(missing_ok=True)
+    executable = _fetch_browser()
+    config = zendriver.Config(
+        headless=headless,
+        user_data_dir=str(profile_dir),
+        # Sandboxed unless we are root.
+        sandbox=os.geteuid() != 0,
+        browser_executable_path=executable,
+        browser_args=_fetch_browser_args(executable),
+        host="127.0.0.1",
+    )
+    try:
+        # The port flag is appended here, not passed as ``port=0``: ``Config``
+        # emits it only for a truthy port, so 0 silently launched Chrome with no
+        # DevTools at all.
+        process = subprocess.Popen(  # noqa: S603 -- argv is zendriver's own launch config.
+            [
+                str(config.browser_executable_path),
+                *config(),
+                "--remote-debugging-port=0",
+                "about:blank",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
+    _launched.append(process)
+    deadline = time.monotonic() + connect_timeout_sec
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise BrowserUnavailableError(
+                f"Could not launch Chrome: it exited with code {process.returncode}.",
+            )
+        try:
+            port = int((profile_dir / "DevToolsActivePort").read_text().split()[0])
+        except (FileNotFoundError, IndexError, ValueError):
+            time.sleep(0.05)
+            continue
+        if _port_answers(port):
+            return port
+        time.sleep(0.05)
+    process.kill()
+    process.wait()
+    raise BrowserUnavailableError(
+        f"Could not launch Chrome: DevTools did not come up in {connect_timeout_sec}s.",
+    )
+
+
+# Every Chrome this process launched, so a test run can reap the ones it started. Not
+# consulted in production: a launched Chrome belongs to the host, not to its launcher.
+_launched: list[subprocess.Popen[bytes]] = []
 
 
 # ``Transaction.__call__`` calls ``set_result`` unconditionally, so a reply that lands
@@ -528,75 +627,6 @@ def _tolerate_late_cdp_replies() -> None:
     transaction.__call__ = call
 
 
-async def _launch_browser(
-    profile_dir: Path,
-    *,
-    headless: bool,
-) -> zendriver.Browser:
-    """Launch vanilla Chrome on the persistent profile."""
-    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
-    _tolerate_late_cdp_replies()
-    # Headed too, not just headless: an instance answering for
-    # ``com.google.Chrome`` takes the operator's links either way, and one
-    # rule is easier to keep true than a per-mode one.
-    executable = await asyncio.to_thread(_fetch_browser)
-    try:
-        return await zendriver.start(
-            zendriver.Config(
-                headless=headless,
-                user_data_dir=str(profile_dir),
-                # Sandboxed unless we are root.
-                sandbox=os.geteuid() != 0,
-                browser_executable_path=executable,
-                browser_args=_fetch_browser_args(executable),
-                # ``zendriver`` retries the DevTools connection ``max_tries`` times,
-                # each bounded by ``timeout``; the product is the launch's dead
-                # time when Chrome cannot connect. Healthy Chrome exposes
-                # DevTools in ~0.3s, so 0.5s clears it with margin while 6 tries
-                # cap a dead-browser launch at 3s -- a fast skip rather than the
-                # default 10x1.0s=10s hang that stacked past live-test timeouts.
-                browser_connection_timeout=0.5,
-                browser_connection_max_tries=6,
-            ),
-        )
-    except Exception as error:
-        # ``zendriver`` raises a bare ``Exception`` when Chrome cannot start or the
-        # DevTools connection never comes up. Re-raise it typed so callers can
-        # tell "no usable browser here" apart from a fetch/parse failure.
-        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
-
-
-def _control_address(profile_dir: Path, platform: str = sys.platform) -> str:
-    """Return the Unix-socket address coordinating one profile."""
-    digest = hashlib.sha256(str(profile_dir.resolve()).encode()).hexdigest()[:24]
-    if platform == "linux":
-        return f"\0loop-zendriver-{digest}"
-    return str(Path(tempfile.gettempdir()) / f"loop-zd-{digest}.sock")
-
-
-class _PoolControlServer(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-
-    def __init__(self, profile_dir: Path, release: Callable[[], None]) -> None:
-        self.release = release
-        address = _control_address(profile_dir)
-        self._control_path = None if address.startswith("\0") else Path(address)
-        super().__init__(address, _PoolControlHandler)
-        self._thread = threading.Thread(
-            target=lambda: self.serve_forever(poll_interval=0.01),
-            name="loop-web-browser-control",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def close(self) -> None:
-        self.shutdown()
-        self.server_close()
-        self._thread.join()
-        if self._control_path is not None:
-            self._control_path.unlink(missing_ok=True)
-
-
 # On macOS a headless Chrome launched from the installed bundle registers as
 # ``com.google.Chrome`` and outranks the user's own windows, so LaunchServices hands it
 # every ``open https://...`` -- what a command-click becomes -- and it drops them. Links
@@ -616,32 +646,6 @@ def _fetch_browser(*, platform: str = sys.platform) -> str:
             return str(candidate)
     logger.debug("no Chrome for Testing found; falling back to zendriver's Chrome")
     return ""
-
-
-# Abandoning it instead leaks the whole Chrome tree: the process holds its profile's
-# ``SingletonLock``, so a later launch on that profile fails with no usable diagnosis.
-# Measured on a leaked tree: killing the root alone took all ten of its processes with
-# it, because Chrome's zygotes and renderers die with the browser -- so signalling the
-# root is sufficient and no process-group handling is needed.
-#
-# Signals through zendriver's ``Popen`` handle rather than the raw pid. ``Popen.kill``
-# polls first and skips a process it has already reaped, which is what makes this safe
-# against the kernel recycling that pid onto an unrelated process while a wedged
-# ``stop()`` was still in flight.
-#
-# Cleanup reports nothing over its caller, so every failure is swallowed: this runs with
-# the real error in flight.
-def _kill_browser_process(browser: zendriver.Browser) -> None:
-    """SIGKILL a browser whose cooperative ``stop()`` did not complete."""
-    process: object = getattr(
-        browser,
-        "_process",
-        None,
-    )
-    if process is None:
-        return  # Never launched by us, or already cleared by a completed stop.
-    with contextlib.suppress(OSError):
-        cast(_KillableProcess, process).kill()
 
 
 def _fetch_browser_args(
@@ -706,33 +710,9 @@ def _devtools_port(
         return None
 
 
-def _request_pool_release(profile_dir: Path) -> None:
-    """Ask another process's browser pool to release ``profile_dir``."""
-    address = _control_address(profile_dir)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(10)
-    try:
-        client.connect(address)
-        client.sendall(b"release\n")
-        # EOF is the acknowledgement: the handler closes only after the release
-        # callback returns, including graceful browser and loop shutdown.
-        if client.recv(64) != b"":
-            raise RuntimeError("Zendriver browser pool returned an invalid response.")
-    except ConnectionRefusedError:
-        if not address.startswith("\0"):
-            Path(address).unlink(missing_ok=True)
-    except FileNotFoundError:
-        pass
-    finally:
-        client.close()
-    # Another process can leave a stale control listener that acknowledges this
-    # profile without owning its Chrome. Verify and close the actual owner.
-    _close_orphan_browser(profile_dir)
-
-
 # The single pooled browser manager, built once on first browser fetch. A
-# deliberate module singleton: it owns a live loop thread and open Chrome
-# processes -- shared runtime resources, not a tunable.
+# deliberate module singleton: it owns a live loop thread and DevTools
+# connections -- shared runtime resources, not a tunable.
 
 _pool_singleton: _BrowserPool | None = None
 _pool_lock = threading.Lock()
@@ -746,7 +726,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        prog="fetch-zendriver",
+        prog="zendriver",
         description=(
             "Open a URL in a headed Chrome on the zendriver backend's dedicated "
             "profile -- the same profile the headless "
@@ -761,9 +741,9 @@ def main() -> int:
         # same line the export draws by withholding the learned-domain roster.
         epilog=(
             "Examples:\n"
-            "  fetch-zendriver https://the-site-that-failed.example/\n"
-            "  fetch-zendriver https://login.example/  # seat a session cookie\n"
-            "  fetch-zendriver # opens blank; navigate by hand"
+            "  zendriver https://the-site-that-failed.example/\n"
+            "  zendriver https://login.example/  # seat a session cookie\n"
+            "  zendriver # opens blank; navigate by hand"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -790,11 +770,15 @@ def _add_arguments(parser: ArgumentParser) -> None:
     )
 
 
-async def _open_instance(url: str, profile_dir: Path) -> None:
-    """Open a headed browser, navigate to ``url``, and block until it is closed."""
-    browser = await _launch_browser(profile_dir, headless=False)
+# Blocks until the window is closed, after opening a tab per challenge-locked site.
+async def _open_instance(url: str, browser: zendriver.Browser) -> set[str]:
+    """Navigate the headed ``browser`` to ``url``; return the hosts the user loaded."""
+    visited = _watch_visits(browser)
     try:
-        await _navigate_tab(browser, url)
+        await _navigate_tab(browser, url, blank="about:blank")
+        for locked in challenged_urls():
+            if locked != url:
+                await _open_locked(browser, locked)
         # Block until the user closes the window (Chrome exits, so the browser reports
         # stopped). Polled, not event-driven: the window-closed signal is Chrome's
         # process exit, which zendriver exposes only as the polled ``stopped`` flag.
@@ -803,6 +787,67 @@ async def _open_instance(url: str, profile_dir: Path) -> None:
     except BaseException:
         await _stopped(browser)
         raise
+    return visited
+
+
+# One tab that will not load must not take the window, and the user's other tabs,
+# down with it.
+async def _open_locked(browser: zendriver.Browser, url: str) -> None:
+    """Open a challenge-locked site in its own tab of the headed window."""
+    try:
+        await _navigate_tab(browser, url, blank="about:blank")
+    except Exception:
+        logger.warning("could not open locked site %s", url, exc_info=True)
+
+
+# Agents' fetches run as tabs of this same window, and their loads must not count as
+# the user's: a blocked agent fetch would otherwise unlock the site that blocked it.
+# Every agent tab is born at :data:`_AGENT_TAB`, and a tab one of them opens is an
+# agent's too. Measured: an operator connection sees each agent tab's creation at that
+# URL, then every page it commits.
+def _watch_visits(browser: zendriver.Browser) -> set[str]:
+    """Lift the lock of each site the user loads; return the set of those hosts."""
+    agent_tabs: set[str] = set()
+    current: dict[str, str] = {}
+    visited: set[str] = set()
+
+    async def on_target(
+        event: zendriver.cdp.target.TargetCreated
+        | zendriver.cdp.target.TargetInfoChanged,
+        *_unused: object,
+    ) -> None:
+        info = event.target_info
+        if info.type_ != "page" or info.target_id in agent_tabs:
+            return
+        if info.url == _AGENT_TAB or info.opener_id in agent_tabs:
+            agent_tabs.add(info.target_id)
+            return
+        # A load re-fires this event as its title changes; only a new URL is a visit.
+        if current.get(info.target_id) == info.url:
+            return
+        current[info.target_id] = info.url
+        parsed = urlparse(info.url)
+        host = parsed.hostname or ""
+        if parsed.scheme in ("http", "https") and host:
+            visited.add(host)
+            await asyncio.to_thread(clear_host, host)
+
+    connection = browser.connection
+    if connection is None:
+        raise BrowserUnavailableError("The headed Chrome has no DevTools connection.")
+    # Cast for the same reason as in :func:`_main_frame_navigations`.
+    register = cast(
+        Callable[[type[object], Callable[..., object]], None],
+        connection.add_handler,
+    )
+    register(zendriver.cdp.target.TargetCreated, on_target)
+    register(zendriver.cdp.target.TargetInfoChanged, on_target)
+    return visited
+
+
+# The blank page each agent fetch's tab opens at; the fragment marks the tab as an
+# agent's for :func:`_watch_visits` and never reaches the network.
+_AGENT_TAB: Final = "about:blank#wesearch-agent"
 
 
 # ``Browser.stop`` awaits ``connection.send(cdp.browser.close())`` with no ceiling; its
@@ -844,9 +889,10 @@ async def _navigate_tab(
     trust: Trust = "untrusted",
     max_redirects: int = 10,
     on_redirect: Callable[[str], None] | None = None,
+    blank: str = _AGENT_TAB,
 ) -> zendriver.Tab:
     """Open a blank tab, arm the per-request guard, apply headers, navigate."""
-    tab = await browser.get("about:blank", new_tab=True)
+    tab = await browser.get(blank, new_tab=True)
     try:
         await _guard_requests(
             tab,
@@ -1284,7 +1330,7 @@ async def _settled_content(tab: zendriver.Tab, *, budget_sec: float) -> str:
 
 
 # Each fetch runs in its OWN tab that is CLOSED when the fetch returns. The Chrome
-# process stays warm in the pool (fast reuse), but the tab -- which holds the scraped
+# process stays warm and shared (fast reuse), but the tab -- which holds the scraped
 # page's DOM, JS heap, and images -- is the unit of memory teardown, so a sequence of
 # fetches does not accumulate resident pages. A per-fetch tab also isolates concurrent
 # fetches sharing the one browser.
@@ -1297,7 +1343,6 @@ async def _navigate(
     url: str,
     *,
     profile_dir: Path,
-    egress: str,
     timeout_sec: float,
     headless: bool,
     headers: dict[str, str] | None = None,
@@ -1306,9 +1351,9 @@ async def _navigate(
     max_redirects: int = 10,
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
-    """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies."""
+    """Drive the shared browser to ``url`` in a fresh tab; harvest body + cookies."""
     async with asyncio.timeout(timeout_sec):
-        browser = await _pool().browser(egress, profile_dir, headless=headless)
+        browser = await _pool().browser(profile_dir, headless=headless)
         if seeded := cookies or {}:
             await browser.cookies.set_all(
                 [
@@ -1379,15 +1424,11 @@ async def _domain_cookies(browser: zendriver.Browser, url: str) -> dict[str, str
     return jar
 
 
-# Registers teardown WITH the pool that needs it, on the one path that can create one. A
-# browser is ~70 MB across ~17 processes and nothing else ever closes one, so a process
-# that exits without this leaves every browser it opened resident: measured at 378
-# processes holding 27.5 GiB, 225 of them older than the session that spawned them.
-#
-# ``atexit`` and not a parent-death signal, because the exit that leaked was an ORDINARY
-# one -- pytest finished normally. It fires here under plain pytest and under `xdist
-# -n=2` (both measured), and can still drive the pool's daemon loop thread, which is
-# alive until interpreter teardown.
+# Registers disconnect WITH the pool that needs it, on the one path that can create one,
+# so a process closes its websocket before the interpreter tears the loop thread down.
+# The shared Chrome is deliberately NOT stopped here: one Chrome per profile serves the
+# whole host, which is what bounds the browser count -- a Chrome per process once left
+# 378 processes holding 27.5 GiB.
 def _pool() -> _BrowserPool:
     """Return the process-wide browser pool, creating it once."""
     global _pool_singleton  # noqa: PLW0603 -- memoize the shared pool.
@@ -1408,6 +1449,134 @@ class _KillableProcess(Protocol):
     """The private process handle slice used during browser cleanup."""
 
     def kill(self) -> None: ...
+
+
+async def _close_browser_on_port(port: int) -> None:
+    browser = await zendriver.start(host="127.0.0.1", port=port)
+    await browser.stop()
+
+
+def _close_shared_browser(profile_dir: Path) -> None:
+    """Close the shared Chrome on ``profile_dir``, if one is running."""
+    port = _devtools_port(profile_dir)
+    if port is None:
+        return
+    try:
+        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+    except OSError:
+        return
+    connection.close()
+    asyncio.run(_close_browser_on_port(port))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            connection = socket.create_connection(("127.0.0.1", port), timeout=0.1)
+        except OSError:
+            return
+        connection.close()
+        time.sleep(0.05)
+    # A capability condition, not a fetch fault: it blocks every later browser
+    # fetch, so it must be the error such callers already catch.
+    raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
+
+
+# Fetches never use this: they attach to the detached shared Chrome (see
+# :func:`_shared_browser`). The operator's window is owned so the CLI can block on it,
+# and while it is open, fetches attach to it instead.
+async def _launch_browser(
+    profile_dir: Path,
+    *,
+    headless: bool,
+) -> zendriver.Browser:
+    """Launch a Chrome THIS process owns on the profile (the headed operator window)."""
+    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
+    _tolerate_late_cdp_replies()
+    # Headed too, not just headless: an instance answering for
+    # ``com.google.Chrome`` takes the operator's links either way, and one
+    # rule is easier to keep true than a per-mode one.
+    executable = await asyncio.to_thread(_fetch_browser)
+    try:
+        return await zendriver.start(
+            zendriver.Config(
+                headless=headless,
+                user_data_dir=str(profile_dir),
+                # Sandboxed unless we are root.
+                sandbox=os.geteuid() != 0,
+                browser_executable_path=executable,
+                browser_args=_fetch_browser_args(executable),
+                # ``zendriver`` retries the DevTools connection ``max_tries`` times,
+                # each bounded by ``timeout``; the product is the launch's dead
+                # time when Chrome cannot connect. Healthy Chrome exposes
+                # DevTools in ~0.3s, so 0.5s clears it with margin while 6 tries
+                # cap a dead-browser launch at 3s -- a fast skip rather than the
+                # default 10x1.0s=10s hang that stacked past live-test timeouts.
+                browser_connection_timeout=0.5,
+                browser_connection_max_tries=6,
+            ),
+        )
+    except Exception as error:
+        # ``zendriver`` raises a bare ``Exception`` when Chrome cannot start or the
+        # DevTools connection never comes up. Re-raise it typed so callers can
+        # tell "no usable browser here" apart from a fetch/parse failure.
+        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
+
+
+# Abandoning it instead leaks the whole Chrome tree: the process holds its profile's
+# ``SingletonLock``, so a later launch on that profile fails with no usable diagnosis.
+# Measured on a leaked tree: killing the root alone took all ten of its processes with
+# it, because Chrome's zygotes and renderers die with the browser -- so signalling the
+# root is sufficient and no process-group handling is needed.
+#
+# Signals through zendriver's ``Popen`` handle rather than the raw pid. ``Popen.kill``
+# polls first and skips a process it has already reaped, which is what makes this safe
+# against the kernel recycling that pid onto an unrelated process while a wedged
+# ``stop()`` was still in flight.
+#
+# Cleanup reports nothing over its caller, so every failure is swallowed: this runs with
+# the real error in flight.
+def _kill_browser_process(browser: zendriver.Browser) -> None:
+    """SIGKILL a browser whose cooperative ``stop()`` did not complete."""
+    process: object = getattr(
+        browser,
+        "_process",
+        None,
+    )
+    if process is None:
+        return  # Never launched by us, or already cleared by a completed stop.
+    with contextlib.suppress(OSError):
+        cast(_KillableProcess, process).kill()
+
+
+# Chrome sends its own coherent identity; a caller's curl-era impersonation overrides it
+# tab-wide and makes Chrome contradict itself. Measured on Google: Chrome's own headers
+# got the 553 KB results page with 9 hits; the same tab with the Android GSA User-Agent
+# got the 61 KB enablejs shell with none. Credentials and API keys still pass.
+def _without_browser_identity(
+    headers: Mapping[str, str] | None,
+    *,
+    owned: frozenset[str] = frozenset(
+        {
+            "user-agent",
+            "accept",
+            "accept-language",
+            "accept-encoding",
+            "referer",
+            "upgrade-insecure-requests",
+            "priority",
+            "x-client-data",
+        },
+    ),
+    owned_prefixes: tuple[str, ...] = ("sec-", "x-browser-"),
+) -> dict[str, str] | None:
+    """Drop every header Chrome sends itself, keeping only what the caller adds."""
+    if headers is None:
+        return None
+    kept = {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in owned and not name.lower().startswith(owned_prefixes)
+    }
+    return kept or None
 
 
 if __name__ == "__main__":

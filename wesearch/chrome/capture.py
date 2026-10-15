@@ -115,6 +115,11 @@ def drive_chrome(
                 # can hold a seated login belongs to the zendriver backend,
                 # which launches its own Chrome.
                 "--password-store=basic",
+                # Host feature experiments change wire headers; pin Chrome146 defaults.
+                (
+                    "--disable-features=JXLImageFormat,ReduceAcceptLanguage,"
+                    "ReduceAcceptLanguageHTTP"
+                ),
                 *(["--no-sandbox"] if disable_sandbox else []),
                 *(["--ignore-certificate-errors"] if ignore_certificate_errors else []),
                 "--dump-dom",

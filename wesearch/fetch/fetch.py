@@ -2,9 +2,8 @@
 
 All HTTP in ``wesearch`` flows through :func:`fetch`. Sync, with
 transparent decompression and optional retry. The transport is curl_cffi
-(a Chrome-compatible TLS/HTTP-2 profile). A stdlib ``http.client`` path is
-retained as a reference implementation for validating the curl path, not as a
-runtime fallback -- curl_cffi is a hard dependency. Every call returns
+(a Chrome-compatible TLS/HTTP-2 profile); where curl_cffi cannot load, a stdlib
+``http.client`` transport stands in, with no TLS impersonation. Every call returns
 ``(body, session)``; the returned :class:`FetchSession` is a browsing identity
 you thread into the next call.
 
@@ -52,10 +51,12 @@ from wesearch.fetch.common import (
     origin,
     pinned_host,
 )
+from wesearch.fetch.gate import gated
 from wesearch.fetch.transport import transport_routing
 from wesearch.fetch.transport.curl import (
     close_curl_session,
     close_curl_sessions_except,
+    curl_available,
     curl_session,
     fetch_curl,
     seed_session_jar,
@@ -108,6 +109,9 @@ def resolve_transport(
 ) -> Transport:
     """Resolve ``auto`` to a concrete transport for this request.
 
+    Without a loadable ``curl_cffi`` the stdlib transport stands in for curl,
+    including as the first leg of ``curl-then-zendriver``.
+
     Args:
       transport: Transport.
       method: Method.
@@ -118,11 +122,12 @@ def resolve_transport(
       transport: The Transport.
 
     """
-    if transport != "auto":
-        return transport
-    if method != "GET" or raw_headers or has_body:
-        return "curl"
-    return "curl-then-zendriver"
+    if transport == "auto":
+        browsable = method == "GET" and not raw_headers and not has_body
+        transport = "curl-then-zendriver" if browsable else "curl"
+    if transport == "curl" and not curl_available():
+        return "stdlib"
+    return transport
 
 
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -270,14 +275,25 @@ def fetch(
 
     Raises:
       FetchError: On non-success HTTP status after exhausting retries.
+      CooldownError: When a recent block on this IP holds the site shut
+        (:mod:`wesearch.fetch.gate`); no request was sent.
       ValueError: On unsupported or corrupt Content-Encoding.
 
     """
-    return _Request(
-        url=url,
-        session=FetchSession() if session is None else session,
-        params=RequestParams() if request is None else request,
-    ).fetch()
+    params = RequestParams() if request is None else request
+    # The gate wraps the WHOLE fetch, so only its final outcome counts: a curl
+    # block the browser then clears is a success. A raw-header request skips the
+    # egress lookup: resolving the egress is itself one (``egress_ip``), and the
+    # identity layer it bypasses is the only other caller that would pay for it.
+    egress = (
+        last_known_egress_ip() if params.content.raw_headers else egress_ip(cache=True)
+    )
+    with gated(url, egress=egress or ""):
+        return _Request(
+            url=url,
+            session=FetchSession() if session is None else session,
+            params=params,
+        ).fetch()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -422,15 +438,15 @@ def last_known_egress_ip() -> str | None:
         return _last_egress_ip
 
 
-# Callbacks fired when the egress rolls, so any transport that pools live,
-# egress-keyed resources (open connections, running browsers) can invalidate
-# them WITHOUT fetch.py naming that transport. fetch.py tears down its OWN curl
-# pool inline; other backends (e.g. the zendriver browser pool) register here.
-# An observer registry, not a tunable.
-# The zendriver browser pool is egress-keyed live state (running Chromes), so a
-# roll invalidates it exactly like the curl pool. shutdown_browsers is a no-op
-# when no pool exists, so this subscription is free until a browser fetch runs.
-# Seeded here rather than registered at import so module scope stays declarative.
+# Callbacks fired when the egress rolls, so any transport that pools live
+# connections can drop them WITHOUT fetch.py naming that transport. fetch.py tears
+# down its OWN curl pool inline; other backends (e.g. the zendriver pool) register
+# here. An observer registry, not a tunable.
+# The zendriver pool holds DevTools connections, not Chromes, so a roll drops this
+# process's websocket and the next fetch reattaches; the shared Chrome follows the
+# OS route itself. shutdown_browsers is a no-op when no pool exists, so this
+# subscription is free until a browser fetch runs. Seeded here rather than
+# registered at import so module scope stays declarative.
 _on_egress_rotation: list[Callable[[str | None], None]] = [
     lambda _ip: zendriver.shutdown_browsers(),
 ]
@@ -897,7 +913,10 @@ def _fetch_with_identity(
                     request,
                     params=replace(
                         request.params,
-                        policy=replace(request.params.policy, transport="curl"),
+                        policy=replace(
+                            request.params.policy,
+                            transport=resolve_transport("curl"),
+                        ),
                     ),
                 ),
                 caller_headers=caller_headers,
@@ -1074,7 +1093,6 @@ def _send_via_zendriver(
     result = zendriver.fetch_zendriver(
         browser_url,
         profile_dir=data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
-        egress=egress or "",
         # Only the overall budget: ``connect_timeout_sec`` has no counterpart
         # here, because Chrome owns its own connection setup and exposes no
         # handshake ceiling. A caller that set a tight one to fail an

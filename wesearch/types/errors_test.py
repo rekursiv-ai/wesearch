@@ -69,8 +69,8 @@ class TestBotDetectionErrorConstruction:
         assert err.status == 403
         assert err.headers == {"server": "cloudflare", "cf-ray": "a1"}
         assert err.body == b"<title>Just a moment...</title>"
-        assert "fetch-zendriver https://x.com/doc" in str(err)
-        assert "close Chrome" in str(err)
+        assert "zendriver https://x.com/doc" in str(err)
+        assert "unlocks once its page loads" in str(err)
 
     def test_reason_only(self) -> None:
         err = PuzzleChallengeError("DuckDuckGo returned a challenge form.")
@@ -100,8 +100,8 @@ class TestGuidance:
 
     def test_recovery_quotes_url_and_names_cooldown(self) -> None:
         assert BotDetectionError.recovery("https://x.com/a path") == (
-            "Run `fetch-zendriver 'https://x.com/a path'`, solve the challenge, "
-            "then close Chrome to clear this domain's cooldown."
+            "Run `zendriver 'https://x.com/a path'` and solve the challenge; "
+            "the site unlocks once its page loads."
         )
 
     def test_explain_includes_url_and_guidance(self) -> None:
@@ -109,8 +109,8 @@ class TestGuidance:
         assert message == (
             "Fetch blocked: https://x.com/doc -- "
             f"{CloudflareChallengeError.guidance} "
-            "Run `fetch-zendriver https://x.com/doc`, solve the challenge, "
-            "then close Chrome to clear this domain's cooldown."
+            "Run `zendriver https://x.com/doc` and solve the challenge; "
+            "the site unlocks once its page loads."
         )
 
 

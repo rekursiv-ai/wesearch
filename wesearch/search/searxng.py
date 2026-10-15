@@ -257,10 +257,10 @@ def searxng(
                 timeout_sec=timeout_sec,
                 connect_timeout_sec=connect_timeout_sec,
             ),
-            # trust="internal": SEARXNG_URL names an instance the OPERATOR
-            # runs, which is exactly the private-network case the untrusted
-            # default refuses -- a loopback instance failed with "Refusing to
-            # fetch '127.0.0.1' (resolves to non-public address)".
+            # trust="internal": SEARXNG_URL names an instance the OPERATOR runs,
+            # which is exactly the private-network case the untrusted default
+            # refuses -- a loopback instance failed with "Refusing to fetch
+            # '127.0.0.1' (resolves to non-public address)".
             policy=PolicyParams(transport=transport, trust="internal"),
         ),
     )

@@ -8,7 +8,7 @@ from wesearch.paper.errors import (
     RateLimitError,
     translate_http_error,
 )
-from wesearch.types.errors import FetchError
+from wesearch.types.errors import CooldownError, FetchError
 
 
 def _err(status: int, body: bytes = b"x") -> FetchError:
@@ -28,6 +28,15 @@ class TestTranslateHttpError:
     def test_429_uses_generic_message_when_empty(self) -> None:
         out = translate_http_error(_err(429), backend="OpenAlex")
         assert str(out) == "OpenAlex rate limit hit; retry shortly."
+
+    def test_a_cooldown_is_a_rate_limit(self) -> None:
+        out = translate_http_error(
+            CooldownError("api.example is cooling down for 5s."),
+            backend="OpenAlex",
+            rate_limit_message="retry later",
+        )
+        assert isinstance(out, RateLimitError)
+        assert str(out) == "retry later"
 
     def test_404_is_not_found_when_policy_on(self) -> None:
         out = translate_http_error(_err(404), backend="Semantic Scholar")

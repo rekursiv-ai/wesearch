@@ -1,11 +1,10 @@
 """Semantic Scholar backend for :mod:`wesearch.paper`.
 
 Wraps the S2 Graph API: paper search, metadata (single + batched), the
-reference/citation graph, and author search / metadata / papers. Every request
-is paced through the shared per-source cross-process gate
-(:func:`wesearch.ratelimit.cross_process_limiter`) and retries a 429 with the
-exponential backoff S2 requires, recording the backoff into the shared cooldown
-so concurrent holders of the key wait together rather than each re-hammering.
+reference/citation graph, and author search / metadata / papers. Pacing and
+the shared 429 lock are :func:`wesearch.fetch.fetch`'s, keyed on S2's host
+(:mod:`wesearch.fetch.gate`); a 429 is retried with the backoff S2 asks for
+through fetch's own retry loop.
 
 Sync by design (the whole library is): a coroutine call site lifts these into a
 thread with ``asyncio.to_thread``. Functions return parsed records or raise a
@@ -34,7 +33,6 @@ from wesearch.paper import paginate as paper_paginate
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
 from wesearch.paper.paginate import Cursor, Page
-from wesearch.ratelimit import cross_process_limiter
 from wesearch.types.errors import FetchError
 
 
@@ -60,16 +58,12 @@ __all__ = [
 # them (NOT module state); a caller overrides any knob through the signature.
 # Named here in prose so the rationale lives once:
 #   base="https://api.semanticscholar.org/graph/v1" -- S2 Graph API base URL.
-#   source="s2" -- rate-limit gate key
-#     (see :func:`wesearch.ratelimit.cross_process_limiter`). Every holder of the
-#     S2 budget must pass the same key to share one gate.
 #   timeout_sec=10.0 -- healthy S2 latency is sub-second to a few seconds even
 #     for a 100-item page; 10s clears the slow tail (batch POST, deep
 #     pagination) while still bounding a silent hang when S2 is wedged.
-#   max_retries=2 -- paper lookups are interactive: a hard-throttled key must
-#     surface in seconds, so two retries (backoff 1s then 2s = 3s total) honor
-#     S2's required backoff while staying interactive.
-#   backoff_base_sec=1.0 -- base of the exponential 429 backoff (base*2**attempt).
+#   retries=2 -- paper lookups are interactive: a hard-throttled key must
+#     surface in seconds, so two retries (fetch's exponential backoff, or S2's
+#     own Retry-After) honor S2's required backoff while staying interactive.
 #   page_rows=1000 -- list-endpoint page size (refs/cites/author-papers): large
 #     to gather a given number of matches in the fewest gated calls. S2 caps an
 #     over-large request and signals its depth ceiling with a 400, which the
@@ -77,9 +71,6 @@ __all__ = [
 #   search_page_max=100 -- /paper/search page-size ceiling: S2 rejects a search
 #     limit above 100 with a 400. Distinct from page_rows (list endpoints allow
 #     a far larger page).
-#   interval_sec=1.0 -- minimum seconds between requests. S2's authenticated
-#     tier is one request/second cumulative across every endpoint and holder of
-#     the key.
 
 
 # API field selectors -- fixed contracts, not tunables. Refs/cites endpoints
@@ -117,23 +108,17 @@ def get(
     params: dict[str, str | int],
     *,
     base: str = "https://api.semanticscholar.org/graph/v1",
-    source: str = "s2",
-    interval_sec: float = 1.0,
-    max_retries: int = 2,
-    backoff_base_sec: float = 1.0,
+    retries: int = 2,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
 ) -> dict[str, MutablePlainTree]:
-    """GET an S2 Graph API path, rate-gated, with key injection and backoff.
+    """GET an S2 Graph API path, with key injection and 429 backoff.
 
     Args:
       path: API path relative to ``base`` (e.g. ``/paper/search``).
       params: Query parameters.
       base: S2 Graph API base URL.
-      source: Rate-limit gate key shared across all S2 callers.
-      interval_sec: Minimum seconds between gated requests.
-      max_retries: 429 retry budget before surfacing the throttle.
-      backoff_base_sec: Base of the exponential 429 backoff (``base*2**attempt``).
+      retries: 429 retry budget before surfacing the throttle.
       timeout_sec: Per-request HTTP timeout.
       transport: Retrieval transport forwarded to the HTTP layer.
 
@@ -144,19 +129,13 @@ def get(
       PaperError: On 404 / exhausted-429 / other HTTP failure or bad JSON.
 
     """
-    raw = _attempt(
-        lambda: fetch(
-            url=f"{base}{path}",
-            request=RequestParams(
-                content=ContentParams(params=params, headers=_headers()),
-                retry=RetryParams(timeout_sec=timeout_sec),
-                policy=PolicyParams(transport=transport),
-            ),
-        )[0],
-        source=source,
-        interval_sec=interval_sec,
-        max_retries=max_retries,
-        backoff_base_sec=backoff_base_sec,
+    raw = _send(
+        f"{base}{path}",
+        RequestParams(
+            content=ContentParams(params=params, headers=_headers()),
+            retry=RetryParams(retries=retries, timeout_sec=timeout_sec),
+            policy=PolicyParams(transport=transport),
+        ),
     )
     parsed = _loads(raw, path)
     if isinstance(parsed, list):
@@ -170,10 +149,7 @@ def batch(
     *,
     endpoint: Literal["paper", "author"] = "paper",
     base: str = "https://api.semanticscholar.org/graph/v1",
-    source: str = "s2",
-    interval_sec: float = 1.0,
-    max_retries: int = 2,
-    backoff_base_sec: float = 1.0,
+    retries: int = 2,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
 ) -> list[dict[str, MutablePlainTree] | None]:
@@ -191,10 +167,7 @@ def batch(
       fields: Comma-separated S2 field selector.
       endpoint: Which batch endpoint to hit.
       base: S2 Graph API base URL.
-      source: Rate-limit gate key shared across all S2 callers.
-      interval_sec: Minimum seconds between gated requests.
-      max_retries: 429 retry budget before surfacing the throttle.
-      backoff_base_sec: Base of the exponential 429 backoff (``base*2**attempt``).
+      retries: 429 retry budget before surfacing the throttle.
       timeout_sec: Per-request HTTP timeout.
       transport: Retrieval transport forwarded to the HTTP layer.
 
@@ -207,24 +180,18 @@ def batch(
     """
     if not ids:
         return []
-    raw = _attempt(
-        lambda: fetch(
-            url=f"{base}/{endpoint}/batch",
-            request=RequestParams(
-                content=ContentParams(
-                    method="POST",
-                    params={"fields": fields},
-                    json={"ids": ids},
-                    headers=_headers(),
-                ),
-                retry=RetryParams(timeout_sec=timeout_sec),
-                policy=PolicyParams(transport=transport),
+    raw = _send(
+        f"{base}/{endpoint}/batch",
+        RequestParams(
+            content=ContentParams(
+                method="POST",
+                params={"fields": fields},
+                json={"ids": ids},
+                headers=_headers(),
             ),
-        )[0],
-        source=source,
-        interval_sec=interval_sec,
-        max_retries=max_retries,
-        backoff_base_sec=backoff_base_sec,
+            retry=RetryParams(retries=retries, timeout_sec=timeout_sec),
+            policy=PolicyParams(transport=transport),
+        ),
     )
     result = _loads(raw, f"/{endpoint}/batch")
     if not isinstance(result, list):
@@ -456,42 +423,23 @@ def _headers() -> dict[str, str]:
     return headers
 
 
-def _attempt(
-    do_fetch: Callable[[], bytes],
-    *,
-    source: str = "s2",
-    interval_sec: float = 1.0,
-    max_retries: int = 2,
-    backoff_base_sec: float = 1.0,
-) -> bytes:
-    """Run one gated S2 request with 429 backoff; return bytes or raise."""
-    limiter = cross_process_limiter(source, per_seconds=interval_sec)
-    for attempt in range(max_retries + 1):
-        limiter.acquire()
-        try:
-            return do_fetch()
-        except FetchError as e:
-            if e.status == 429 and attempt < max_retries:
-                # Record the backoff into the shared cooldown so the next
-                # iteration's gate wait IS the backoff and concurrent requesters
-                # share one window rather than each rediscovering the throttle.
-                limiter.trigger_cooldown(backoff_base_sec * 2**attempt)
-                continue
-            raise translate_http_error(
-                e,
-                backend="Semantic Scholar",
-                rate_limit_message=(
-                    "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
-                    "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
-                ),
-            ) from e
-        except (TimeoutError, OSError) as e:
-            raise BackendError(
-                f"Semantic Scholar request failed (timeout or connection error): {e}",
-            ) from e
-    raise AssertionError(  # pragma: no cover -- loop either returns or raises
-        "_attempt retry loop exited without returning",
-    )
+def _send(url: str, request: RequestParams) -> bytes:
+    """Fetch one S2 request; map a transport failure to a :class:`PaperError`."""
+    try:
+        return fetch(url, request=request)[0]
+    except FetchError as e:
+        raise translate_http_error(
+            e,
+            backend="Semantic Scholar",
+            rate_limit_message=(
+                "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
+                "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
+            ),
+        ) from e
+    except (TimeoutError, OSError) as e:
+        raise BackendError(
+            f"Semantic Scholar request failed (timeout or connection error): {e}",
+        ) from e
 
 
 def _paginate(

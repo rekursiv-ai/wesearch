@@ -28,9 +28,15 @@ else:
     bs4 = lazy_import("bs4")
 
 
-# Internal builds keep extra backends; public exports keep only DuckDuckGo.
-_BACKEND_NAMES = Literal["duckduckgo", "searxng"]
-DEFAULT_SEARCH_BACKEND: Final[SearchBackends] = "duckduckgo"
+# The order an unnamed backend is tried in: the free engines first, Brave last
+# because it bills per request. A backend missing its configuration (key, URL) is
+# skipped rather than failed.
+_BACKEND_NAMES = Literal["brave", "duckduckgo", "searxng"]
+DEFAULT_SEARCH_CHAIN: Final[tuple[SearchBackends, ...]] = (
+    "duckduckgo",
+    "searxng",
+    "brave",
+)
 SearchBackends: TypeAlias = _BACKEND_NAMES  # noqa: UP040 -- The runtime get_args() consumer requires a typing TypeAlias here.
 
 

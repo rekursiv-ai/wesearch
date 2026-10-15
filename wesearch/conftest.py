@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from wesearch.fetch.transport.curl import close_curl_sessions_except
-from wesearch.fetch.transport.zendriver import shutdown_browsers
+from wesearch.fetch.transport.zendriver import (
+    close_launched_browsers,
+    shutdown_browsers,
+)
 from wesearch.lib.testing.resources import (
     isolate_user_dirs,
     pytest_collection_modifyitems,
@@ -39,15 +42,16 @@ __all__ = [
 
 @pytest.fixture(scope="module", autouse=True)
 def close_pooled_browsers() -> Iterator[None]:
-    """Close every pooled Chrome when the module that opened one finishes.
+    """Disconnect from, and reap, every Chrome a test module started.
 
-    The pool keeps browsers warm on purpose, so nothing else closes one.
-    MODULE scope, not session: session scope reaps them only after every later
-    test has run beside them, and 22 resident browsers starved a sibling suite
-    of memory. ``zendriver._pool`` covers process exit via ``atexit``.
+    Production leaves the shared Chrome running for the next process; a test
+    run must not, or each isolated profile leaves one behind. MODULE scope, not
+    session: session scope reaps them only after every later test has run
+    beside them, and 22 resident browsers starved a sibling suite of memory.
     """
     yield
     shutdown_browsers()
+    close_launched_browsers()
 
 
 @pytest.fixture(scope="module", autouse=True)

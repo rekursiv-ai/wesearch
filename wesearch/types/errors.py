@@ -8,6 +8,7 @@ import shlex
 __all__ = [
     "BotDetectionError",
     "CloudflareChallengeError",
+    "CooldownError",
     "FetchError",
     "GoogleJavascriptRequiredError",
     "GoogleSorryError",
@@ -82,8 +83,8 @@ class BotDetectionError(FetchError):
 
         """
         return (
-            f"Run `fetch-zendriver {shlex.quote(url)}`, solve the challenge, "
-            "then close Chrome to clear this domain's cooldown."
+            f"Run `zendriver {shlex.quote(url)}` and solve the challenge; "
+            "the site unlocks once its page loads."
         )
 
     @classmethod
@@ -127,6 +128,15 @@ class GoogleSorryError(BotDetectionError):
         "Google served its /sorry page after classifying this IP's traffic as "
         "automated. Rotate the egress IP; it typically clears on its own within "
         "a few hours to ~a day."
+    )
+
+
+class CooldownError(BotDetectionError):
+    """A recent block on this IP holds the site shut; no request was sent."""
+
+    guidance = (
+        "A recent block on this IP holds the site shut while it recovers. Retry "
+        "after the cooldown, or clear it by loading the page in a real browser."
     )
 
 

@@ -12,29 +12,11 @@ import pytest
 from wesearch.fetch import FetchSession, RequestParams
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
 from wesearch.paper.providers import openalex
-from wesearch.types.errors import FetchError
+from wesearch.types.errors import CooldownError, FetchError
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from treekle import MutablePlainTree
-
-
-@pytest.fixture(autouse=True)
-def mock_limiter() -> Iterator[_FakeLimiter]:
-    """Inject a fake shared gate so the client never waits on real time.
-
-    Yields:
-      limiter: The fake gate, exposing failures requested by the test.
-
-    """
-    limiter = _FakeLimiter()
-    with patch(
-        "wesearch.paper.providers.openalex.cross_process_limiter",
-        return_value=limiter,
-    ):
-        yield limiter
 
 
 class TestSearch:
@@ -256,17 +238,15 @@ class TestRequestErrors:
                 open_access_only=False,
             )
 
-    def test_limiter_failure_raises_backend_error(self) -> None:
-        # The gate is a lock file; a raw OSError escapes every caller's
-        # PaperError handler and defeats fused degradation the same way.
-        limiter = _FakeLimiter()
-        limiter.error = OSError("read-only file system")
+    def test_a_cooldown_raises_rate_limit_error(self) -> None:
+        # The fetch gate refuses while OpenAlex is locked; that must surface as a
+        # PaperError so a fused search degrades to its other backends.
         with (
             patch(
-                "wesearch.paper.providers.openalex.cross_process_limiter",
-                return_value=limiter,
+                "wesearch.paper.providers.openalex.fetch",
+                side_effect=CooldownError("api.openalex.org is cooling down."),
             ),
-            pytest.raises(BackendError, match="rate-limit gate"),
+            pytest.raises(RateLimitError),
         ):
             openalex.search(
                 "x",
@@ -751,17 +731,6 @@ def _params(fetch: _RecordingFetch) -> dict[str, str | int]:
     return params
 
 
-class _FakeLimiter:
-    """Records gate calls and can replay a requested filesystem failure."""
-
-    def __init__(self) -> None:
-        self.error: OSError | None = None
-
-    def acquire(self) -> None:
-        if self.error is not None:
-            raise self.error
-
-
 class _RecordingFetch:
     """Replays typed responses or exceptions and records each request."""
 
@@ -803,8 +772,6 @@ class TestExactInternals:
                 "/works",
                 {"filter": "x"},
                 base="https://base",
-                source="src",
-                interval_sec=0.25,
                 timeout_sec=3.5,
                 transport="curl",
             )
@@ -817,20 +784,13 @@ class TestExactInternals:
         assert fetch.requests[0].retry.timeout_sec == 3.5
         assert fetch.requests[0].policy.transport == "curl"
 
-    def test_get_defaults_and_gate_arguments_are_exact(self) -> None:
-        gate = MagicMock()
+    def test_get_defaults_are_exact(self) -> None:
         fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
         with (
             patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
-            patch(
-                "wesearch.paper.providers.openalex.cross_process_limiter",
-                return_value=gate,
-            ) as limiter,
             patch("wesearch.paper.providers.openalex.fetch", fetch),
         ):
             assert openalex._get("/works", {"filter": "x"}) == {"ok": True}
-        limiter.assert_called_once_with("openalex", per_seconds=0.1)
-        gate.acquire.assert_called_once_with()
         assert fetch.urls == ["https://api.openalex.org/works"]
         request = fetch.requests[0]
         assert request.content.params == {"filter": "x"}
@@ -864,22 +824,6 @@ class TestExactInternals:
             pytest.raises(RateLimitError, match=r"detail"),
         ):
             openalex._get("/works", {})
-
-    def test_get_gate_failure_has_status_zero(self) -> None:
-        gate = MagicMock()
-        gate.acquire.side_effect = OSError("locked")
-        with (
-            patch(
-                "wesearch.paper.providers.openalex.cross_process_limiter",
-                return_value=gate,
-            ),
-            pytest.raises(
-                BackendError,
-                match=r"^OpenAlex rate-limit gate failed: locked$",
-            ) as caught,
-        ):
-            openalex._get("/works", {})
-        assert caught.value.status == 0
 
     def test_get_timeout_message_is_exact(self) -> None:
         with (

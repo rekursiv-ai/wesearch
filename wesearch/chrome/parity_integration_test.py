@@ -68,11 +68,8 @@ fetch_mod = importlib.import_module("wesearch.fetch.fetch")
 # real Chrome does not. Dropped from the curl comparison (see module docstring).
 _HTTP2_ONLY = frozenset({"priority"})
 
-# Header values that must match the local Chrome EXACTLY: they encode the
-# navigation intent, not the browser build, so a real Chrome sends these
-# identically regardless of version or platform. Measured against a live
-# Chrome 151 on Linux vs our impersonated Chrome 146 on macOS -- every one
-# agreed. A divergence here is drift, not configuration.
+# Compare navigation values exactly after drive_chrome pins JPEG XL off:
+# codec support changes Accept across builds, while our target is Chrome146.
 _INTENT_VALUES = (
     "accept",
     "accept-encoding",
@@ -166,9 +163,8 @@ def test_fetch_wire_request_matches_chrome(
         f"wire header set/order diverged from Chrome (transport={backend}).\n"
         f"  chrome: {chrome}\n  ours:   {ours}"
     )
-    # Names alone let a header carry the wrong VALUE and still pass. The
-    # intent-bearing values do not vary by browser build, so they must match
-    # the live Chrome exactly.
+    # Names alone let a header carry the wrong value and still pass.
+    # Codec features are pinned by drive_chrome for the exact comparison.
     ours_lines = _drop_lines(oracle.captured_lines(), omit)
     for name in _INTENT_VALUES:
         assert _value(ours_lines, name) == _value(chrome_lines, name), (

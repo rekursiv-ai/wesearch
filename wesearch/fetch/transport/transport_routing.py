@@ -7,7 +7,9 @@ from typing import Final
 
 import fcntl
 import logging
+import math
 import os
+import time
 
 from wesearch.lib.userdirs import state_dir
 
@@ -24,7 +26,11 @@ __all__ = [
 ]
 
 
-def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
+def zendriver_domains(
+    *,
+    path: Path | None = None,
+    ttl_sec: float = 7 * 24 * 3600.0,
+) -> frozenset[str]:
     """Return domains observed to bot-wall the header transports.
 
     The recorded fact is that CURL was walled, not that the browser then
@@ -34,28 +40,49 @@ def zendriver_domains(*, path: Path | None = None) -> frozenset[str]:
     when the browser also fails. Reading this as "the browser works here" is
     what makes the entry look like poison rather than a routing fact.
 
+    A learned entry expires after ``ttl_sec``: one block from a burned egress
+    pinned the domain to the single contended Chrome forever, long after the
+    wall had lifted. The bundled list never expires; a learned entry with no
+    timestamp predates expiry and reads as already expired.
+
     Args:
       path: Domain-list path. Defaults to the bundled list plus the per-user
         ``zendriver-domains.txt`` under the wesearch state directory.
+      ttl_sec: Seconds a learned entry routes to Zendriver after it was written.
 
     Returns:
       domains: Normalized domains currently routed directly to Zendriver.
 
     """
+    cutoff = time.time() - ttl_sec
     if path is not None:
-        return _read_domains(path)
-    return _read_domains(_CWD / "zendriver-domains.txt") | _read_domains(
-        state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt",
+        return _read_domains(path, cutoff=cutoff)
+    return _read_domains(_CWD / "zendriver-domains.txt", cutoff=-math.inf) | (
+        _read_domains(
+            state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt",
+            cutoff=cutoff,
+        )
     )
 
 
-def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
+def remember_zendriver_domain(
+    domain: str,
+    *,
+    path: Path | None = None,
+    never_route: frozenset[str] = frozenset({"r.jina.ai"}),
+) -> None:
     """Atomically add ``domain`` to the cross-process Zendriver domain list.
+
+    Each line is ``domain<TAB>unix-time``; a repeat refreshes the time, so a
+    domain that keeps walling curl keeps its route.
 
     Args:
       domain: DNS hostname observed to bot-wall the header transports.
       path: Domain-list path. Defaults to the per-user
         ``zendriver-domains.txt`` under the wesearch state directory.
+      never_route: Hosts never learned. The reader proxy is itself the fallback
+        for a walled page; routing it through the browser makes the fallback
+        depend on the resource it exists to avoid.
 
     Raises:
       ValueError: If ``domain`` is empty or not one line.
@@ -64,6 +91,8 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
     normalized = domain.strip().casefold()
     if not normalized or "\n" in normalized or "\r" in normalized:
         raise ValueError(f"Invalid Zendriver domain: {domain!r}.")
+    if normalized in never_route:
+        return
     target = (
         state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
         if path is None
@@ -93,13 +122,13 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
                 target,
             )
             existing = ""
-        domains = {
-            value for line in existing.splitlines() if (value := _normalize(line))
-        }
-        if normalized in domains:
-            return
-        domains.add(normalized)
-        payload = "".join(f"{value}\n" for value in sorted(domains)).encode()
+        entries = dict(
+            entry for line in existing.splitlines() if (entry := _parse(line))
+        )
+        entries[normalized] = time.time()
+        payload = "".join(
+            f"{name}\t{stamp:.0f}\n" for name, stamp in sorted(entries.items())
+        ).encode()
         os.lseek(file_descriptor, 0, os.SEEK_SET)
         os.ftruncate(file_descriptor, 0)
         _write_all(file_descriptor, payload)
@@ -108,9 +137,16 @@ def remember_zendriver_domain(domain: str, *, path: Path | None = None) -> None:
         os.close(file_descriptor)
 
 
-def _normalize(line: str) -> str:
-    """Return the canonical (stripped, casefolded) form of one domain line."""
-    return line.strip().casefold()
+def _parse(line: str) -> tuple[str, float] | None:
+    """Return ``(domain, written_at)`` for one list line, or ``None`` if blank."""
+    name, _, stamp = line.partition("\t")
+    normalized = name.strip().casefold()
+    if not normalized:
+        return None
+    try:
+        return normalized, float(stamp)
+    except ValueError:
+        return normalized, 0.0
 
 
 def _read_all(file_descriptor: int) -> bytes:
@@ -133,7 +169,7 @@ def _write_all(file_descriptor: int, data: bytes) -> None:
 # The list is an optional, rebuildable cache on the per-fetch hot path, so a missing,
 # permission-denied, or corrupt (non-UTF-8) file degrades to no learned routing rather
 # than aborting every automatic fetch.
-def _read_domains(path: Path) -> frozenset[str]:
+def _read_domains(path: Path, *, cutoff: float) -> frozenset[str]:
     """Read one locked domain list, returning empty when absent or unreadable."""
     try:
         file_descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
@@ -159,5 +195,9 @@ def _read_domains(path: Path) -> frozenset[str]:
         logger.warning("Ignoring undecodable Zendriver domain list at %s.", path)
         return frozenset[str]()
     return frozenset(
-        normalized for line in text.splitlines() if (normalized := _normalize(line))
+        name
+        for line in text.splitlines()
+        if (entry := _parse(line)) is not None
+        for name, stamp in (entry,)
+        if stamp >= cutoff
     )

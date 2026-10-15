@@ -295,7 +295,7 @@ def test_searxng_public_request_forwards_parameters(
             timeout_sec=4,
             connect_timeout_sec=2,
             retries=3,
-            transport="stdlib",
+            transport="zendriver",
         )
     request = fetch_mock.call_args.kwargs["request"]
     assert isinstance(request, RequestParams)
@@ -303,7 +303,7 @@ def test_searxng_public_request_forwards_parameters(
     assert request.retry.retries == 3
     assert request.retry.timeout_sec == 4
     assert request.retry.connect_timeout_sec == 2
-    assert request.policy.transport == "stdlib"
+    assert request.policy.transport == "zendriver"
     assert request.policy.trust == "internal"
 
 

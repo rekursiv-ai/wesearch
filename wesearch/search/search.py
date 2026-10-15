@@ -1,13 +1,15 @@
 """The backend-agnostic entry point: :func:`search`.
 
-Dispatches to the backend named by the caller. When none is given, a
-non-general ``categories`` selects ``searxng`` -- the only backend that serves
-result tabs -- and anything else takes ``custom_types.DEFAULT_SEARCH_BACKEND``,
-a build-time constant, NOT an environment probe. Nothing here inspects
-``SEARXNG_URL``; asking for SearXNG is explicit. A category named ALONGSIDE a
-backend that cannot serve it raises rather than overriding the stated choice.
-The overloads exist so a ``categories`` argument narrows the return type to
-that category's record.
+A named backend is used alone. When none is given, a non-general
+``categories`` selects ``searxng`` -- the only backend that serves result tabs
+-- and anything else walks ``custom_types.DEFAULT_SEARCH_CHAIN`` in order,
+returning the first non-empty answer. A backend that fails, is cooling down
+after a block, or lacks its configuration (key, URL) hands over to the next;
+only when every one fails does the caller see an error, naming each. A
+category named ALONGSIDE a backend that cannot serve it raises rather than
+overriding the stated choice. Every answer passes through the host-wide cache
+(:mod:`.cache`). The overloads exist so a ``categories`` argument narrows the
+return type to that category's record.
 """
 
 from __future__ import annotations
@@ -17,10 +19,13 @@ from urllib import error
 
 import json
 import logging
+import sys
 
 from wesearch.fetch import Transport
+from wesearch.search.brave import brave
+from wesearch.search.cache import cached_search
 from wesearch.search.custom_types import (
-    DEFAULT_SEARCH_BACKEND,
+    DEFAULT_SEARCH_CHAIN,
     CodeResult,
     FileResult,
     ImageResult,
@@ -76,11 +81,12 @@ class SearchParamsSchema(Schema):
     backend = Field[SearchBackends](
         annotation=SearchBackends,
         # No default: an unnamed backend is RESOLVED by ``search`` -- a
-        # non-general category selects SearXNG, anything else takes the
-        # build's default. Naming one here would preempt that.
+        # non-general category selects SearXNG, anything else walks the
+        # fallback chain. Naming one here would preempt that.
         description=(
-            "Search backend. Omit to let a category choose, else this build's"
-            f' default ("{DEFAULT_SEARCH_BACKEND}").'
+            "Search backend. Omit to let a category choose, else try "
+            f"{', '.join(DEFAULT_SEARCH_CHAIN)} in order, skipping any that is "
+            "unconfigured, blocked, or empty."
         ),
     )
     categories = Field[SearxngCategory](
@@ -111,6 +117,7 @@ def search(
     *,
     categories: Literal["science"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[PaperResult]: ...
 
 
@@ -123,6 +130,7 @@ def search(
     *,
     categories: Literal["images"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[ImageResult]: ...
 
 
@@ -135,6 +143,7 @@ def search(
     *,
     categories: Literal["videos"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[VideoResult]: ...
 
 
@@ -147,6 +156,7 @@ def search(
     *,
     categories: Literal["news", "music"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[MediaResult]: ...
 
 
@@ -159,6 +169,7 @@ def search(
     *,
     categories: Literal["map"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[MapResult]: ...
 
 
@@ -171,6 +182,7 @@ def search(
     *,
     categories: Literal["it"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
 
@@ -183,6 +195,7 @@ def search(
     *,
     categories: Literal["files"],
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
 
@@ -195,6 +208,7 @@ def search(
     *,
     categories: SearxngCategory = ...,
     transport: Transport = ...,
+    cache_ttl_sec: float = ...,
 ) -> Sequence[SearchResult]: ...
 
 
@@ -206,45 +220,112 @@ def search(
     *,
     categories: SearxngCategory = "general",
     transport: Transport = "auto",
+    cache_ttl_sec: float = 3600.0,
 ) -> Sequence[SearxngResult]:
-    """Dispatch to the named search backend.
+    """Search one named backend, or walk the fallback chain when none is named.
 
     Args:
       query: Search query string.
-      backend: Backend name. Defaults to ``DEFAULT_SEARCH_BACKEND``.
+      backend: Backend name. ``None`` walks ``DEFAULT_SEARCH_CHAIN`` (or uses
+        SearXNG for a non-general category).
       num_results: Maximum results to return.
       headers: Optional override headers forwarded to the backend.
       categories: SearXNG result category; only the ``"searxng"`` backend
         honors a non-default value (the HTML-scraping backends serve general
         web results only). Defaults to ``"general"``.
       transport: Retrieval transport forwarded to the selected backend.
+      cache_ttl_sec: Seconds a cached answer stays valid; ``0`` bypasses the
+        host-wide cache (a probe that must see the backend as it is now).
 
     Returns:
       results: One typed record per hit. SearXNG categories with extra
         structure yield a category-specific :class:`SearchResult` subclass;
         all other paths yield plain :class:`SearchResult`.
 
+    Raises:
+      BotDetectionError: When a NAMED backend was bot-blocked; it carries the
+        recovery guidance.
+      SearchError: When the named backend, or every backend in the chain, failed.
+
     """
-    if backend is None:
-        # A non-general tab exists only on SearXNG, so asking for one IS asking
-        # for that backend when the caller named none. Resolved here rather than
-        # in each adapter: sagent forced it and the MCP server did not, so the
-        # same call raised on one surface and worked on the other -- and only in
-        # the public build, whose default backend is not SearXNG.
-        backend = "searxng" if categories != "general" else DEFAULT_SEARCH_BACKEND
-    if categories != "general" and backend != "searxng":
+    if categories != "general" and backend not in (None, "searxng"):
         # An EXPLICIT backend still errors. sagent used to overwrite it, so
         # ``backend="duckduckgo", categories="science"`` silently ran against
         # SearXNG -- a stated choice replaced without a word.
         raise ValueError(
             f"'categories' is only supported by the 'searxng' backend, not {backend!r}.",
         )
-    # Table dispatch, not an if-chain: a chain over a closed ``Literal``
-    # exhausts it, so its last test and the unknown-backend guard both become
-    # provably dead -- and at a DIFFERENT branch per build, since the export
-    # drops ``google``. ``Mapping.get`` returns ``V | None`` whatever the
-    # Literal's width, which is what keeps that guard reachable in both.
-    backends: Mapping[str, Callable[[], Sequence[SearxngResult]]] = {
+    if backend is not None:
+        chain: tuple[str, ...] = (backend,)
+    elif categories != "general":
+        # A non-general tab exists only on SearXNG, so asking for one IS asking
+        # for that backend.
+        chain = ("searxng",)
+    else:
+        chain = DEFAULT_SEARCH_CHAIN
+    runners = _runners(
+        query,
+        num_results=num_results,
+        headers=headers,
+        categories=categories,
+        transport=transport,
+    )
+    unknown = [name for name in chain if name not in runners]
+    if unknown:
+        raise ValueError(f"Unknown backend: {unknown[0]!r}")
+    failures: list[str] = []
+    for name in chain:
+        try:
+            results = cached_search(
+                {
+                    "backend": name,
+                    "query": query,
+                    "num_results": num_results,
+                    "categories": categories,
+                    "headers": headers or {},
+                },
+                runners[name],
+                ttl_sec=cache_ttl_sec,
+            )
+        except (BotDetectionError, SearchError):
+            # A named backend's own error already says what to do (solve a
+            # captcha, set SEARXNG_URL), so it propagates intact; inside the
+            # chain it is one more reason to move on.
+            if len(chain) == 1:
+                raise
+            failures.append(f"{name}: {sys.exception()}")
+            continue
+        except (
+            FetchError,
+            OSError,
+            TimeoutError,
+            error.URLError,
+            json.JSONDecodeError,
+        ) as e:
+            if len(chain) == 1:
+                raise SearchError(f"{name} search failed: {e}") from e
+            failures.append(f"{name}: {e}")
+            continue
+        if results or name == chain[-1]:
+            return results
+        failures.append(f"{name}: no results")
+    raise SearchError(f"every search backend failed: {'; '.join(failures)}")
+
+
+def _runners(
+    query: str,
+    *,
+    num_results: int,
+    headers: dict[str, str] | None,
+    categories: SearxngCategory,
+    transport: Transport,
+) -> Mapping[str, Callable[[], Sequence[SearxngResult]]]:
+    """Return one zero-argument call per backend, bound to this query."""
+    # A table rather than an if-chain: a chain over a closed ``Literal`` exhausts
+    # it, so the unknown-backend guard becomes provably dead -- at a DIFFERENT
+    # branch per build, since the export drops ``google``.
+    return {
+        "brave": lambda: brave(query, num_results, headers, transport=transport),
         "searxng": lambda: searxng(
             query,
             num_results,
@@ -259,22 +340,3 @@ def search(
             transport=transport,
         ),
     }
-    run = backends.get(backend)
-    if run is None:
-        raise ValueError(f"Unknown backend: {backend!r}")
-    try:
-        return run()
-    except BotDetectionError:
-        # A bot-detection block carries actionable, type-specific guidance
-        # (solve captcha / rotate IP). It is-a FetchError, so it MUST be caught
-        # before the generic handler below, or that handler would flatten it into
-        # a guidance-less SearchError. Propagate it intact.
-        raise
-    except (
-        FetchError,
-        OSError,
-        TimeoutError,
-        error.URLError,
-        json.JSONDecodeError,
-    ) as e:
-        raise SearchError(f"{backend} search failed: {e}") from e

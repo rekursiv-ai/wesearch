@@ -7,9 +7,8 @@ open-access filter for the science category, so those bounds are applied
 client-side here. Returns no backend total (SearXNG omits one), so ``total`` is
 the post-filter count.
 
-SearXNG's own HTTP timeout and (metasearch) pacing live in ``search.searxng``;
-there is no per-IP scrape budget to gate here, so this backend takes no
-:mod:`wesearch.ratelimit` gate.
+SearXNG's own HTTP timeout lives in ``search.searxng``; its pacing and block
+recovery are :func:`wesearch.fetch.fetch`'s, like every other backend's.
 """
 
 from __future__ import annotations

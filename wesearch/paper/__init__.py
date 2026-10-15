@@ -2,8 +2,8 @@
 
 The paper analogue of :mod:`wesearch.search.search`: sync, backend-agnostic
 functions over Semantic Scholar, OpenAlex, SearXNG, and (internal build only)
-Google Scholar. Per-source cross-process rate limiting is built in (each backend
-paces through :func:`wesearch.ratelimit.cross_process_limiter`). A coroutine call
+Google Scholar. Host-wide pacing and block recovery are built in, keyed per site by
+:func:`wesearch.fetch.fetch` (:mod:`wesearch.fetch.gate`). A coroutine call
 site lifts any function into a thread with ``asyncio.to_thread``.
 
 Import each name from the submodule that defines it (this package's

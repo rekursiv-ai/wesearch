@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, cast
 from urllib.parse import urlparse
 
+import functools
+import importlib
+import logging
 import threading
-
-from curl_cffi.requests.impersonate import BrowserTypeLiteral
-from curl_cffi.requests.session import HttpMethod
 
 from wesearch.fetch.challenge import classify_http_error
 from wesearch.fetch.common import (
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 
     from curl_cffi import requests as cc_requests
     from curl_cffi.requests import Response
+    from curl_cffi.requests.impersonate import BrowserTypeLiteral
+    from curl_cffi.requests.session import HttpMethod
 
     import curl_cffi
 
@@ -41,14 +43,37 @@ else:
     curl_cffi = lazy_import("curl_cffi")
 
 
+logger = logging.getLogger(__name__)
+
+
 __all__ = [
     "close_curl_session",
     "close_curl_sessions_except",
+    "curl_available",
     "curl_session",
     "fetch_curl",
     "seed_session_jar",
     "set_session_cookies",
 ]
+
+
+@functools.cache
+def curl_available() -> bool:
+    """Whether ``curl_cffi`` and its native library load on this host.
+
+    Cached: a failed native load does not heal within a process.
+
+    Returns:
+      available: ``True`` when the curl transport can run.
+
+    """
+    try:
+        importlib.import_module("curl_cffi.requests")
+    except ImportError:
+        logger.warning("curl_cffi is unavailable; fetching with the stdlib transport.")
+        return False
+    return True
+
 
 # Pool identity: egress, registrable domain, impersonation target, SSRF pin,
 # and the port that pin applies to. The pin participates because
@@ -129,7 +154,7 @@ def curl_session(
             session = cast(
                 "cc_requests.Session[Response]",
                 curl_cffi.requests.Session(
-                    impersonate=cast(BrowserTypeLiteral, impersonate),
+                    impersonate=cast("BrowserTypeLiteral", impersonate),
                     curl_options=options,
                 ),
             )
@@ -290,7 +315,7 @@ def fetch_curl(
         body=body,
         remaining=max_redirects,
     )
-    impers = cast(BrowserTypeLiteral, impersonate)
+    impers = cast("BrowserTypeLiteral", impersonate)
     # curl_cffi reads a (connect, read) pair; a bare float budgets both together.
     timeout = (
         timeout_sec
@@ -317,7 +342,7 @@ def fetch_curl(
                     ],
                 }
         try:
-            verb = cast(HttpMethod, loop.method)  # Curl types verb as a Literal.
+            verb = cast("HttpMethod", loop.method)  # Curl types verb as a Literal.
             resp = (
                 session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request TypedDict has no complete checker stubs.
                     verb,

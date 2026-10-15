@@ -252,6 +252,10 @@ class TestDriveChrome:
             "--incognito",
             argv[4],
             "--password-store=basic",
+            (
+                "--disable-features=JXLImageFormat,ReduceAcceptLanguage,"
+                "ReduceAcceptLanguageHTTP"
+            ),
             "--no-sandbox",
             "--ignore-certificate-errors",
             "--dump-dom",

@@ -352,7 +352,7 @@ class TestFetchCurlBackend:
                     policy=PolicyParams(transport="curl"),
                 ),
             )
-        second = _recorded_headers(mock_req)
+        second = from_plain(mock_req.call_args.kwargs["headers"], dict[str, str])
         assert second["Origin"] == "https://b.com"
 
     def test_simple_curl_rewrites_origin_on_cross_host_redirect(self) -> None:
@@ -372,7 +372,10 @@ class TestFetchCurlBackend:
                     content=ContentParams(method="POST", data={"x": "1"}),
                 ),
             )
-        second_headers = _recorded_headers(mock_req)
+        second_headers = from_plain(
+            mock_req.call_args.kwargs["headers"],
+            dict[str, str],
+        )
         assert second_headers.get("Origin") == "https://b.com"
 
     def test_pooled_curl_loads_caller_cookies_into_jar_not_header(self) -> None:
@@ -394,7 +397,10 @@ class TestFetchCurlBackend:
         kwargs = mock_req.call_args.kwargs
         # Cookie is in the jar, not the header, and cookies= kwarg is unset.
         assert {(c.name, c.value) for c in stub.cookies.jar} == {("CONSENT", "YES+")}
-        assert "Cookie" not in _recorded_headers(mock_req)
+        assert "Cookie" not in from_plain(
+            mock_req.call_args.kwargs["headers"],
+            dict[str, str],
+        )
         assert not kwargs.get("cookies")
 
     def test_case_variant_cookie_header_not_duplicated(self) -> None:
@@ -412,7 +418,7 @@ class TestFetchCurlBackend:
                     ),
                 ),
             )
-        sent = _recorded_headers(mock_req)
+        sent = from_plain(mock_req.call_args.kwargs["headers"], dict[str, str])
         cookie_keys = [k for k in sent if k.lower() == "cookie"]
         assert len(cookie_keys) == 1, f"duplicate cookie header keys: {cookie_keys}"
 
@@ -805,11 +811,6 @@ def _recorded_curl_options(mock_req: Mock) -> dict[object, object]:
     options = mock_req.call_args.kwargs.get("curl_options")
     assert isinstance(options, dict)
     return cast(dict[object, object], options)
-
-
-def _recorded_headers(mock_req: Mock) -> dict[str, str]:
-    """Return the typed headers mapping recorded by a request mock."""
-    return from_plain(mock_req.call_args.kwargs["headers"], dict[str, str])
 
 
 def test_curl_set_cookies_uses_all_set_cookie_headers() -> None:
@@ -1372,6 +1373,31 @@ def test_redirect_target_uses_status_and_source_url() -> None:
     )
     with pytest.raises(FetchError, match="302"):
         loop.follow(302, {}, on_response=None, on_redirect=None)
+
+
+def test_curl_is_available_where_it_imports() -> None:
+    curl.curl_available.cache_clear()
+    try:
+        assert curl.curl_available()
+    finally:
+        curl.curl_available.cache_clear()
+
+
+def test_curl_is_unavailable_where_its_native_library_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(name: str) -> object:
+        raise ImportError(name)
+
+    monkeypatch.setattr(importlib, "import_module", broken)
+    curl.curl_available.cache_clear()
+    try:
+        assert not curl.curl_available()
+        assert not curl.curl_available()
+    finally:
+        curl.curl_available.cache_clear()
+    assert caplog.text.count("curl_cffi is unavailable") == 1
 
 
 if __name__ == "__main__":
