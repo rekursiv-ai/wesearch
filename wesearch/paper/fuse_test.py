@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.fuse import _find, fuse, normalize_title
+from wesearch.paper.types import PaperRecord
 
 
 def _rec(title: str, *, doi: str = "", source: str = "s2") -> PaperRecord:

@@ -35,7 +35,7 @@ in the common case.
 
 ```python
 from wesearch.search.search import search
-from wesearch.fetch import RequestParams, Retry, fetch
+from wesearch.fetch import RequestParams, RetryParams, fetch
 from wesearch.scrape import get_element_content
 
 # Web search: walks DEFAULT_SEARCH_CHAIN; first non-empty answer wins
@@ -44,8 +44,8 @@ for r in hits:
     print(r.title, r.url)
 
 # Fetch + scrape
-body, _session = fetch(
-    "https://example.com", request=RequestParams(retry=Retry(timeout_sec=10))
+body = fetch(
+    "https://example.com", request=RequestParams(retry=RetryParams(timeout_sec=10))
 )
 title = get_element_content(body.decode("utf-8"), "h1")
 
@@ -70,22 +70,17 @@ nothing.
 wesearch/
 ├── types/           the vocabulary every layer shares; imports nothing internal
 │   ├── params.py    RequestParams + Content/Retry/Observe/Policy; Transport,
-│   │                  Extractor, Trust
-│   ├── extractor.py the Extract protocol each extractor satisfies
+│   │                  Extractor
 │   └── errors.py    FetchError, BotDetectionError + subclasses
 ├── fetch/           the sole HTTP egress
-│   ├── fetch.py     fetch(url, request=RequestParams(...)) -> (body, session)
+│   ├── fetch.py     fetch(url, request=RequestParams(...)) -> body
 │   ├── gate.py      host-wide per-site pacing and block recovery
 │   ├── transport/   how bytes are retrieved
 │   │   ├── curl.py      curl-cffi transport (TLS/JA3 browser impersonation)
 │   │   ├── stdlib.py    dependency-free urllib transport
 │   │   ├── zendriver.py opt-in real-Chrome backend for JS-gated pages
 │   │   └── transport_routing.py  per-domain transport selection
-│   ├── extractor/   how a fetched page becomes text
-│   │   ├── html2text.py   every text node as Markdown (the default)
-│   │   ├── trafilatura.py the scored article body only; article-shaped pages
-│   │   ├── raw.py         the source, untouched
-│   │   └── markdownify.py the document's elements as Markdown
+│   ├── html_to_text.py how a fetched page becomes text
 │   ├── providers/   per-site fetch strategies (reddit, google_news, x, ...)
 │   └── challenge.py bot-challenge detection and classification
 ├── search/          web search over pluggable backends
@@ -206,7 +201,7 @@ default transport escalates to a headless browser when a site bot-blocks the
 header transports). Outputs are
 deliberately compact for model consumption; abstracts are truncated and
 empty fields dropped. The server is synchronous and per-client — state that
-must be shared (rate limits, cookie/UA profiles) is already cross-process
+must be shared (rate limits, cookie profiles) is already cross-process
 safe on disk, so no daemon is needed.
 
 ## See also

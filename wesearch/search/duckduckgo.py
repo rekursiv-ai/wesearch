@@ -1,12 +1,8 @@
-"""The DuckDuckGo backend: scrapes the HTML endpoint, no key required.
-
-The always-available backend, which is why it is the default when no SearXNG
-instance is configured.
-"""
+"""DuckDuckGo search backend: scrapes the HTML endpoint, no key required."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import logging
@@ -20,7 +16,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.search.custom_types import (
+from wesearch.search.types import (
     SearchError,
     SearchResult,
     clean_text,
@@ -31,16 +27,15 @@ from wesearch.types.errors import PuzzleChallengeError
 
 if TYPE_CHECKING:
     import bs4
+
+    from wesearch.fetch import FetchSession
 else:
     from wrapt import lazy_import
 
-    bs4 = lazy_import("bs4")
+    bs4 = lazy_import("bs4")  # 39ms.
 
 
 logger = logging.getLogger(__name__)
-
-
-_DUCKDUCKGO_URL: Final = "https://html.duckduckgo.com/html/"
 
 
 def duckduckgo(
@@ -53,74 +48,68 @@ def duckduckgo(
     connect_timeout_sec: float = 3.0,
     retries: int = 1,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> list[SearchResult]:
     """Scrape DuckDuckGo's HTML-only endpoint.
-
-    More reliable than Google scraping -- DDG doesn't block as
-    aggressively.
 
     Args:
       query: Search query string.
       num_results: Maximum results to return.
       headers: Optional override headers forwarded to fetch.
-      max_query_chars: Reject a query longer than this. DuckDuckGo's HTML
-        endpoint silently drops overlong queries, so fail loudly instead.
-      timeout_sec: Ceiling per attempt, browser leg included. The page is a
-        few tens of KB, so a slower answer means a dropped egress, not a slow one.
-      connect_timeout_sec: Ceiling on the handshake alone, so an unroutable
-        egress is detected in a handshake rather than a full request. A dropped
-        SYN draws no RST, so only the clock reports it. Sized against the slow
-        case, not the local one: an intercontinental origin (Zurich) measures
-        165ms RTT and a 0.39s handshake from here, so 3s absorbs that plus a
-        lost SYN (+1s initial RTO) and still fails a black-holed host in 3s
-        rather than the full ``timeout_sec``.
-      retries: Retry attempts for a transient failure. Multiplies with
-        ``timeout_sec``: an egress that cannot reach the endpoint at all burns
-        ``(retries + 1) * timeout_sec`` before raising, so a caller on a
-        deadline lowers both rather than either alone.
+      max_query_chars: Reject a longer query; DuckDuckGo silently drops one.
+      timeout_sec: Ceiling per attempt, browser leg included.
+      connect_timeout_sec: Ceiling on the handshake alone, so an unreachable
+        host fails fast rather than after ``timeout_sec``.
+      retries: Retry attempts for a transient failure. An unreachable
+        endpoint costs ``(retries + 1) * timeout_sec`` before raising.
       transport: Retrieval transport; ``"auto"`` applies domain routing.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
-      results: Parsed search results.
+      results: Up to ``num_results`` hits, in page order.
+
+    Raises:
+      ValueError: If ``num_results`` is negative.
+      SearchError: If ``query`` exceeds ``max_query_chars``.
+      PuzzleChallengeError: If DuckDuckGo serves its bot challenge.
 
     """
     if num_results < 0:
         raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
     if num_results == 0:
-        return []  # Nothing to return, so do not pay for a round-trip.
+        return []
     if len(query) > max_query_chars:
         raise SearchError(
             f"DuckDuckGo query exceeds {max_query_chars} characters (got {len(query)}).",
         )
-    # The query goes in the URL, not a POST body: DuckDuckGo's HTML endpoint now
-    # drops a POSTed query and serves its empty homepage (``body--home``),
-    # yielding zero results. A GET with ``q`` in the query string returns the
-    # real results page. ``kl=wt-wt`` keeps the region-neutral ("no region")
-    # results the POST form sent.
+    # GET, not POST: the HTML endpoint drops a POSTed query and serves its empty
+    # homepage. ``kl=wt-wt`` requests region-neutral results.
     params = urlencode({"q": _duckduckgo_quote_bangs(query), "kl": "wt-wt"})
-    # No identity headers of our own: fetch's identity layer sends the coherent
-    # Chrome set curl impersonates and keeps DDG's cookies per egress. A
-    # hand-built set needs ``raw_headers``, which skipped that layer and pinned
-    # the request to bare curl -- DDG then blocked it in 0.16s with no browser
-    # fallback to escalate to.
-    body, _ = fetch(
-        f"{_DUCKDUCKGO_URL}?{params}",
+    # No identity headers here: fetch's identity layer supplies a coherent Chrome
+    # set and per-egress cookies. A hand-built set needs ``raw_headers``, which
+    # bypasses that layer and pins the request to bare curl with no browser
+    # fallback.
+    body = fetch(
+        f"https://html.duckduckgo.com/html/?{params}",
         request=RequestParams(
             content=ContentParams(
-                headers={"Referer": _DUCKDUCKGO_URL, **(headers or {})},
+                headers={
+                    "Referer": "https://html.duckduckgo.com/html/",
+                    **(headers or {}),
+                },
             ),
             retry=RetryParams(
                 retries=retries,
                 timeout_sec=timeout_sec,
                 connect_timeout_sec=connect_timeout_sec,
             ),
-            # The challenge check runs INSIDE fetch. DDG serves its puzzle with
-            # HTTP 200, so a check here turns that into a typed
+            # DDG serves its challenge with HTTP 200. Checking inside fetch raises
             # ``PuzzleChallengeError``, which ``auto`` answers by retrying in the
-            # browser and learning the domain.
+            # browser.
             observe=ObserveParams(body_validator=_duckduckgo_validate_body),
             policy=PolicyParams(transport=transport),
         ),
+        session=session,
     )
     return _duckduckgo_parse(body.decode(), num_results)
 
@@ -137,39 +126,16 @@ def _duckduckgo_validate_body(body: bytes) -> None:
     _duckduckgo_check_captcha(body.decode(errors="replace"))
 
 
-# One predicate, shared by the validator that rejects the page and the diagnostic that
-# explains an empty parse. Written twice, a selector change at DDG would make the
-# diagnostic report "markup changed" for exactly the challenge page it exists to tell
-# apart.
-def _duckduckgo_is_challenge(soup: bs4.BeautifulSoup) -> bool:
-    """Whether this page is DDG's bot challenge rather than a results page."""
-    return soup.select_one("form#challenge-form") is not None
-
-
 def _duckduckgo_check_captcha(page_html: str) -> None:
     """Raise when DDG returns its challenge page."""
     if _duckduckgo_is_challenge(bs4.BeautifulSoup(page_html, "html.parser")):
         raise PuzzleChallengeError("DuckDuckGo returned a challenge form.")
 
 
-def _duckduckgo_extract_url(href: str) -> str | None:
-    """Extract a usable URL from DDG result links."""
-    if not href:
-        return None
-    url = f"https:{href}" if href.startswith("//") else href
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if (
-        hostname is not None
-        and (hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"))
-        and parsed.path == "/l/"
-    ):
-        wrapped = parse_qs(parsed.query).get("uddg", [])
-        if wrapped:
-            return wrapped[0]
-    if parsed.scheme in {"http", "https"}:
-        return url
-    return None
+# Shared by the body validator and the empty-parse diagnostic so they cannot disagree.
+def _duckduckgo_is_challenge(soup: bs4.BeautifulSoup) -> bool:
+    """Whether this page is DDG's bot challenge rather than a results page."""
+    return soup.select_one("form#challenge-form") is not None
 
 
 def _duckduckgo_parse(
@@ -178,7 +144,7 @@ def _duckduckgo_parse(
 ) -> list[SearchResult]:
     """Extract search results from DDG's HTML."""
     if max_results <= 0:
-        return []  # append-before-cap would otherwise return one at max=0.
+        return []  # The append-before-cap loop would otherwise return one.
     soup = bs4.BeautifulSoup(page_html, "html.parser")
     strip_scripts(soup)
     results: list[SearchResult] = []
@@ -209,9 +175,6 @@ def _duckduckgo_parse(
             break
 
     if not results:
-        # Name which of three different causes this was. The single "markup
-        # changed" message used to be emitted for a bot-challenge page too,
-        # which sent an investigation after a parser that was working fine.
         if _duckduckgo_is_challenge(soup):
             logger.warning("No results parsed -- DDG served a bot challenge.")
         elif soup.select_one("div#links") is not None:
@@ -219,3 +182,23 @@ def _duckduckgo_parse(
         else:
             logger.warning("No results parsed -- DDG may have changed markup.")
     return results
+
+
+def _duckduckgo_extract_url(href: str) -> str | None:
+    """Extract a usable URL from DDG result links."""
+    if not href:
+        return None
+    url = f"https:{href}" if href.startswith("//") else href
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if (
+        hostname is not None
+        and (hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"))
+        and parsed.path == "/l/"
+    ):
+        wrapped = parse_qs(parsed.query).get("uddg", [])
+        if wrapped:
+            return wrapped[0]
+    if parsed.scheme in {"http", "https"}:
+        return url
+    return None

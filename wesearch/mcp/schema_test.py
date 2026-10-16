@@ -1,4 +1,4 @@
-"""Tests for the declarative parameter descriptions in ``types.schema``."""
+"""Tests for wesearch.mcp.schema."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import typing
 
 import pytest
 
-from wesearch.types.schema import Field, Schema, literal_values
+from wesearch.mcp.schema import Field, Schema, literal_values
 
 
 _Color = Literal["red", "green"]
@@ -47,6 +47,10 @@ def test_json_schema_renders_types_enums_and_required() -> None:
 
 def test_coerce_defaults_the_omitted() -> None:
     assert _Derived.coerce({"name": "x"}) == {"name": "x", "color": "red", "count": 1}
+
+
+def test_coerce_returns_a_value_inside_the_literal() -> None:
+    assert _Derived.coerce({"name": "x", "color": "green"})["color"] == "green"
 
 
 def test_coerce_rejects_a_value_outside_the_literal() -> None:

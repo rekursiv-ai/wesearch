@@ -11,7 +11,7 @@ import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
 from wesearch.search.brave import brave
-from wesearch.search.custom_types import SearchError, SearchResult
+from wesearch.search.types import SearchError, SearchResult
 
 
 if TYPE_CHECKING:
@@ -41,7 +41,7 @@ def brave_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def _fetching(payload: object) -> AbstractContextManager[MagicMock | AsyncMock]:
     return patch(
         "wesearch.search.brave.fetch",
-        return_value=(json.dumps(payload).encode(), FetchSession()),
+        return_value=json.dumps(payload).encode(),
     )
 
 
@@ -93,6 +93,13 @@ def test_count_boundaries() -> None:
     fetch_mock.assert_not_called()
     with pytest.raises(ValueError, match="got -1"):
         brave("q", -1)
+
+
+def test_the_session_reaches_fetch() -> None:
+    session = FetchSession()
+    with _fetching({"web": {"results": []}}) as fetch_mock:
+        brave("q", session=session)
+    assert fetch_mock.call_args.kwargs["session"] is session
 
 
 def test_a_payload_without_web_results_is_empty() -> None:

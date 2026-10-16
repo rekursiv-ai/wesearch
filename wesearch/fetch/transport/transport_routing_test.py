@@ -112,6 +112,15 @@ def test_untimestamped_learned_entry_reads_as_expired(tmp_path: Path) -> None:
     assert zendriver_domains(path=path) == frozenset()
 
 
+def test_blank_and_nameless_lines_are_skipped(tmp_path: Path) -> None:
+    path = tmp_path / "domains.txt"
+    path.write_text(f"\n  \t{time.time():.0f}\nkept.example\t{time.time():.0f}\n")
+
+    assert zendriver_domains(path=path) == frozenset({"kept.example"})
+    remember_zendriver_domain("new.example", path=path)
+    assert _names(path) == ["kept.example", "new.example"]
+
+
 def test_bundled_list_never_expires() -> None:
     """The bundled roster is curated, untimestamped, and always routes."""
     bundled = _CWD / "zendriver-domains.txt"

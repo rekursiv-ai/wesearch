@@ -9,7 +9,6 @@ import logging
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams, resolve_transport
-from wesearch.search.custom_types import SearchError, SearchResult
 from wesearch.search.duckduckgo import (
     _duckduckgo_check_captcha,
     _duckduckgo_extract_url,
@@ -18,6 +17,7 @@ from wesearch.search.duckduckgo import (
     _duckduckgo_validate_body,
     duckduckgo,
 )
+from wesearch.search.types import SearchError, SearchResult
 from wesearch.types.errors import PuzzleChallengeError
 
 
@@ -193,7 +193,7 @@ def test_duckduckgo_count_boundaries_and_query_limit() -> None:
         duckduckgo("abcd", max_query_chars=3)
     with patch(
         "wesearch.search.duckduckgo.fetch",
-        return_value=(b'<div id="links"></div>', FetchSession()),
+        return_value=b'<div id="links"></div>',
     ):
         duckduckgo("abc", max_query_chars=3)
         duckduckgo("x" * 499)
@@ -212,7 +212,7 @@ def test_duckduckgo_default_result_limit_is_ten() -> None:
     )
     with patch(
         "wesearch.search.duckduckgo.fetch",
-        return_value=(html.encode(), FetchSession()),
+        return_value=html.encode(),
     ):
         assert len(duckduckgo("q")) == 10
 
@@ -220,7 +220,7 @@ def test_duckduckgo_default_result_limit_is_ten() -> None:
 def test_duckduckgo_request_forwards_override_headers() -> None:
     with patch(
         "wesearch.search.duckduckgo.fetch",
-        return_value=(b'<div id="links"></div>', FetchSession()),
+        return_value=b'<div id="links"></div>',
     ) as fetch_mock:
         duckduckgo("q", headers={"User-Agent": "custom"})
     request = fetch_mock.call_args.kwargs["request"]
@@ -235,6 +235,16 @@ def test_duckduckgo_request_forwards_override_headers() -> None:
     assert request.retry.connect_timeout_sec == 3.0
 
 
+def test_duckduckgo_session_reaches_fetch() -> None:
+    session = FetchSession()
+    with patch(
+        "wesearch.search.duckduckgo.fetch",
+        return_value=b'<div id="links"></div>',
+    ) as fetch_mock:
+        duckduckgo("q", session=session)
+    assert fetch_mock.call_args.kwargs["session"] is session
+
+
 def test_duckduckgo_request_can_escalate_to_the_browser() -> None:
     """DDG must ride the identity layer, which is what reaches Chrome on a block.
 
@@ -243,7 +253,7 @@ def test_duckduckgo_request_can_escalate_to_the_browser() -> None:
     """
     with patch(
         "wesearch.search.duckduckgo.fetch",
-        return_value=(b'<div id="links"></div>', FetchSession()),
+        return_value=b'<div id="links"></div>',
     ) as fetch_mock:
         duckduckgo("q")
     request = fetch_mock.call_args.kwargs["request"]
@@ -275,10 +285,7 @@ def test_duckduckgo_parse_preserves_missing_snippet_and_logs_challenge(
 def test_duckduckgo_public_request_and_validation() -> None:
     with patch(
         "wesearch.search.duckduckgo.fetch",
-        return_value=(
-            b'<div id="links"><div class="web-result"><h2><a href="https://x">x</a></h2></div></div>',
-            FetchSession(),
-        ),
+        return_value=b'<div id="links"><div class="web-result"><h2><a href="https://x">x</a></h2></div></div>',
     ) as fetch_mock:
         assert duckduckgo(
             "!w x",

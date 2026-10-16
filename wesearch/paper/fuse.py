@@ -22,7 +22,7 @@ import re
 
 
 if TYPE_CHECKING:
-    from wesearch.paper.custom_types import PaperRecord
+    from wesearch.paper.types import PaperRecord
 
 
 __all__ = ["fuse", "normalize_title"]
@@ -99,6 +99,18 @@ def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", " ", title.casefold())).strip()
 
 
+def _group_by_identity(records: list[PaperRecord]) -> list[int]:
+    """Return each record's component root under union-find over its keys."""
+    parent: dict[int, int] = {}
+    owner: dict[str, int] = {}
+    for index, rec in enumerate(records):
+        parent[index] = index
+        for key in _identity_keys(rec):
+            other = owner.setdefault(key, index)
+            _union(parent, index, other)
+    return [_find(parent, index) for index in range(len(records))]
+
+
 # A DOI and an arXiv id are separate namespaces for the SAME paper, so both are emitted:
 # a record carrying only the publisher DOI and one carrying only arXiv's DataCite DOI
 # join through whichever key they share. Title is a last resort -- two distinct papers
@@ -120,16 +132,11 @@ def _identity_keys(rec: PaperRecord) -> list[str]:
     return [f"title:{title}"] if title else []
 
 
-def _group_by_identity(records: list[PaperRecord]) -> list[int]:
-    """Return each record's component root under union-find over its keys."""
-    parent: dict[int, int] = {}
-    owner: dict[str, int] = {}
-    for index, rec in enumerate(records):
-        parent[index] = index
-        for key in _identity_keys(rec):
-            other = owner.setdefault(key, index)
-            _union(parent, index, other)
-    return [_find(parent, index) for index in range(len(records))]
+def _union(parent: dict[int, int], left: int, right: int) -> None:
+    """Merge two components, keeping the earlier-seen record as the root."""
+    left_root, right_root = _find(parent, left), _find(parent, right)
+    if left_root != right_root:
+        parent[max(left_root, right_root)] = min(left_root, right_root)
 
 
 def _find(parent: dict[int, int], node: int) -> int:
@@ -140,10 +147,3 @@ def _find(parent: dict[int, int], node: int) -> int:
     while parent[node] != root:
         parent[node], node = root, parent[node]
     return root
-
-
-def _union(parent: dict[int, int], left: int, right: int) -> None:
-    """Merge two components, keeping the earlier-seen record as the root."""
-    left_root, right_root = _find(parent, left), _find(parent, right)
-    if left_root != right_root:
-        parent[max(left_root, right_root)] = min(left_root, right_root)

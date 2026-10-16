@@ -61,7 +61,7 @@ class BotDetectionError(FetchError):
     browser_clears: ClassVar[bool] = False
 
     guidance = (
-        "The site served an automated-access block. RetryParams later or from a "
+        "The site served an automated-access block. Retry later or from a "
         "different IP; a full browser session may be required."
     )
 
@@ -85,15 +85,7 @@ class BotDetectionError(FetchError):
 
     @classmethod
     def recovery(cls, url: str) -> str:
-        """Return the interactive-browser recovery instruction for ``url``.
-
-        Args:
-          url: Url.
-
-        Returns:
-          result: The str.
-
-        """
+        """Return how to clear the block on ``url`` by hand."""
         return (
             f"Run `zendriver {shlex.quote(url)}` and solve the challenge; "
             "the site unlocks once its page loads."

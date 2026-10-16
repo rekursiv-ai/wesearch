@@ -10,10 +10,8 @@ This ``__init__`` does not flatten symbols into the package namespace. Reach
 into the submodule that defines the name:
 
 - ``wesearch.types.params`` -- ``RequestParams`` and its four groups
-  (``ContentParams``, ``RetryParams``, ``ObserveParams``, ``PolicyParams``), plus the ``Transport``,
-  ``Extractor``, and ``Trust`` vocabularies.
-- ``wesearch.types.extractor`` -- the ``Extract`` protocol every extractor
-  under ``fetch.extractor`` satisfies.
+  (``ContentParams``, ``RetryParams``, ``ObserveParams``, ``PolicyParams``), plus the ``Transport``
+  and ``Extractor`` vocabularies.
 - ``wesearch.types.errors`` -- the exception hierarchy every layer raises
   and every caller catches.
 """

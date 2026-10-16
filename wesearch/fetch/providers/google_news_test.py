@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import PolicyParams, RequestParams
+from wesearch.fetch import FetchSession, PolicyParams, RequestParams
 from wesearch.fetch.providers import google_news
 
 
@@ -51,10 +51,15 @@ class TestFetch:
     ) -> None:
         seen: dict[str, str] = {}
 
-        def fake_fetch(target: str, *, request: object) -> tuple[bytes, None]:
-            del request
+        def fake_fetch(
+            target: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del request, session
             seen["target"] = target
-            return b"<xml/>", None
+            return b"<xml/>"
 
         with patch.object(google_news, "fetch", fake_fetch):
             _body, payload = google_news.fetch_google_news(url, policy=PolicyParams())
@@ -85,9 +90,15 @@ class TestFetch:
         policy = PolicyParams()
         seen: list[object] = []
 
-        def fake_fetch(url: str, *, request: object) -> tuple[bytes, None]:
+        def fake_fetch(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del session
             seen.extend((url, request))
-            return b"body", None
+            return b"body"
 
         with patch.object(google_news, "fetch", fake_fetch):
             assert google_news.fetch_google_news(

@@ -1,8 +1,6 @@
-"""The SearXNG backend: a self-hosted metasearch instance over many engines.
+"""SearXNG search backend: queries the JSON API of the instance at ``SEARXNG_URL``.
 
-Reached at ``SEARXNG_URL``; returns JSON, so this is a mapping layer rather
-than a scraper. Its per-category result shapes are what make the category
-overloads in :mod:`wesearch.search.search` meaningful.
+Each category (tab) maps to a typed result shape; see :data:`CATEGORIES`.
 """
 
 from __future__ import annotations
@@ -11,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, cast, get_args, overload
+from typing import TYPE_CHECKING, Literal, cast, get_args, overload
 from urllib.parse import urlencode
 
 import json
@@ -30,7 +28,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.search.custom_types import (
+from wesearch.search.types import (
     CodeResult,
     FileResult,
     ImageResult,
@@ -50,16 +48,13 @@ from wesearch.search.custom_types import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from wesearch.fetch import FetchSession
+
 
 logger = logging.getLogger(__name__)
 
 
-_SEARXNG_URL_ENV: Final = "SEARXNG_URL"
-
-
-# Union of every result shape a SearXNG query can return -- the implementation
-# return type behind the per-category overloads. ``VideoResult`` is omitted as
-# a ``MediaResult`` subclass and the leaf subclasses cover the rest.
+# ``VideoResult`` is covered by its base ``MediaResult``.
 type SearxngResult = (
     PaperResult
     | ImageResult
@@ -73,237 +68,99 @@ type SearxngResult = (
 )
 
 
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["science"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[PaperResult]: ...
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CategoryInfo:
+    """What a tab carries beyond its name: prose and a result parser.
 
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["images"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[ImageResult]: ...
-
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["videos"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[VideoResult]: ...
-
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["news", "music"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[MediaResult]: ...
-
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["map"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[MapResult]: ...
-
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["it"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
-
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: Literal["files"],
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
-
-
-@overload
-def searxng(
-    query: str,
-    num_results: int = ...,
-    headers: dict[str, str] | None = ...,
-    *,
-    categories: SearxngCategory = ...,
-    timeout_sec: float = ...,
-    connect_timeout_sec: float = ...,
-    retries: int = ...,
-    transport: Transport = ...,
-) -> Sequence[SearchResult]: ...
-
-
-def searxng(
-    query: str,
-    num_results: int = 10,
-    headers: dict[str, str] | None = None,
-    *,
-    categories: SearxngCategory = "general",
-    timeout_sec: float = 15.0,
-    connect_timeout_sec: float = 3.0,
-    retries: int = 1,
-    transport: Transport = "auto",
-) -> Sequence[SearxngResult]:
-    """Query a SearXNG instance and return parsed, typed JSON results.
-
-    The return shape follows ``categories``: each tab whose engines emit a
-    structured result template gets a richer :class:`SearchResult` subclass
-    (``science`` -> :class:`PaperResult`, ``images`` -> :class:`ImageResult`,
-    ``videos`` -> :class:`VideoResult`, ``news``/``music`` -> :class:`MediaResult`,
-    ``map`` -> :class:`MapResult`, ``it`` -> :class:`PackageResult` /
-    :class:`CodeResult`, ``files`` -> :class:`FileResult` /
-    :class:`TorrentResult`). Categories with no extra structure return plain
-    :class:`SearchResult`. Every subclass keeps ``url``/``title``/``snippet``
-    populated, so a web-result consumer works on any return unchanged. The
-    discriminating SearXNG ``template`` field is consumed here per result.
-
-    Args:
-      query: Search query string.
-      num_results: Maximum results to return.
-      headers: Optional override headers forwarded to fetch.
-      categories: SearXNG result category (tab) to query.
-      timeout_sec: HTTP ceiling. SearXNG fans one query out to several upstream
-        engines and returns only once they finish or hit its own per-engine
-        timeouts (heavy science engines run to ~30s), so the client ceiling must
-        clear the aggregation tail, not a single engine's latency: at 10s the
-        multi-engine ``it``/``science`` tabs hit a premature client-side timeout
-        mid-aggregation (observed live). 15s clears the common tail while still
-        bounding an interactive turn.
-      connect_timeout_sec: Ceiling on the handshake alone. Deliberately NOT
-        scaled up for the fan-out above: SearXNG queries DuckDuckGo and Google
-        server-side, so that cost is a READ on this connection and is already
-        covered by ``timeout_sec``. The handshake is to the instance itself --
-        one hop, however many engines sit behind it.
-      retries: Retry attempts for a transient failure. Defaults to 1 because the
-        edge in front of an instance rate-limits a burst with a 429 +
-        Retry-After, which the retry loop already honors; without a budget a
-        throttled burst surfaces as a hard failure the advertised wait would
-        have cleared. Exposed, like ``duckduckgo``'s, because it MULTIPLIES
-        ``timeout_sec``: a caller that lowered the ceiling to bound a wedged
-        egress otherwise still pays ``(retries + 1)`` times what it asked for.
-      transport: Retrieval transport; ``"auto"`` applies domain routing.
-
-    Returns:
-      results: One typed record per hit -- a :class:`SearchResult` or a
-        category-specific subclass of it.
+    Attributes:
+      gloss: One phrase naming what the tab returns, rendered into every tool
+        description.
+      parser: Reader for the tab's result template. ``None`` means the tab has
+        no structured template and reads through the generic web parser.
 
     """
-    if num_results < 0:
-        raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
-    if num_results == 0:
-        return list[SearxngResult]()  # No results wanted; skip the round-trip.
-    base_url = _searxng_url()
-    params = urlencode(
-        {"q": query, "format": "json", "pageno": "1", "categories": categories},
-    )
-    body, _ = fetch(
-        f"{base_url}/search?{params}",
-        request=RequestParams(
-            content=ContentParams(headers=headers),
-            retry=RetryParams(
-                retries=retries,
-                timeout_sec=timeout_sec,
-                connect_timeout_sec=connect_timeout_sec,
-            ),
-            # trust="internal": SEARXNG_URL names an instance the OPERATOR runs,
-            # which is exactly the private-network case the untrusted default
-            # refuses -- a loopback instance failed with "Refusing to fetch
-            # '127.0.0.1' (resolves to non-public address)".
-            policy=PolicyParams(transport=transport, trust="internal"),
-        ),
-    )
-    # Decoded explicitly: json.loads on raw bytes raises UnicodeDecodeError for
-    # invalid UTF-8, which is not in the dispatcher's except tuple and would
-    # escape as itself rather than as SearchError.
-    try:
-        text = body.decode()
-    except UnicodeDecodeError as e:
-        raise SearchError(f"searxng returned undecodable bytes: {e}") from e
-    # We asked for format=json, so anything else is an intermediary answering
-    # instead of SearXNG -- and it does NOT arrive as an error status. A
-    # Cloudflare-fronted instance serves its rate-limit interstitial ("error
-    # code: 1015") as HTTP 200 with an HTML body, so ``fetch`` raises nothing
-    # and the page reaches json.loads as a bare "line 1 column 1 (char 0)"
-    # that names neither the backend nor the cause.
-    try:
-        payload = json_loads(text)
-    except json.JSONDecodeError as e:
-        raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
-    # SearXNG is an external service: a malformed body or item degrades to fewer
-    # results, never an exception.
-    results = payload.get("results") if isinstance(payload, dict) else None
-    items = [
-        from_plain(item, dict[str, object])
-        for item in (results if isinstance(results, list) else [])
-        if isinstance(item, dict)
-    ]
-    parse = category_parser(categories)
-    return [parse(item) for item in items[:num_results]]
+
+    gloss: str
+
+    parser: Callable[[dict[str, object]], SearxngResult] | None = None
 
 
-def _searxng_media(item: dict[str, object]) -> MediaResult:
-    """Parse a ``news``/``music`` ``default.html`` item into a :class:`MediaResult`."""
-    return MediaResult(
+def _coordinate(value: object) -> float | None:
+    """Return one finite map coordinate, or None when unknown."""
+    if type(value) not in {int, float}:
+        return None
+    coordinate = float(cast(float, value))
+    return coordinate if math.isfinite(coordinate) else None
+
+
+# A field's JSON type varies by upstream engine (e.g. a float ``length``); one odd
+# field must not reject the whole result.
+def _text(item: dict[str, object], key: str) -> str:
+    """Return ``item[key]`` when it is a string, else ``""``."""
+    return value if isinstance(value := item.get(key), str) else ""
+
+
+def _published(item: dict[str, object]) -> datetime | None:
+    """Parse ``publishedDate``, or None when absent or not ISO 8601."""
+    text = _text(item, "publishedDate")
+    try:
+        return datetime.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+
+
+def _count(value: object) -> int | None:
+    """Return a JSON integer count, or None for anything else (``"2"``, ``1.9``)."""
+    return value if type(value) is int else None
+
+
+def _searxng_web(item: dict[str, object]) -> SearchResult:
+    """Parse a SearXNG ``default.html`` item into a :class:`SearchResult`."""
+    return SearchResult(
         url=_text(item, "url"),
         title=clean_text(_text(item, "title")),
         snippet=clean_text(_text(item, "content")),
-        published=_published(item),
-        audio_url=_text(item, "audio_src"),
-        iframe_url=_text(item, "iframe_src"),
-        length=_text(item, "length"),
-        thumbnail_url=_text(item, "thumbnail"),
+    )
+
+
+def _searxng_files(
+    item: dict[str, object],
+) -> FileResult | TorrentResult | SearchResult:
+    """Dispatch a ``files`` item by ``template`` to its file/torrent/web reader."""
+    template = _text(item, "template")
+    if template == "torrent.html":
+        return TorrentResult(
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(_text(item, "content")),
+            magnet_url=_text(item, "magnetlink"),
+            torrent_url=_text(item, "torrentfile"),
+            seed=_count(item.get("seed")),
+            leech=_count(item.get("leech")),
+            filesize=_text(item, "filesize"),
+        )
+    if template == "file.html":
+        return FileResult(
+            url=_text(item, "url"),
+            title=clean_text(_text(item, "title")),
+            snippet=clean_text(
+                _text(item, "abstract") or _text(item, "content"),
+            ),
+            filename=_text(item, "filename"),
+            size=_text(item, "size"),
+            mimetype=_text(item, "mimetype"),
+            author=_text(item, "author"),
+        )
+    return _searxng_web(item)
+
+
+def _strings(item: dict[str, object], key: str) -> tuple[str, ...]:
+    """Return the string elements of ``item[key]``, dropping any non-string."""
+    values = item.get(key)
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        value for value in cast(list[object], values) if isinstance(value, str)
     )
 
 
@@ -338,52 +195,27 @@ def _searxng_it(
     return _searxng_web(item)
 
 
-def _searxng_files(
-    item: dict[str, object],
-) -> FileResult | TorrentResult | SearchResult:
-    """Dispatch a ``files`` item by ``template`` to its file/torrent/web reader."""
-    template = _text(item, "template")
-    if template == "torrent.html":
-        return TorrentResult(
-            url=_text(item, "url"),
-            title=clean_text(_text(item, "title")),
-            snippet=clean_text(_text(item, "content")),
-            magnet_url=_text(item, "magnetlink"),
-            torrent_url=_text(item, "torrentfile"),
-            seed=_count(item.get("seed")),
-            leech=_count(item.get("leech")),
-            filesize=_text(item, "filesize"),
-        )
-    if template == "file.html":
-        return FileResult(
-            url=_text(item, "url"),
-            title=clean_text(_text(item, "title")),
-            snippet=clean_text(
-                _text(item, "abstract") or _text(item, "content"),
-            ),
-            filename=_text(item, "filename"),
-            size=_text(item, "size"),
-            mimetype=_text(item, "mimetype"),
-            author=_text(item, "author"),
-        )
-    return _searxng_web(item)
+def _searxng_media(item: dict[str, object]) -> MediaResult:
+    """Parse a ``news``/``music`` ``default.html`` item into a :class:`MediaResult`."""
+    return MediaResult(
+        url=_text(item, "url"),
+        title=clean_text(_text(item, "title")),
+        snippet=clean_text(_text(item, "content")),
+        published=_published(item),
+        audio_url=_text(item, "audio_src"),
+        iframe_url=_text(item, "iframe_src"),
+        length=_text(item, "length"),
+        thumbnail_url=_text(item, "thumbnail"),
+    )
 
 
 def _searxng_paper(item: dict[str, object]) -> PaperResult:
     """Parse a SearXNG ``paper.html`` item into a :class:`PaperResult`."""
-    # Leading integer of SearXNG's humanized citation ``comments`` (e.g. "42
-    # citations from the year 2019 to 2024" -> 42). No engine reports the count as a
-    # structured integer, so this is the only recovery path; an unparseable comment
-    # yields ``None`` rather than a fabricated zero.
-    # At least one DIGIT, not just comma-ish characters: the looser `[\d,]+`
-    # matched a bare "," on hostile JSON, and the int() below then raised
-    # ValueError out of a parse that must degrade to "unknown citations".
-    # BOUNDED, because format is not magnitude: the unbounded run still matched, and
-    # CPython refuses int() on a string past 4300 digits -- the same ValueError, out
-    # of the same parse, on the same hostile-comments input the DIGIT fix addressed.
-    # A trailing guard so a longer run does not match its own prefix: past ~24
-    # digits the field is not a count at all, and reading its first 24 would
-    # fabricate one.
+    # Citation count is the leading integer of the humanized ``comments`` ("42
+    # citations from ..."); unparseable yields None, not zero. The pattern requires
+    # a leading digit (a bare "," would crash int()), caps the run at 24 chars
+    # (int() rejects >4300 digits), and refuses a longer run rather than reading
+    # its prefix as a count.
     cites = re.match(
         r"^\s*(\d[\d,]{0,23})(?![\d,])",
         _text(item, "comments"),
@@ -402,65 +234,6 @@ def _searxng_paper(item: dict[str, object]) -> PaperResult:
     )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CategoryInfo:
-    """What a tab carries beyond its name: prose and a result parser.
-
-    Attributes:
-      gloss: One phrase naming what the tab returns, rendered into every tool
-        description. Written here rather than in each adapter's prose because
-        a hand-copied list drifts: both surfaces omitted ``social media`` for
-        as long as the tab has existed.
-      parser: Reader for the tab's result template. ``None`` means the tab has
-        no structured template and reads through the generic web parser --
-        which is what ``general`` and ``social media`` are.
-
-    """
-
-    gloss: str
-
-    parser: Callable[[dict[str, object]], SearxngResult] | None = None
-
-
-def _searxng_web(item: dict[str, object]) -> SearchResult:
-    """Parse a SearXNG ``default.html`` item into a :class:`SearchResult`."""
-    return SearchResult(
-        url=_text(item, "url"),
-        title=clean_text(_text(item, "title")),
-        snippet=clean_text(_text(item, "content")),
-    )
-
-
-# SearXNG relays upstream engines, so a field's JSON type is not fixed: video and music
-# results carry a float ``length``. One such field must not reject the whole result.
-def _text(item: dict[str, object], key: str) -> str:
-    """Return ``item[key]`` when it is a string, else ``""``."""
-    return value if isinstance(value := item.get(key), str) else ""
-
-
-def _coordinate(value: object) -> float | None:
-    """Return one finite map coordinate, or None when unknown."""
-    if type(value) not in {int, float}:
-        return None
-    coordinate = float(cast(float, value))
-    return coordinate if math.isfinite(coordinate) else None
-
-
-def _count(value: object) -> int | None:
-    """Return a JSON integer count, or None for anything else (``"2"``, ``1.9``)."""
-    return value if type(value) is int else None
-
-
-def _strings(item: dict[str, object], key: str) -> tuple[str, ...]:
-    """Return the string elements of ``item[key]``, dropping any non-string."""
-    values = item.get(key)
-    if not isinstance(values, list):
-        return ()
-    return tuple(
-        value for value in cast(list[object], values) if isinstance(value, str)
-    )
-
-
 def _string_map(value: object) -> dict[str, str]:
     """Return the string-to-string entries of a JSON object, else ``{}``."""
     if not isinstance(value, dict):
@@ -472,19 +245,7 @@ def _string_map(value: object) -> dict[str, str]:
     }
 
 
-def _published(item: dict[str, object]) -> datetime | None:
-    """Parse ``publishedDate``, or None when absent or not ISO 8601."""
-    text = _text(item, "publishedDate")
-    try:
-        return datetime.fromisoformat(text) if text else None
-    except ValueError:
-        return None
-
-
-# One record per member of ``SearxngCategory``. The Literal in
-# :mod:`.custom_types` stays the only place a tab NAME is spelled; this attaches
-# data to those names, and the assertion below makes a missing record an
-# ImportError rather than a tab that is silently unglossed and unparsed.
+# One record per member of ``SearxngCategory``; the check below enforces it.
 CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
     "general": CategoryInfo(gloss="web results"),
     "images": CategoryInfo(
@@ -546,8 +307,219 @@ CATEGORIES: Mapping[SearxngCategory, CategoryInfo] = {
     "social media": CategoryInfo(gloss="posts from Mastodon/Lemmy (web results)"),
 }
 
-# Not a test: a tab added to the Literal without a record here must fail at
-# IMPORT, where the author sees it, rather than at the first query for that tab.
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["science"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[PaperResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["images"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[ImageResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["videos"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[VideoResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["news", "music"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[MediaResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["map"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[MapResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["it"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: Literal["files"],
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
+
+
+@overload
+def searxng(
+    query: str,
+    num_results: int = ...,
+    headers: dict[str, str] | None = ...,
+    *,
+    categories: SearxngCategory = ...,
+    timeout_sec: float = ...,
+    connect_timeout_sec: float = ...,
+    retries: int = ...,
+    transport: Transport = ...,
+    session: FetchSession | None = ...,
+) -> Sequence[SearchResult]: ...
+
+
+def searxng(
+    query: str,
+    num_results: int = 10,
+    headers: dict[str, str] | None = None,
+    *,
+    categories: SearxngCategory = "general",
+    timeout_sec: float = 15.0,
+    connect_timeout_sec: float = 3.0,
+    retries: int = 1,
+    transport: Transport = "auto",
+    session: FetchSession | None = None,
+) -> Sequence[SearxngResult]:
+    """Query a SearXNG instance and return parsed, typed JSON results.
+
+    The return shape follows ``categories``: each tab whose engines emit a
+    structured result template gets a richer :class:`SearchResult` subclass
+    (``science`` -> :class:`PaperResult`, ``images`` -> :class:`ImageResult`,
+    ``videos`` -> :class:`VideoResult`, ``news``/``music`` -> :class:`MediaResult`,
+    ``map`` -> :class:`MapResult`, ``it`` -> :class:`PackageResult` /
+    :class:`CodeResult`, ``files`` -> :class:`FileResult` /
+    :class:`TorrentResult`). Categories with no extra structure return plain
+    :class:`SearchResult`. Every subclass keeps ``url``/``title``/``snippet``
+    populated. A malformed result degrades to fewer or emptier records.
+
+    Args:
+      query: Search query string.
+      num_results: Maximum results to return.
+      headers: Optional override headers forwarded to fetch.
+      categories: SearXNG result category (tab) to query.
+      timeout_sec: HTTP ceiling per attempt. It must clear SearXNG's slowest
+        upstream engine, since the instance answers only after aggregating.
+      connect_timeout_sec: Ceiling on the handshake to the instance alone.
+      retries: Retry attempts for a transient failure, including a 429 with
+        Retry-After. A failing request costs up to ``(retries + 1) *
+        timeout_sec``.
+      transport: Retrieval transport; ``"auto"`` applies domain routing.
+      session: Connections to reuse; ``None`` uses the process's shared session.
+
+    Returns:
+      results: One typed record per hit -- a :class:`SearchResult` or a
+        category-specific subclass of it.
+
+    Raises:
+      ValueError: If ``num_results`` is negative.
+      SearchError: If ``SEARXNG_URL`` is unset or the body is not valid JSON.
+
+    """
+    if num_results < 0:
+        raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
+    if num_results == 0:
+        return list[SearxngResult]()
+    base_url = _searxng_url()
+    params = urlencode(
+        {"q": query, "format": "json", "pageno": "1", "categories": categories},
+    )
+    body = fetch(
+        f"{base_url}/search?{params}",
+        request=RequestParams(
+            content=ContentParams(headers=headers or {}),
+            retry=RetryParams(
+                retries=retries,
+                timeout_sec=timeout_sec,
+                connect_timeout_sec=connect_timeout_sec,
+            ),
+            # SEARXNG_URL is an instance the operator runs, often on loopback.
+            policy=PolicyParams(transport=transport, allow_private_hosts=True),
+        ),
+        session=session,
+    )
+    # Decoded explicitly so invalid UTF-8 surfaces as SearchError, which the
+    # dispatcher catches, rather than as UnicodeDecodeError, which it does not.
+    try:
+        text = body.decode()
+    except UnicodeDecodeError as e:
+        raise SearchError(f"searxng returned undecodable bytes: {e}") from e
+    # An intermediary (e.g. a Cloudflare rate-limit page) can answer with HTTP 200
+    # and a non-JSON body; name it rather than surface a bare JSONDecodeError.
+    try:
+        payload = json_loads(text)
+    except json.JSONDecodeError as e:
+        raise SearchError(f"searxng returned {_describe_non_json(text)}") from e
+    results = payload.get("results") if isinstance(payload, dict) else None
+    items = [
+        from_plain(item, dict[str, object])
+        for item in (results if isinstance(results, list) else [])
+        if isinstance(item, dict)
+    ]
+    parse = category_parser(categories)
+    return [parse(item) for item in items[:num_results]]
+
+
+# At import, not in a test: a tab missing a record fails before any query.
 if set(CATEGORIES) != set(get_args(cast(object, SearxngCategory.__value__))):
     raise ValueError("every SearxngCategory needs a CATEGORIES record")
 
@@ -555,23 +527,13 @@ if set(CATEGORIES) != set(get_args(cast(object, SearxngCategory.__value__))):
 def category_parser(
     category: SearxngCategory,
 ) -> Callable[[dict[str, object]], SearxngResult]:
-    """Return the reader for ``category``, or the generic web reader.
-
-    Args:
-      category: Category.
-
-    Returns:
-      result: The Callable[[dict[str, object]], SearxngResult].
-
-    """
+    """Return the reader for ``category``, or the generic web reader."""
     return CATEGORIES[category].parser or _searxng_web
 
 
 def category_gloss() -> str:
-    """Render every tab as one description line; no hand-copied list."""
-    # CATEGORIES, not the alias: the import-time check above makes its keys exactly
-    # the tabs, while ``get_args`` on a PEP 695 alias returns nothing -- which once
-    # rendered this list, and every search tool's tab descriptions, empty.
+    """Render every tab as one Markdown bullet line: ``- `name` -- gloss.``."""
+    # Not ``get_args(SearxngCategory)``: on a PEP 695 alias it returns nothing.
     return "\n".join(
         f"  - `{name}` -- {info.gloss}." for name, info in CATEGORIES.items()
     )
@@ -579,25 +541,17 @@ def category_gloss() -> str:
 
 def _searxng_url() -> str:
     """Return the configured SearXNG base URL without a trailing slash."""
-    url = os.environ.get(_SEARXNG_URL_ENV, "").rstrip("/")
+    url = os.environ.get("SEARXNG_URL", "").rstrip("/")
     if not url:
-        raise SearchError(
-            f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
-        )
+        raise SearchError("SEARXNG_URL must be set to use SearXNG search")
     return url
 
 
-# An operator reading "not JSON" still has to go find out who answered and why. The two
-# cases that occur in practice -- a rate-limit interstitial and some other HTML error
-# page -- are distinguishable from the body, and naming them turns the failure into an
-# instruction.
 def _describe_non_json(text: str) -> str:
-    """Name what a non-JSON body actually is, for the error message."""
-    # Whole body, not a head slice: the live 1015 response is the bare 17-byte
-    # string "error code: 1015", while the HTML variant carries the code far
-    # past any fixed prefix window. A slice classified both as generic HTML.
+    """Name what a non-JSON body is (rate-limit page, HTML, other) for an error."""
+    # Whole body, not a head slice: the HTML variant of the 1015 page carries the
+    # code far past any fixed prefix.
     lowered = text.lower()
-    # Cloudflare's own code for "rate limited"; nothing else emits it.
     if "error code: 1015" in lowered or "rate limited" in lowered:
         return (
             "a rate-limit page instead of JSON (Cloudflare error 1015). The "

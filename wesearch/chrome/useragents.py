@@ -1,10 +1,8 @@
-"""Real-browser User-Agent pools: the Chrome versions real browsers run.
+"""Real-browser Chrome User-Agent pools, filtered from ``intoli/user-agents``.
 
-Two maintained pools of real User-Agents, filtered from the ``intoli/user-agents``
-dataset: ``chrome_desktop`` (desktop Chrome) and ``chrome_android`` (Android
-Chrome). :func:`newest_chrome_major` reads the version a transport without
-its own Chrome claims. :func:`refresh` re-downloads and re-filters the
-dataset; run it as a maintenance step::
+Two pools: ``chrome_desktop`` and ``chrome_android``. :func:`newest_chrome_major`
+reads the newest Chrome version a pool records. :func:`refresh` re-downloads
+and re-filters the dataset; run it as a maintenance step::
 
     python -m wesearch.chrome.useragents
 """
@@ -127,6 +125,77 @@ def refresh_all() -> None:
         user_agent_pool.cache_clear()
 
 
+def _pool_path(kind: UserAgentKind) -> Path:
+    """Return the file holding ``kind``'s pool, alongside this module."""
+    return _CWD / f"{kind}_useragents.txt"
+
+
+def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[str]:
+    """Select safe, plain Chrome identities for one pool."""
+    selected_set: set[str] = set()
+    for raw_record in records:
+        try:
+            record = from_plain(raw_record, dict[str, object])
+        except ReadError:
+            continue
+        if not record:
+            continue
+        ua = record.get("userAgent")
+        device = record.get("deviceCategory")
+        if not isinstance(ua, str):
+            continue
+        # A UA must occupy exactly one pool-file line.
+        if not ua or ua != ua.strip() or not ua.isprintable():
+            continue
+        if kind == "chrome_android":
+            keep = (
+                device in ("mobile", "tablet")
+                and "Android" in ua
+                and "Mobile" in ua
+                and _is_plain_chrome(ua)
+                and "Android 10; K" not in ua
+            )
+        else:
+            keep = (
+                device == "desktop"
+                and _is_plain_chrome(ua)
+                and "Mobile" not in ua
+                and "Android" not in ua
+            )
+        if keep:
+            selected_set.add(ua)
+    selected = sorted(selected_set)
+    if len(selected) < 2:
+        raise RuntimeError(
+            f"refresh produced fewer than 2 distinct user agents for {kind}.",
+        )
+    return selected
+
+
+def _is_plain_chrome(ua: str) -> bool:
+    """Return whether a User-Agent is Chrome without a vendor wrapper."""
+    return "Chrome/" in ua and not any(
+        marker in ua
+        for marker in (
+            "CriOS/",
+            "Edg/",
+            "EdgA/",
+            "EdgiOS/",
+            "FBAN/",
+            "FBAV/",
+            "FB_IAB/",
+            "HeadlessChrome/",
+            "HuaweiBrowser/",
+            "IABMV/",
+            "OPR/",
+            "OPT/",
+            "SamsungBrowser/",
+            "Vivaldi/",
+            "YaBrowser/",
+        )
+    )
+
+
 def _download_records() -> list[object]:
     """Download and parse the compressed intoli User-Agent dataset."""
     url = (
@@ -158,10 +227,15 @@ def _download_records() -> list[object]:
     return from_plain(parsed, list[object])
 
 
+def _refresh_user_agent(kind: UserAgentKind) -> str:
+    """Return a coherent fixed identity for the maintenance download."""
+    platform: ChromePlatform = "Android" if kind == "chrome_android" else "Linux"
+    return chrome_user_agent(newest_chrome_major(platform), platform)
+
+
 def _read_response(dataset_request: request.Request) -> bytes:
     """Perform one HTTPS request and return the body."""
-    # The stub declares urlopen's result as Any (`_UrlopenRet`); the cast names
-    # the slice this function reads, and the unit test's BytesIO fits it too.
+    # The stub types urlopen's result as Any; the cast names the slice used here.
     response = cast(
         _ReadableBody,
         request.urlopen(dataset_request, timeout=30),  # noqa: S310 -- fixed HTTPS dataset URL.
@@ -178,49 +252,6 @@ class _ReadableBody(Protocol):
     def __enter__(self) -> object: ...
 
     def __exit__(self, *exc: object) -> object: ...
-
-
-def _select_user_agents(records: list[object], *, kind: UserAgentKind) -> list[str]:
-    """Select safe, plain Chrome identities for one pool."""
-    selected_set: set[str] = set()
-    for raw_record in records:
-        try:
-            record = from_plain(raw_record, dict[str, object])
-        except ReadError:
-            continue
-        if not record:
-            continue
-        ua = record.get("userAgent")
-        device = record.get("deviceCategory")
-        if not isinstance(ua, str):
-            continue
-        # A UA must occupy exactly one pool-file line.
-        if not ua or ua != ua.strip() or not ua.isprintable():
-            continue
-        if kind == "chrome_android":
-            keep = (
-                device in ("mobile", "tablet")
-                and "Android" in ua
-                and "Mobile" in ua
-                and _is_plain_chrome(ua)
-                and "Android 10; K" not in ua
-            )
-        else:
-            # Not mobile, not an Edge/Opera/Samsung variant.
-            keep = (
-                device == "desktop"
-                and _is_plain_chrome(ua)
-                and "Mobile" not in ua
-                and "Android" not in ua
-            )
-        if keep:
-            selected_set.add(ua)
-    selected = sorted(selected_set)
-    if len(selected) < 2:
-        raise RuntimeError(
-            f"refresh produced fewer than 2 distinct user agents for {kind}.",
-        )
-    return selected
 
 
 def _replace_pool(kind: UserAgentKind, selected: list[str]) -> None:
@@ -275,41 +306,6 @@ def _restore_pool(kind: UserAgentKind, backup_path: Path | None) -> None:
         pool_path.unlink(missing_ok=True)
     else:
         backup_path.replace(pool_path)
-
-
-def _is_plain_chrome(ua: str) -> bool:
-    """Return whether a User-Agent is Chrome without a vendor wrapper."""
-    return "Chrome/" in ua and not any(
-        marker in ua
-        for marker in (
-            "CriOS/",
-            "Edg/",
-            "EdgA/",
-            "EdgiOS/",
-            "FBAN/",
-            "FBAV/",
-            "FB_IAB/",
-            "HeadlessChrome/",
-            "HuaweiBrowser/",
-            "IABMV/",
-            "OPR/",
-            "OPT/",
-            "SamsungBrowser/",
-            "Vivaldi/",
-            "YaBrowser/",
-        )
-    )
-
-
-def _pool_path(kind: UserAgentKind) -> Path:
-    """Return the file holding ``kind``'s pool, alongside this module."""
-    return _CWD / (f"{kind}_useragents.txt")
-
-
-def _refresh_user_agent(kind: UserAgentKind) -> str:
-    """Return a coherent fixed identity for the maintenance download."""
-    platform: ChromePlatform = "Android" if kind == "chrome_android" else "Linux"
-    return chrome_user_agent(newest_chrome_major(platform), platform)
 
 
 if __name__ == "__main__":

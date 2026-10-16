@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from wesearch.search.custom_types import SearchError, SearchResult
+from wesearch.search.types import SearchError, SearchResult
 from wesearch.tools import canary
 
 

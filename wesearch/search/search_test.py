@@ -17,7 +17,19 @@ import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
-from wesearch.search.custom_types import (
+from wesearch.mcp.schema import literal_values
+from wesearch.mcp.types import SearchParamsSchema
+from wesearch.search.duckduckgo import (
+    _duckduckgo_check_captcha,
+    _duckduckgo_extract_url,
+    _duckduckgo_parse,
+    _duckduckgo_quote_bangs,
+    _duckduckgo_validate_body,
+    duckduckgo,
+)
+from wesearch.search.search import search
+from wesearch.search.searxng import _searxng_url, category_gloss, searxng
+from wesearch.search.types import (
     DEFAULT_SEARCH_CHAIN,
     CodeResult,
     FileResult,
@@ -32,22 +44,11 @@ from wesearch.search.custom_types import (
     VideoResult,
     strip_scripts,
 )
-from wesearch.search.duckduckgo import (
-    _duckduckgo_check_captcha,
-    _duckduckgo_extract_url,
-    _duckduckgo_parse,
-    _duckduckgo_quote_bangs,
-    _duckduckgo_validate_body,
-    duckduckgo,
-)
-from wesearch.search.search import SearchParamsSchema, search
-from wesearch.search.searxng import _searxng_url, category_gloss, searxng
 from wesearch.types.errors import (
     BotDetectionError,
     FetchError,
     PuzzleChallengeError,
 )
-from wesearch.types.schema import literal_values
 
 
 if TYPE_CHECKING:
@@ -60,26 +61,13 @@ def _patch_fetch(
     *,
     module: str = "search",
 ) -> AbstractContextManager[MagicMock | AsyncMock]:
-    # Fetch returns (body, session); wrap the byte-valued test inputs so the
-    # mock matches that shape (an exception side_effect still raises).
     # Two direct calls rather than one `**kwargs` splat: the branches set
     # mutually exclusive keys, and splatting an untyped mapping into `patch`'s
     # overload set erases what it returns.
     target = f"wesearch.search.{module}.fetch"
     if side_effect is not None:
-        return patch(target, side_effect=_tuple_side_effect(side_effect))
-    return patch(target, return_value=(return_value, FetchSession()))
-
-
-def _tuple_side_effect(side_effect: object) -> object:
-    """Wrap a byte-valued side_effect so each byte result becomes (bytes, session)."""
-    if isinstance(side_effect, list):
-        items = cast(list[object], side_effect)
-        return [
-            item if isinstance(item, BaseException) else (item, FetchSession())
-            for item in items
-        ]
-    return side_effect  # An exception class/instance: raised as-is.
+        return patch(target, side_effect=side_effect)
+    return patch(target, return_value=return_value)
 
 
 @contextmanager
@@ -1071,6 +1059,7 @@ class TestSearchDispatchDefaults:
             {"X": "y"},
             categories="general",
             transport="zendriver",
+            session=None,
         )
 
     def test_non_general_without_backend_forces_searxng(self) -> None:
@@ -1088,6 +1077,7 @@ class TestSearchDispatchDefaults:
             None,
             categories="science",
             transport="auto",
+            session=None,
         )
 
     def test_duckduckgo_dispatch_forwards_headers(self) -> None:
@@ -1101,6 +1091,7 @@ class TestSearchDispatchDefaults:
             10,
             {"X": "y"},
             transport="auto",
+            session=None,
         )
 
     def test_general_without_backend_uses_build_default_exactly(self) -> None:
@@ -1115,7 +1106,13 @@ class TestSearchDispatchDefaults:
             ) as provider,
         ):
             assert search("q") == []
-        provider.assert_called_once_with("q", 10, None, transport="auto")
+        provider.assert_called_once_with(
+            "q",
+            10,
+            None,
+            transport="auto",
+            session=None,
+        )
 
 
 _HIT = SearchResult(url="https://hit.example/", title="hit", snippet="")
@@ -1213,6 +1210,41 @@ class TestSearchFallbackChain:
     def test_unknown_backend_message_is_exact(self) -> None:
         with pytest.raises(ValueError, match=r"^Unknown backend: 'bogus'$"):
             search("q", backend=cast(SearchBackends, "".join(("bogus",))))
+
+
+class TestSessionArg:
+    @pytest.mark.parametrize("backend", DEFAULT_SEARCH_CHAIN)
+    def test_the_session_reaches_every_backend_fetch(
+        self,
+        backend: SearchBackends,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SEARXNG_URL", "https://search.example.test/")
+        monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+        session = FetchSession()
+        body = b"{}" if backend in ("brave", "searxng") else b"<p>empty</p>"
+        with _patch_fetch(module=backend, return_value=body) as mock:
+            search("q", backend=backend, session=session, cache_ttl_sec=0)
+        assert mock.call_args.kwargs["session"] is session
+
+    def test_the_chain_passes_one_session_to_each_backend(self) -> None:
+        session = FetchSession()
+        seen: dict[str, object] = {}
+
+        def runner(name: str) -> Callable[..., list[SearchResult]]:
+            def run(*_args: object, **kwargs: object) -> list[SearchResult]:
+                seen[name] = kwargs["session"]
+                return []
+
+            return run
+
+        with ExitStack() as stack:
+            for name in DEFAULT_SEARCH_CHAIN:
+                stack.enter_context(
+                    patch(f"wesearch.search.search.{name}", runner(name)),
+                )
+            search("q", session=session, cache_ttl_sec=0)
+        assert seen == dict.fromkeys(DEFAULT_SEARCH_CHAIN, session)
 
 
 class TestHeadersArg:

@@ -1,17 +1,13 @@
 """PDF download cascade for :mod:`wesearch.paper`.
 
-Given a normalized paper id, try each enabled source in order and return the
-first response whose bytes start with the PDF magic:
+:func:`download` tries each source in order and returns the first response
+whose bytes start with the PDF magic:
 
-1. arXiv direct (``https://arxiv.org/pdf/<id>``) -- always legal, no
-   intermediary.
+1. arXiv direct (``https://arxiv.org/pdf/<id>``).
 2. Open-access URL from S2 metadata (rate-gated through the shared S2 gate).
 3. Source-only providers available in this build.
 
-Returns ``(pdf_bytes, source_label)`` or raises
-:class:`~wesearch.paper.errors.NotFoundError` when no source yields a PDF.
-Storage (cache dir, atomic write) is the caller's concern -- this module does
-only the network + format work, so it takes no sagent dependency.
+Nothing is written to disk; storing the PDF is the caller's job.
 """
 
 from __future__ import annotations
@@ -22,7 +18,12 @@ import logging
 
 from treekle import MutablePlainTree
 
-from wesearch.fetch import RequestParams, RetryParams, fetch
+from wesearch.fetch import (
+    FetchSession,
+    RequestParams,
+    RetryParams,
+    fetch,
+)
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.ids import s2_wire_id
 from wesearch.paper.providers import s2
@@ -30,7 +31,7 @@ from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:
-    from wesearch.paper.custom_types import IdType
+    from wesearch.paper.types import IdType
 
 __all__ = [
     "batch_oa_urls",
@@ -40,16 +41,6 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Default knob values are literal defaults on the functions that use them (NOT
-# module state). Named here only in prose so the rationale lives once; the values
-# themselves are the signature defaults below.
-#   min_pdf_bytes=128         -- smallest plausible PDF; smaller is not one
-#   pdf_magic=b"%PDF-"        -- leading bytes every valid PDF starts with
-#   download_timeout_sec=180  -- HTTP timeout for a PDF byte download
-#   http_timeout_sec=60       -- HTTP timeout for a metadata/interstitial request
-#   download_retries=2        -- retry budget for a PDF download
-#   arxiv_pdf_base            -- arXiv direct-PDF base URL.
-
 
 def looks_like_pdf(
     content: bytes,
@@ -57,7 +48,7 @@ def looks_like_pdf(
     min_pdf_bytes: int = 128,
     pdf_magic: bytes = b"%PDF-",
 ) -> bool:
-    """Magic-byte check. Rejects HTML pages and captcha interstitials.
+    """Return whether ``content`` is a PDF, not an HTML page or captcha.
 
     Args:
       content: The downloaded bytes to test.
@@ -75,7 +66,7 @@ def oa_url_of(paper: dict[str, MutablePlainTree]) -> str | None:
     """Extract a non-empty ``openAccessPdf.url`` from an S2 paper record.
 
     Args:
-      paper: An S2 paper record (the ``openAccessPdf`` field is read).
+      paper: S2 paper record; only ``openAccessPdf`` is read.
 
     Returns:
       url: The open-access PDF URL, or ``None`` when absent or empty.
@@ -86,21 +77,25 @@ def oa_url_of(paper: dict[str, MutablePlainTree]) -> str | None:
     return url if isinstance(url, str) and url else None
 
 
-def batch_oa_urls(wire_ids: list[str]) -> list[str | None] | None:
+def batch_oa_urls(
+    wire_ids: list[str],
+    *,
+    session: FetchSession | None = None,
+) -> list[str | None] | None:
     """Resolve open-access URLs for many ids in one batched S2 request.
 
     Args:
       wire_ids: S2 wire-format paper ids to resolve in a single batch.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       urls: Per-id OA URL in input order; a ``None`` element means S2 has no OA
-        copy for that id. The whole result is ``None`` when the batch call
-        itself failed, so a caller can fall back to gated per-id lookups rather
-        than trusting empty data.
+        copy for that id. ``None`` overall when the batch call failed, so the
+        caller can fall back to per-id lookups.
 
     """
     try:
-        papers = s2.batch(wire_ids, "openAccessPdf")
+        papers = s2.batch(wire_ids, "openAccessPdf", session=session)
     except Exception:  # noqa: BLE001 -- any backend failure permits the per-id fallback.
         return None
     return [oa_url_of(p) if p is not None else None for p in papers]
@@ -112,16 +107,17 @@ def download(
     *,
     oa_url: str | None = None,
     oa_looked_up: bool = False,
+    session: FetchSession | None = None,
 ) -> tuple[bytes, str]:
-    """Try each enabled source; return ``(pdf_bytes, source_label)`` or raise.
+    """Download a paper's PDF from the first source that yields one.
 
     Args:
-      kind: Identifier kind.
-      canonical: Canonical identifier.
+      kind: ``"doi"`` or ``"arxiv"``, as from ``normalize_id``.
+      canonical: Bare identifier, as from ``normalize_id``.
       oa_url: Pre-resolved open-access URL from a batched lookup, if any.
-      oa_looked_up: True when ``oa_url`` is the result of a completed (batched)
-        lookup, so a ``None`` means "no open-access copy" and must not trigger a
-        second per-id S2 query.
+      oa_looked_up: True when ``oa_url`` came from a completed lookup, so a
+        ``None`` means "no open-access copy" and skips the per-id S2 query.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       pdf_bytes: The downloaded PDF content.
@@ -132,13 +128,53 @@ def download(
 
     """
     if kind == "arxiv":
-        body = _fetch_arxiv(canonical)
+        body = _fetch_arxiv(canonical, session=session)
         if body is not None:
             return body, "arxiv"
-    body = _fetch_open_access(kind, canonical, oa_url=oa_url, looked_up=oa_looked_up)
+    body = _fetch_open_access(
+        kind,
+        canonical,
+        oa_url=oa_url,
+        looked_up=oa_looked_up,
+        session=session,
+    )
     if body is not None:
         return body, "open_access"
     raise NotFoundError(f"No source returned a PDF for {kind}:{canonical}.")
+
+
+def _fetch_arxiv(
+    canonical: str,
+    *,
+    arxiv_pdf_base: str = "https://arxiv.org/pdf",
+    session: FetchSession | None = None,
+) -> bytes | None:
+    """Fetch ``https://arxiv.org/pdf/<id>`` - no intermediary."""
+    url = f"{arxiv_pdf_base}/{canonical}"
+    try:
+        return _download_pdf(url, session=session)
+    except (FetchError, ValueError, OSError) as e:
+        logger.debug("arXiv download failed: %s", e)
+        return None
+
+
+def _download_pdf(
+    url: str,
+    *,
+    retries: int = 2,
+    download_timeout_sec: float = 180.0,
+    min_pdf_bytes: int = 128,
+    session: FetchSession | None = None,
+) -> bytes:
+    """Download a URL, validate it looks like a PDF, return bytes."""
+    body = fetch(
+        url,
+        request=RequestParams(
+            retry=RetryParams(retries=retries, timeout_sec=download_timeout_sec),
+        ),
+        session=session,
+    )
+    return _validate_pdf(url, body, min_pdf_bytes=min_pdf_bytes)
 
 
 def _validate_pdf(url: str, body: bytes, *, min_pdf_bytes: int = 128) -> bytes:
@@ -150,63 +186,39 @@ def _validate_pdf(url: str, body: bytes, *, min_pdf_bytes: int = 128) -> bytes:
     return body
 
 
-def _download_pdf(
-    url: str,
-    *,
-    retries: int = 2,
-    download_timeout_sec: float = 180.0,
-    min_pdf_bytes: int = 128,
-) -> bytes:
-    """Download a URL, validate it looks like a PDF, return bytes."""
-    body, _ = fetch(
-        url,
-        request=RequestParams(
-            retry=RetryParams(retries=retries, timeout_sec=download_timeout_sec),
-        ),
-    )
-    return _validate_pdf(url, body, min_pdf_bytes=min_pdf_bytes)
-
-
-def _fetch_arxiv(
-    canonical: str,
-    *,
-    arxiv_pdf_base: str = "https://arxiv.org/pdf",
-) -> bytes | None:
-    """Fetch ``https://arxiv.org/pdf/<id>`` - no intermediary."""
-    url = f"{arxiv_pdf_base}/{canonical}"
-    try:
-        return _download_pdf(url)
-    except (FetchError, ValueError, OSError) as e:
-        logger.debug("arXiv download failed: %s", e)
-        return None
-
-
-def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
-    """Ask S2 for an ``openAccessPdf.url`` via the shared, rate-gated client."""
-    try:
-        data = s2.get(
-            f"/paper/{s2_wire_id(kind, canonical)}",
-            {"fields": "openAccessPdf"},
-        )
-    except Exception:  # noqa: BLE001 -- any lookup failure means no discoverable OA copy.
-        return None
-    return oa_url_of(data)
-
-
 def _fetch_open_access(
     kind: IdType,
     canonical: str,
     *,
     oa_url: str | None,
     looked_up: bool,
+    session: FetchSession | None = None,
 ) -> bytes | None:
     """Try an open-access PDF URL, looking it up via S2 when not yet resolved."""
     if oa_url is None and not looked_up:
-        oa_url = _s2_oa_lookup(kind, canonical)
+        oa_url = _s2_oa_lookup(kind, canonical, session=session)
     if oa_url is None:
         return None
     try:
-        return _download_pdf(oa_url)
+        return _download_pdf(oa_url, session=session)
     except (FetchError, ValueError, OSError) as e:
         logger.debug("OA download failed: %s", e)
         return None
+
+
+def _s2_oa_lookup(
+    kind: IdType,
+    canonical: str,
+    *,
+    session: FetchSession | None = None,
+) -> str | None:
+    """Ask S2 for an ``openAccessPdf.url`` via the shared, rate-gated client."""
+    try:
+        data = s2.get(
+            f"/paper/{s2_wire_id(kind, canonical)}",
+            {"fields": "openAccessPdf"},
+            session=session,
+        )
+    except Exception:  # noqa: BLE001 -- any lookup failure means no discoverable OA copy.
+        return None
+    return oa_url_of(data)

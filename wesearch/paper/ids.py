@@ -15,7 +15,7 @@ from wesearch.paper.errors import InvalidIdError
 
 
 if TYPE_CHECKING:
-    from wesearch.paper.custom_types import IdType
+    from wesearch.paper.types import IdType
 
 
 __all__ = [
@@ -26,9 +26,7 @@ __all__ = [
     "s2_wire_id",
 ]
 
-# arXiv id embedded in an abs/pdf URL, for backends (SearXNG, Google Scholar)
-# that surface no structured arXiv id but link to arxiv.org. Distinct from the
-# anchored bare-id shapes in ``normalize_id``, which never match a URL.
+# arXiv id embedded in an arxiv.org abs/pdf URL; group 1 is the bare id.
 ARXIV_URL_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w.-]+/\d+|\d{4}\.\d{4,5})")
 
 
@@ -69,8 +67,7 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
     if not s:
         raise InvalidIdError("Empty identifier.")
 
-    # Strip common URL / scheme wrappers. A matched prefix pins the family,
-    # so a ``doi:`` value is never re-interpreted as arXiv (or vice versa).
+    # A matched prefix pins the family, so a ``doi:`` value is never read as arXiv.
     lower = s.lower()
     forced: IdType | None = None
     for prefix in doi_prefixes:
@@ -82,7 +79,6 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
         for prefix in arxiv_prefixes:
             if lower.startswith(prefix):
                 s = s[len(prefix) :]
-                # arXiv PDF urls often end in ``.pdf`` - strip.
                 if s.lower().endswith(".pdf"):
                     s = s[:-4]
                 forced = "arxiv"
@@ -92,9 +88,8 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
     # suffix is opaque (slashes, dots, colons all legal).
     if forced != "arxiv" and re.match(r"^(10\.\d{4,})/(\S+)$", s):
         return "doi", s
-    # arXiv new style NNNN.NNNNN[vN]; old style <subject>/NNNNNNN[vN]
-    # (``hep-th/9901001``), still honored by S2 and arXiv for pre-April-2007
-    # papers.
+    # arXiv new style NNNN.NNNNN[vN]; old style <subject>/NNNNNNN[vN] for
+    # pre-April-2007 papers.
     if forced != "doi" and (
         re.match(r"^(\d{4}\.\d{4,5})(v\d+)?$", s)
         or re.match(r"^([a-z-]+(?:\.[A-Z]{2})?)/(\d{7})(v\d+)?$", s)
@@ -114,10 +109,7 @@ def looks_like_paper_id(token: str) -> bool:
       token: String to test.
 
     Returns:
-      valid: True if token is a valid DOI or arXiv identifier.
-
-    Returns:
-      result: The bool.
+      valid: Whether :func:`normalize_id` accepts ``token``.
 
     """
     try:
@@ -131,11 +123,11 @@ def s2_wire_id(kind: IdType, canonical: str) -> str:
     """Build the prefixed form S2 accepts in a URL path: ``DOI:...``/``ARXIV:...``.
 
     Args:
-      kind: Identifier type.
-      canonical: Bare identifier.
+      kind: ``"doi"`` or ``"arxiv"``.
+      canonical: Bare identifier from :func:`normalize_id`.
 
     Returns:
-      wire_id: Prefixed identifier string for S2 API calls.
+      wire_id: ``DOI:<canonical>`` or ``ARXIV:<canonical>``.
 
     """
     return f"DOI:{canonical}" if kind == "doi" else f"ARXIV:{canonical}"
@@ -145,11 +137,12 @@ def id_slug(kind: IdType, canonical: str) -> str:
     """Build a filesystem-safe slug for a paper id.
 
     Args:
-      kind: Identifier type.
-      canonical: Bare identifier.
+      kind: ``"doi"`` or ``"arxiv"``.
+      canonical: Bare identifier from :func:`normalize_id`.
 
     Returns:
-      slug: String safe for use as a filename component.
+      slug: ``<kind>_<canonical>`` with each character outside
+        ``[A-Za-z0-9._-]`` replaced by ``_``. Not injective, and unbounded.
 
     """
     prefix = "doi" if kind == "doi" else "arxiv"

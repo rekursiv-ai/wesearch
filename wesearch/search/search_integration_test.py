@@ -35,7 +35,9 @@ import pytest
 
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.lib.userdirs import state_dir
-from wesearch.search.custom_types import (
+from wesearch.search.duckduckgo import duckduckgo
+from wesearch.search.searxng import searxng
+from wesearch.search.types import (
     FileResult,
     ImageResult,
     MapResult,
@@ -48,8 +50,6 @@ from wesearch.search.custom_types import (
     TorrentResult,
     VideoResult,
 )
-from wesearch.search.duckduckgo import duckduckgo
-from wesearch.search.searxng import searxng
 from wesearch.types.errors import BotDetectionError, FetchError
 
 

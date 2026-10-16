@@ -23,6 +23,7 @@ from treekle import MutablePlainTree, ReadError, from_plain
 
 from wesearch.fetch import (
     ContentParams,
+    FetchSession,
     PolicyParams,
     RequestParams,
     RetryParams,
@@ -30,9 +31,9 @@ from wesearch.fetch import (
     fetch,
 )
 from wesearch.paper import paginate as paper_paginate
-from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.errors import BackendError, translate_http_error
 from wesearch.paper.paginate import Cursor, Page
+from wesearch.paper.types import AuthorRecord, PaperRecord
 from wesearch.types.errors import FetchError
 
 
@@ -111,6 +112,7 @@ def get(
     retries: int = 2,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> dict[str, MutablePlainTree]:
     """GET an S2 Graph API path, with key injection and 429 backoff.
 
@@ -121,6 +123,7 @@ def get(
       retries: 429 retry budget before surfacing the throttle.
       timeout_sec: Per-request HTTP timeout.
       transport: Retrieval transport forwarded to the HTTP layer.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       data: Parsed JSON object.
@@ -136,6 +139,7 @@ def get(
             retry=RetryParams(retries=retries, timeout_sec=timeout_sec),
             policy=PolicyParams(transport=transport),
         ),
+        session=session,
     )
     parsed = _loads(raw, path)
     if isinstance(parsed, list):
@@ -152,6 +156,7 @@ def batch(
     retries: int = 2,
     timeout_sec: float = 10.0,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> list[dict[str, MutablePlainTree] | None]:
     """Fetch metadata for many ids in one batched ``POST /{endpoint}/batch``.
 
@@ -170,6 +175,7 @@ def batch(
       retries: 429 retry budget before surfacing the throttle.
       timeout_sec: Per-request HTTP timeout.
       transport: Retrieval transport forwarded to the HTTP layer.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       records: One entry per input id, in order; ``None`` for unresolved ids.
@@ -192,6 +198,7 @@ def batch(
             retry=RetryParams(retries=retries, timeout_sec=timeout_sec),
             policy=PolicyParams(transport=transport),
         ),
+        session=session,
     )
     result = _loads(raw, f"/{endpoint}/batch")
     if not isinstance(result, list):
@@ -210,6 +217,7 @@ def paginate(
     keep: Callable[[dict[str, MutablePlainTree]], bool] = lambda _e: True,
     page_rows: int = 1000,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> Page:
     """Walk an S2 ``offset``/``next`` list endpoint via the shared cursor walker.
 
@@ -222,6 +230,7 @@ def paginate(
       page_rows: List-endpoint page size; large to gather matches in the fewest
         gated calls (S2 signals its depth ceiling with a 400).
       transport: Retrieval transport forwarded to the HTTP layer.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       page: A :class:`Page` (entries + completeness).
@@ -237,6 +246,7 @@ def paginate(
         keep=keep,
         page_size=page_rows,
         transport=transport,
+        session=session,
     )
 
 
@@ -246,6 +256,7 @@ def search_paginate(
     limit: int | None,
     search_page_max: int = 100,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> tuple[Page, int]:
     """Walk ``/paper/search`` (offset/total paging, capped at the search ceiling).
 
@@ -260,6 +271,7 @@ def search_paginate(
       search_page_max: ``/paper/search`` page-size ceiling (S2 rejects a search
         limit above 100 with a 400).
       transport: Retrieval transport forwarded to the HTTP layer.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       page: A :class:`Page` (hits + completeness).
@@ -271,7 +283,12 @@ def search_paginate(
     def fetch_page(offset: int, size: int) -> dict[str, MutablePlainTree]:
         nonlocal total
         page_params = {**params, "offset": offset, "limit": size}
-        body = get("/paper/search", page_params, transport=transport)
+        body = get(
+            "/paper/search",
+            page_params,
+            transport=transport,
+            session=session,
+        )
         total = _count(body.get("total"))
         return body
 
@@ -379,6 +396,7 @@ def author_papers(
     limit: int | None,
     keep: Callable[[dict[str, MutablePlainTree]], bool] = lambda _e: True,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> Page:
     """Fetch an author's publications, walking the cursor for filtered matches.
 
@@ -387,6 +405,7 @@ def author_papers(
       limit: Maximum kept records to return, or ``None`` for one page.
       keep: Predicate selecting which paper entries to retain.
       transport: Retrieval transport forwarded to the HTTP layer.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       result: Paginated author's papers, filtered by keep() predicate.
@@ -398,6 +417,7 @@ def author_papers(
         limit=limit,
         keep=keep,
         transport=transport,
+        session=session,
     )
 
 
@@ -414,19 +434,15 @@ def search_total(data: dict[str, MutablePlainTree]) -> int:
     return _count(data.get("total"))
 
 
-def _headers() -> dict[str, str]:
-    """Build S2 request headers, injecting ``x-api-key`` when present in env."""
-    headers: dict[str, str] = {"Accept": "application/json"}
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
-    if key:
-        headers["x-api-key"] = key
-    return headers
-
-
-def _send(url: str, request: RequestParams) -> bytes:
+def _send(
+    url: str,
+    request: RequestParams,
+    *,
+    session: FetchSession | None = None,
+) -> bytes:
     """Fetch one S2 request; map a transport failure to a :class:`PaperError`."""
     try:
-        return fetch(url, request=request)[0]
+        return fetch(url, request=request, session=session)
     except FetchError as e:
         raise translate_http_error(
             e,
@@ -442,6 +458,25 @@ def _send(url: str, request: RequestParams) -> bytes:
         ) from e
 
 
+def _headers() -> dict[str, str]:
+    """Build S2 request headers, injecting ``x-api-key`` when present in env."""
+    headers: dict[str, str] = {"Accept": "application/json"}
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+    if key:
+        headers["x-api-key"] = key
+    return headers
+
+
+def _loads(raw: bytes, what: str) -> dict[str, MutablePlainTree] | list[object]:
+    """Parse S2 JSON bytes, mapping a decode failure to :class:`BackendError`."""
+    try:
+        return cast(dict[str, MutablePlainTree] | list[object], json.loads(raw))
+    except json.JSONDecodeError as e:
+        raise BackendError(
+            f"Semantic Scholar returned invalid JSON for {what}: {e}",
+        ) from e
+
+
 def _paginate(
     path: str,
     params: dict[str, str | int],
@@ -450,6 +485,7 @@ def _paginate(
     keep: Callable[[dict[str, MutablePlainTree]], bool],
     page_size: int,
     transport: Transport,
+    session: FetchSession | None = None,
 ) -> Page:
     """Build an S2 offset/next :class:`Cursor` and delegate to the walker."""
     cursor = Cursor(
@@ -458,6 +494,7 @@ def _paginate(
             path,
             params,
             transport=transport,
+            session=session,
         ),
         rows=lambda body: cast(
             list[dict[str, MutablePlainTree]],
@@ -479,10 +516,11 @@ def _fetch_offset_page(
     size: int,
     *,
     transport: Transport,
+    session: FetchSession | None = None,
 ) -> dict[str, MutablePlainTree]:
     """GET one offset/limit page of an S2 list endpoint."""
     page_params = {**params, "offset": offset, "limit": size}
-    return get(path, page_params, transport=transport)
+    return get(path, page_params, transport=transport, session=session)
 
 
 def _next_offset_advance(
@@ -497,6 +535,22 @@ def _next_offset_advance(
     return nxt if isinstance(nxt, int) and rows else None
 
 
+def _array(value: object) -> list[object]:
+    """Return ``value`` when it is a JSON array, else ``[]``."""
+    try:
+        return from_plain(value, list[object])
+    except ReadError:
+        return []
+
+
+def _count(value: object) -> int:
+    """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
+    try:
+        return from_plain(value, int, strict=False, default=0)
+    except ReadError:
+        return 0
+
+
 def _search_offset_advance(
     body: dict[str, MutablePlainTree],
     offset: int,
@@ -509,30 +563,12 @@ def _search_offset_advance(
     return nxt if rows and nxt < _count(body.get("total")) else None
 
 
-def _loads(raw: bytes, what: str) -> dict[str, MutablePlainTree] | list[object]:
-    """Parse S2 JSON bytes, mapping a decode failure to :class:`BackendError`."""
-    try:
-        return cast(dict[str, MutablePlainTree] | list[object], json.loads(raw))
-    except json.JSONDecodeError as e:
-        raise BackendError(
-            f"Semantic Scholar returned invalid JSON for {what}: {e}",
-        ) from e
-
-
 def _object(value: object) -> dict[str, object]:
     """Return ``value`` when it is a JSON object, else ``{}``."""
     try:
         return from_plain(value, dict[str, object])
     except ReadError:
         return {}
-
-
-def _array(value: object) -> list[object]:
-    """Return ``value`` when it is a JSON array, else ``[]``."""
-    try:
-        return from_plain(value, list[object])
-    except ReadError:
-        return []
 
 
 def _objects(value: object) -> list[dict[str, object]]:
@@ -543,11 +579,3 @@ def _objects(value: object) -> list[dict[str, object]]:
 def _text(value: object) -> str:
     """Return a JSON value as text, ``""`` for a falsy one (null, ``""``, ``0``)."""
     return str(value) if value else ""
-
-
-def _count(value: object) -> int:
-    """Return an integer count, parsing ``"3"`` and ``3.0``, else 0."""
-    try:
-        return from_plain(value, int, strict=False, default=0)
-    except ReadError:
-        return 0

@@ -1,14 +1,9 @@
-"""Host-wide pacing and block recovery for outbound requests.
+"""Pace requests to each site, and back off a site that blocked this IP.
 
-Every agent on a host fetches from one egress IP, and a site paces and blocks
-that IP, not a process. So the gate is cross-process (``fcntl``-locked files)
-and keyed by site and egress IP: a VPN roll starts clean.
-
-A site's final failure -- a bot block, a 429, or (where a site drops a flagged
-IP's packets) an unreachable host -- opens a short lock. When it expires ONE
-caller probes the site while the rest are turned away: a success unlocks every
-caller at once, a failure relocks for twice as long (capped). Only the FINAL
-outcome of a fetch counts, so a curl block that Chrome then clears never locks.
+Shared by every process on the host, per site and public IP. A block (a bot
+challenge, a 429, or for some sites a dropped connection) locks the site; when
+the lock ends one caller probes it while the rest wait. Success unlocks all;
+another block doubles the lock.
 """
 
 from __future__ import annotations
@@ -155,8 +150,6 @@ def gated(
         / "ratelimit"
         / f"{host}:{egress}:{policy.path_prefix.strip('/').replace('/', '-')}_gate.lock"
     )
-    # An unpaced site that never failed has no state worth a file; skipping it
-    # keeps the directory to paced and once-blocked hosts, not every URL fetched.
     tracked = policy.interval_sec > 0 or path.exists()
     if tracked:
         time.sleep(_admit(path, url, policy))
@@ -183,7 +176,7 @@ def gated(
             _release_probe(path)
         raise
     if tracked:
-        _reset(path)
+        _reset(path, forget=policy.interval_sec <= 0)
 
 
 def clear_host(host: str) -> int:
@@ -226,38 +219,10 @@ def challenged_urls() -> list[str]:
     return list(dict.fromkeys(p.read_text() for p in recorded))
 
 
-def _challenge_path(path: Path) -> Path:
-    """Return the file beside a gate's state holding the URL a challenge locked."""
-    return path.with_suffix(".url")
-
-
 def _policy_for(host: str, path: str, policies: Sequence[SitePolicy]) -> SitePolicy:
     """Return the longest-prefix policy for ``host``/``path``, else the default."""
     matches = [p for p in policies if p.host == host and path.startswith(p.path_prefix)]
     return max(matches, key=lambda p: len(p.path_prefix), default=SitePolicy(host=host))
-
-
-# The file holds five doubles: (tokens, updated) pace the site; (locked_until,
-# failures, probe_until) recover it from a block. All zero means never used.
-_STATE = struct.Struct("<5d")
-
-
-@contextmanager
-def _state(path: Path) -> Generator[list[float]]:
-    """Read, then rewrite if changed, the gate state under an exclusive ``flock``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        raw = os.read(fd, _STATE.size).ljust(_STATE.size, b"\0")
-        state = list(cast(tuple[float, ...], _STATE.unpack(raw)))
-        before = list(state)
-        yield state
-        if state != before:
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, _STATE.pack(*state))
-    finally:
-        os.close(fd)
 
 
 def _admit(path: Path, url: str, policy: SitePolicy) -> float:
@@ -292,6 +257,41 @@ def _admit(path: Path, url: str, policy: SitePolicy) -> float:
         return wait
 
 
+@contextmanager
+def _state(path: Path) -> Generator[list[float]]:
+    """Read, then rewrite if changed, the gate state under an exclusive ``flock``."""
+    # Five doubles: (tokens, updated) pace the site; (locked_until, failures,
+    # probe_until) recover it from a block. All zero means never used.
+    layout = struct.Struct("<5d")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # A recovered site's file is deleted under the lock; one opened before
+        # that is a dead inode, so reopen the live one.
+        held = os.fstat(fd)
+        try:
+            live = path.stat()
+        except FileNotFoundError:
+            live = None
+        if live is not None and (live.st_dev, live.st_ino) == (
+            held.st_dev,
+            held.st_ino,
+        ):
+            break
+        os.close(fd)
+    try:
+        raw = os.read(fd, layout.size).ljust(layout.size, b"\0")
+        state = list(cast(tuple[float, ...], layout.unpack(raw)))
+        before = list(state)
+        yield state
+        if state != before:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, layout.pack(*state))
+    finally:
+        os.close(fd)
+
+
 def _trip(path: Path, policy: SitePolicy, *, challenge_url: str = "") -> None:
     """Relock for twice the previous lock, capped; the first block uses the base."""
     now = time.time()
@@ -307,14 +307,21 @@ def _trip(path: Path, policy: SitePolicy, *, challenge_url: str = "") -> None:
             _challenge_path(path).write_text(challenge_url)
 
 
-def _reset(path: Path) -> None:
-    """Unlock every caller at once; the site answered."""
-    with _state(path) as state:
-        state[2:5] = [0.0, 0.0, 0.0]
-        _challenge_path(path).unlink(missing_ok=True)
+def _challenge_path(path: Path) -> Path:
+    """Return the file beside a gate's state holding the URL a challenge locked."""
+    return path.with_suffix(".url")
 
 
 def _release_probe(path: Path) -> None:
     """Free the probe for the next caller; the failure said nothing about a block."""
     with _state(path) as state:
         state[4] = 0.0
+
+
+def _reset(path: Path, *, forget: bool = False) -> None:
+    """Unlock every caller at once; the site answered. ``forget`` drops the file."""
+    with _state(path) as state:
+        state[2:5] = [0.0, 0.0, 0.0]
+        _challenge_path(path).unlink(missing_ok=True)
+        if forget:
+            path.unlink()

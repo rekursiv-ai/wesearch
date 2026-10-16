@@ -1,4 +1,4 @@
-"""Persistent transport routing learned by automatic web fetches."""
+"""Hosts that block curl, so ``auto`` sends them straight to the browser."""
 
 from __future__ import annotations
 
@@ -31,27 +31,18 @@ def zendriver_domains(
     path: Path | None = None,
     ttl_sec: float = 7 * 24 * 3600.0,
 ) -> frozenset[str]:
-    """Return domains observed to bot-wall the header transports.
+    """Return the hosts known to block curl.
 
-    The recorded fact is that CURL was walled, not that the browser then
-    succeeded: :func:`wesearch.fetch.fetch` persists the domain when curl
-    raises, before the browser runs. That is deliberate -- a domain that walled
-    curl will wall it again, so skipping straight to the browser is right even
-    when the browser also fails. Reading this as "the browser works here" is
-    what makes the entry look like poison rather than a routing fact.
-
-    A learned entry expires after ``ttl_sec``: one block from a burned egress
-    pinned the domain to the single contended Chrome forever, long after the
-    wall had lifted. The bundled list never expires; a learned entry with no
-    timestamp predates expiry and reads as already expired.
+    The bundled list never expires; a host learned from a block expires
+    ``ttl_sec`` after its last block.
 
     Args:
-      path: Domain-list path. Defaults to the bundled list plus the per-user
-        ``zendriver-domains.txt`` under the wesearch state directory.
-      ttl_sec: Seconds a learned entry routes to Zendriver after it was written.
+      path: One list to read; ``None`` reads the bundled list and the learned
+        one under wesearch's state directory.
+      ttl_sec: Seconds a learned host stays listed.
 
     Returns:
-      domains: Normalized domains currently routed directly to Zendriver.
+      domains: Lower-case host names.
 
     """
     cutoff = time.time() - ttl_sec
@@ -106,14 +97,7 @@ def remember_zendriver_domain(
     )
     try:
         fcntl.flock(file_descriptor, fcntl.LOCK_EX)
-        # A corrupt cache is DISCARDED and rewritten rather than raising: the
-        # read path degrades to empty on non-UTF-8, so raising here would leave
-        # one bad byte permanently blocking every future write with no way back
-        # except deleting the file by hand.
-        #
-        # Discarded whole, not per-line: decoding with errors="replace" turned
-        # bad bytes into U+FFFD and then PERSISTED those as domains, so the file
-        # accumulated junk the read path would have rejected outright.
+        # An undecodable list is replaced whole, or one bad byte blocks every write.
         try:
             existing = _read_all(file_descriptor).decode()
         except UnicodeDecodeError:
@@ -137,40 +121,8 @@ def remember_zendriver_domain(
         os.close(file_descriptor)
 
 
-def _parse(line: str) -> tuple[str, float] | None:
-    """Return ``(domain, written_at)`` for one list line, or ``None`` if blank."""
-    name, _, stamp = line.partition("\t")
-    normalized = name.strip().casefold()
-    if not normalized:
-        return None
-    try:
-        return normalized, float(stamp)
-    except ValueError:
-        return normalized, 0.0
-
-
-def _read_all(file_descriptor: int) -> bytes:
-    """Read one open file descriptor to EOF."""
-    chunks: list[bytes] = []
-    while chunk := os.read(file_descriptor, 1 << 20):
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _write_all(file_descriptor: int, data: bytes) -> None:
-    """Write ``data`` fully, honoring short writes."""
-    view = memoryview(data)
-    while view:
-        view = view[os.write(file_descriptor, view) :]
-
-
-# Optional: ``_read_domains`` returns an empty set when the file is absent, so a
-# checkout without it simply starts with no bundled defaults.
-# The list is an optional, rebuildable cache on the per-fetch hot path, so a missing,
-# permission-denied, or corrupt (non-UTF-8) file degrades to no learned routing rather
-# than aborting every automatic fetch.
 def _read_domains(path: Path, *, cutoff: float) -> frozenset[str]:
-    """Read one locked domain list, returning empty when absent or unreadable."""
+    """Return a domain list's entries written after ``cutoff``; none if unreadable."""
     try:
         file_descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     except FileNotFoundError:
@@ -182,9 +134,6 @@ def _read_domains(path: Path, *, cutoff: float) -> frozenset[str]:
         fcntl.flock(file_descriptor, fcntl.LOCK_SH)
         raw = _read_all(file_descriptor)
     except OSError:
-        # The docstring's promise covers the whole read, not just the open: a
-        # lock or read failure on an optional rebuildable cache must not abort
-        # every automatic fetch, and this runs on the per-fetch hot path.
         logger.warning("Ignoring unreadable Zendriver domain list at %s.", path)
         return frozenset[str]()
     finally:
@@ -201,3 +150,30 @@ def _read_domains(path: Path, *, cutoff: float) -> frozenset[str]:
         for name, stamp in (entry,)
         if stamp >= cutoff
     )
+
+
+def _read_all(file_descriptor: int) -> bytes:
+    """Read one open file descriptor to EOF."""
+    chunks: list[bytes] = []
+    while chunk := os.read(file_descriptor, 1 << 20):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _parse(line: str) -> tuple[str, float] | None:
+    """Return ``(domain, written_at)`` for one list line, or ``None`` if blank."""
+    name, _, stamp = line.partition("\t")
+    normalized = name.strip().casefold()
+    if not normalized:
+        return None
+    try:
+        return normalized, float(stamp)
+    except ValueError:
+        return normalized, 0.0
+
+
+def _write_all(file_descriptor: int, data: bytes) -> None:
+    """Write ``data`` fully, honoring short writes."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(file_descriptor, view) :]

@@ -32,11 +32,6 @@ __all__ = [
 ]
 
 
-def _keep_all(entry: dict[str, MutablePlainTree]) -> bool:
-    del entry
-    return True
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Page:
     """A paginated, filtered slice of a list endpoint.
@@ -84,6 +79,11 @@ class Cursor:
     page_size_max: int
     start: int = 0
     is_depth_ceiling: Callable[[BackendError], bool] = field(default=lambda _e: False)
+
+
+def _keep_all(entry: dict[str, MutablePlainTree]) -> bool:
+    del entry
+    return True
 
 
 def paginate(

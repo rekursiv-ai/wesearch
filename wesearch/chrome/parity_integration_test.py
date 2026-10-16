@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-import importlib
+from curl_cffi.requests.impersonate import REAL_TARGET_MAP
 
 import pytest
 
@@ -47,39 +47,31 @@ from wesearch.chrome.headers import (
 from wesearch.chrome.useragents import newest_chrome_major
 from wesearch.fetch import (
     ContentParams,
-    FetchSession,
     PolicyParams,
     RequestParams,
     RetryParams,
     Transport,
     fetch,
 )
-from wesearch.fetch.transport.curl import (
-    close_curl_sessions_except,
-    curl_chrome_major,
-)
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
+from wesearch.fetch.types import FetchSession
+from wesearch.profile import Profile, ProfileStore
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from curl_cffi.requests import Response
 
-
-# The MODULE, not the `fetch` function of the same name imported above: these
-# tests patch module attributes (`egress_ip`, `curl_session`). A plain
-# `import wesearch.fetch.fetch` binds the package's re-exported function
-# here, so `patch.object` would target the function and fail.
-fetch_mod = importlib.import_module("wesearch.fetch.fetch")
+# A documentation address (RFC 5737): a preset egress skips the live IP probe.
+_EGRESS = "203.0.113.9"
 
 # curl_cffi injects the HTTP/2-only Priority header on HTTP/1.1 connections; a
 # real Chrome does not. Dropped from the curl comparison (see module docstring).
 _HTTP2_ONLY = frozenset({"priority"})
 
-# Compare navigation values exactly after drive_chrome pins JPEG XL off:
-# codec support changes Accept across builds, while our target is Chrome146.
+# Compare navigation values exactly; drive_chrome pins off the field-trial
+# features that change them across builds.
 _INTENT_VALUES = (
     "accept",
     "accept-encoding",
@@ -103,13 +95,21 @@ _needs_chrome = pytest.mark.skipif(
 
 
 @pytest.fixture
+def session(tmp_path: Path) -> Iterator[FetchSession]:
+    """Return a session with a preset egress and an empty cookie store."""
+    opened = FetchSession(
+        profiles=ProfileStore(base_dir=tmp_path / "profiles"),
+        egress=_EGRESS,
+    )
+    try:
+        yield opened
+    finally:
+        opened.close()
+
+
+@pytest.fixture
 def oracle() -> Iterator[EchoOracle]:
     """Return a running loopback echo oracle whose CA the fetch backends trust."""
-    # A pooled curl Session keys on eTLD+1 (``localhost``), so one cached under a
-    # prior oracle's CA would be reused against this oracle's -- and fail TLS.
-    # No egress key matches "", so this drops EVERY pooled session and each
-    # oracle gets a fresh, correctly-trusted one.
-    close_curl_sessions_except("")
     # ``stdlib`` (ssl) honors SSL_CERT_FILE; curl_cffi (BoringSSL) honors
     # CURL_CA_BUNDLE. Both must trust the oracle's self-signed CA.
     with (
@@ -137,6 +137,7 @@ def oracle() -> Iterator[EchoOracle]:
 def test_fetch_wire_request_matches_chrome(
     backend: Transport,
     oracle: EchoOracle,
+    session: FetchSession,
 ) -> None:
     """Our wire request is a real Chrome's: headers, order, intent, and OS.
 
@@ -153,13 +154,16 @@ def test_fetch_wire_request_matches_chrome(
     chrome = _drop(_chrome_headers(oracle), omit)
     chrome_lines = _drop_lines(oracle.captured_lines(), omit)
     assert chrome, "Chrome sent no request to the oracle; nothing to compare."
-    # trust="internal": the oracle is a loopback server, which the default
-    # ``untrusted`` SSRF check refuses before any wire bytes exist. The test
-    # authored this URL, so declaring it is exactly true -- and is the seam that
-    # keeps the check real for every other caller instead of weakening it.
+    # allow_private_hosts=True: the oracle is a loopback server, which the default
+    # SSRF check refuses before any wire bytes exist. The test authored this
+    # URL, so declaring it is exactly true -- and is the seam that keeps the
+    # check real for every other caller instead of weakening it.
     fetch(
         oracle.url,
-        request=RequestParams(policy=PolicyParams(transport=backend, trust="internal")),
+        request=RequestParams(
+            policy=PolicyParams(transport=backend, allow_private_hosts=True),
+        ),
+        session=session,
     )
     ours = _drop(oracle.captured(), omit)
     assert ours == chrome, (
@@ -186,66 +190,62 @@ def test_fetch_wire_request_matches_chrome(
         pytest.param("stdlib", id="stdlib"),
     ],
 )
-def test_session_threads_across_requests(
+def test_repeat_requests_send_the_same_wire_headers(
     backend: Transport,
     oracle: EchoOracle,
+    session: FetchSession,
 ) -> None:
-    """A threaded session preserves the wire identity across requests.
-
-    Call once, feed the returned session to the next call, and the second
-    request reflects what the first learned -- mirroring a real browser. The
-    oracle sets no Accept-CH, so a reused session must send the same wire headers
-    as a fresh one.
-    """
-    request = RequestParams(policy=PolicyParams(transport=backend, trust="internal"))
-    _, session = fetch(oracle.url, request=request)
-    fetch(oracle.url, session=session, request=request)
-    reused = oracle.captured()
-    fetch(oracle.url, request=request)
-    assert reused == oracle.captured()
+    """A second request to an origin presents the identity the first did."""
+    request = RequestParams(
+        policy=PolicyParams(transport=backend, allow_private_hosts=True),
+    )
+    fetch(oracle.url, request=request, session=session)
+    first = oracle.captured()
+    fetch(oracle.url, request=request, session=session)
+    assert oracle.captured() == first
 
 
 @pytest.mark.browser_chrome
-def test_pooled_session_does_not_duplicate_cookie_on_wire(oracle: EchoOracle) -> None:
-    # On the pooled-curl path, a caller cookie whose name the session jar already
-    # holds must NOT be sent twice (jar value + header value). A real browser
-    # sends exactly one value per cookie name; two is a bot tell.
-    from curl_cffi import requests  # noqa: PLC0415 -- test-only, off collection.
-
-    pooled: requests.Session[Response] = requests.Session(impersonate="chrome")
-    pooled.cookies.set("CONSENT", "SERVERSET", domain="localhost")
-
-    def _pooled(*_args: object, **_kwargs: object) -> requests.Session[Response]:
-        return pooled
-
-    with (
-        patch.object(fetch_mod, "egress_ip", return_value="9.9.9.9"),
-        patch.object(fetch_mod, "curl_session", _pooled),
-        patch("wesearch.fetch.fetch.ProfileStore"),
-    ):
-        fetch(
-            oracle.url,
-            request=RequestParams(
-                content=ContentParams(cookies={"CONSENT": "YES+"}),
-                policy=PolicyParams(trust="internal"),
-            ),
-        )
+def test_stored_cookie_is_not_duplicated_on_wire(
+    oracle: EchoOracle,
+    session: FetchSession,
+) -> None:
+    # A caller cookie whose name the stored profile already holds must NOT be
+    # sent twice (stored value + caller value). A real browser sends exactly one
+    # value per cookie name; two is a bot tell.
+    session.profiles.save(
+        _EGRESS,
+        "localhost",
+        Profile(cookies={"CONSENT": "SERVERSET"}),
+    )
+    fetch(
+        oracle.url,
+        request=RequestParams(
+            content=ContentParams(cookies={"CONSENT": "YES+"}),
+            policy=PolicyParams(transport="curl", allow_private_hosts=True),
+        ),
+        session=session,
+    )
     joined = " ".join(_cookie_lines(oracle.captured_lines()))
     assert joined.count("CONSENT=") == 1, f"CONSENT sent more than once: {joined}"
+    assert "CONSENT=YES+" in joined, f"the caller's cookie lost: {joined}"
 
 
 @pytest.mark.browser_chrome
-def test_case_variant_cookie_header_not_duplicated_on_wire(oracle: EchoOracle) -> None:
+def test_case_variant_cookie_header_not_duplicated_on_wire(
+    oracle: EchoOracle,
+    session: FetchSession,
+) -> None:
     # A caller lowercase headers={"cookie":...} plus a cookies= param must not
     # produce two Cookie header lines on the wire.
-    with patch.object(fetch_mod, "egress_ip", return_value=None):
-        fetch(
-            oracle.url,
-            request=RequestParams(
-                content=ContentParams(headers={"cookie": "a=1"}, cookies={"b": "2"}),
-                policy=PolicyParams(trust="internal"),
-            ),
-        )
+    fetch(
+        oracle.url,
+        request=RequestParams(
+            content=ContentParams(headers={"cookie": "a=1"}, cookies={"b": "2"}),
+            policy=PolicyParams(transport="curl", allow_private_hosts=True),
+        ),
+        session=session,
+    )
     lines = _cookie_lines(oracle.captured_lines())
     assert len(lines) == 1, f"expected one Cookie header line, got: {lines}"
 
@@ -256,12 +256,11 @@ def test_browser_backend_fetches_live_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The opt-in browser backend renders a live page headless and warms cookies.
+    """The opt-in browser backend renders a live page headless.
 
     Drives the public API with ``transport="zendriver"`` against a real site
     through a throwaway profile dir, proving the zendriver backend launches
-    Chrome, returns rendered bytes, and threads the acquired cookies into the
-    returned session. Chrome-gated; skipped without a binary.
+    Chrome and returns rendered bytes. Chrome-gated; skipped without a binary.
 
     The throwaway profile is redirected through ``XDG_DATA_HOME`` -- the seam
     ``data_dir`` actually reads -- so the operator's real logged-in Chrome
@@ -269,9 +268,8 @@ def test_browser_backend_fetches_live_page(
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     body: bytes | None = None
-    session: FetchSession | None = None
     try:
-        body, session = fetch(
+        body = fetch(
             "https://example.com/",
             request=RequestParams(
                 retry=RetryParams(timeout_sec=30.0),
@@ -283,11 +281,10 @@ def test_browser_backend_fetches_live_page(
         # the DevTools attach that the capture harness above never needs. That
         # is a capability gap, so `_needs_chrome` alone does not cover this test.
         pytest.skip(f"browser subsystem unavailable: {error}")
-    # No `finally: shutdown_browsers()`. The autouse session fixture in
+    # No per-test Chrome teardown. The autouse module fixture in
     # wesearch/conftest.py owns that, and closing here would only protect THIS
     # test -- which is how 378 browsers from the sibling search tests leaked.
     assert body is not None
-    assert session is not None
     # Structure, not content: the page belongs to a third party and its wording
     # is not this backend's contract. Rendered HTML with a body is.
     assert b"<html" in body.lower()
@@ -330,7 +327,7 @@ def _assert_identity_matches(
     """Our identity names this host's OS and the version our transport presents."""
     platform = chrome_platform("chrome")
     major = (
-        curl_chrome_major("chrome")
+        int(str(REAL_TARGET_MAP["chrome"]).removeprefix("chrome"))
         if backend == "curl"
         else newest_chrome_major(platform)
     )

@@ -28,7 +28,7 @@ from wesearch.paper.search import SearchResult, search
 
 
 if TYPE_CHECKING:
-    from wesearch.paper.custom_types import PaperRecord
+    from wesearch.paper.types import PaperRecord
 
 
 def main(
@@ -84,6 +84,21 @@ def main(
     return 0 if sampled else 1
 
 
+# A degraded result is not a sample of FUSED quality: with one backend lost there is
+# nothing to fuse, so counting it would report the duplication rate of a single backend
+# as fusion's.
+def _sampled(query: str, *, limit: int, attempts: int = 4) -> SearchResult | None:
+    """Search ``query``, or return ``None`` when no usable sample came back."""
+    for _attempt in range(attempts):
+        try:
+            result = search(query, limit=limit)
+        except PaperError:
+            time.sleep(6.0)
+            continue
+        return result if result.complete or result.records else None
+    return None
+
+
 # Identity, not title: two records sharing a normalized title are the same paper only
 # when they also share an identifier, since distinct papers really do share titles
 # (``Discussion``). Counting every same-title pair scored correct behavior as a defect
@@ -104,21 +119,6 @@ def _residual_duplicates(records: list[PaperRecord]) -> int:
             duplicates += 1
         seen |= keys
     return duplicates
-
-
-# A degraded result is not a sample of FUSED quality: with one backend lost there is
-# nothing to fuse, so counting it would report the duplication rate of a single backend
-# as fusion's.
-def _sampled(query: str, *, limit: int, attempts: int = 4) -> SearchResult | None:
-    """Search ``query``, or return ``None`` when no usable sample came back."""
-    for _attempt in range(attempts):
-        try:
-            result = search(query, limit=limit)
-        except PaperError:
-            time.sleep(6.0)
-            continue
-        return result if result.complete or result.records else None
-    return None
 
 
 if __name__ == "__main__":

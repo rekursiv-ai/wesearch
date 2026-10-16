@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
+import functools
 import hashlib
 import re
 import time
@@ -53,24 +54,12 @@ from lxml import html
 from trafilatura.baseline import html2txt
 from trafilatura.external import try_readability
 
-import html2text
-
 from wesearch.fetch import PolicyParams, RequestParams, Transport, fetch
-from wesearch.fetch.extractor.html2text import extract_html2text
-from wesearch.fetch.extractor.markdownify import extract_markdownify
-from wesearch.fetch.extractor.trafilatura import extract_trafilatura
+from wesearch.fetch.html_to_text import html_to_text
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-
-
-class _Flags(Protocol):
-    cache_dir: Path
-    refresh: bool
-    url: list[str]
-    converter: list[str]
-    samples: Path
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -94,41 +83,6 @@ class Page:
         """Filesystem-safe cache key, unique per URL."""
         host = re.sub(r"[^a-z0-9]+", "-", self.url.split("//", 1)[-1].lower())
         return f"{host[:60].strip('-')}-{hashlib.sha256(self.url.encode()).hexdigest()[:8]}"
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Score:
-    """One converter's result on one page.
-
-    Attributes:
-      name: Converter name.
-      chars: Output length in characters.
-      compression: ``chars`` over RAW page length; lower is cheaper. The raw
-        page is the denominator because that is what a caller pays to send, and
-        because it is independent of every candidate -- a denominator one
-        candidate produces makes that candidate unbeatable.
-      distortion: ``1 - F1`` over word 5-grams against the page's visible text;
-        lower is truer. Both halves of the F1 are load-bearing. Recall alone
-        rewarded emitting the page's stylesheet: markdownify returned 516_564
-        characters of CSS on one dictionary entry and scored 0.99, because
-        every real n-gram was in there somewhere. Precision alone rewards
-        returning one correct sentence and nothing else. Reported as ``1 - F1``
-        so this column and ``compression`` both read smaller-is-better.
-      missing_probes: Required strings absent from the output. Hand-picked
-        CONTENT, so this is the one fidelity signal blind to boilerplate: the
-        n-gram distortion above counts dropping a nav menu as loss, which
-        flatters a converter that keeps chrome and punishes an extractor for
-        doing its job. A converter is only trustworthy when this is empty.
-      seconds: Wall-clock conversion time.
-
-    """
-
-    name: str
-    chars: int
-    compression: float
-    distortion: float
-    missing_probes: tuple[str, ...] = ()
-    seconds: float = 0.0
 
 
 # The corpus spans the shapes that break extractors, not a sample of the web:
@@ -221,6 +175,41 @@ CORPUS: tuple[Page, ...] = (
 )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Score:
+    """One converter's result on one page.
+
+    Attributes:
+      name: Converter name.
+      chars: Output length in characters.
+      compression: ``chars`` over RAW page length; lower is cheaper. The raw
+        page is the denominator because that is what a caller pays to send, and
+        because it is independent of every candidate -- a denominator one
+        candidate produces makes that candidate unbeatable.
+      distortion: ``1 - F1`` over word 5-grams against the page's visible text;
+        lower is truer. Both halves of the F1 are load-bearing. Recall alone
+        rewarded emitting the page's stylesheet: markdownify returned 516_564
+        characters of CSS on one dictionary entry and scored 0.99, because
+        every real n-gram was in there somewhere. Precision alone rewards
+        returning one correct sentence and nothing else. Reported as ``1 - F1``
+        so this column and ``compression`` both read smaller-is-better.
+      missing_probes: Required strings absent from the output. Hand-picked
+        CONTENT, so this is the one fidelity signal blind to boilerplate: the
+        n-gram distortion above counts dropping a nav menu as loss, which
+        flatters a converter that keeps chrome and punishes an extractor for
+        doing its job. A converter is only trustworthy when this is empty.
+      seconds: Wall-clock conversion time.
+
+    """
+
+    name: str
+    chars: int
+    compression: float
+    distortion: float
+    missing_probes: tuple[str, ...] = ()
+    seconds: float = 0.0
+
+
 def reference_text(html: str) -> str:
     """Return every visible text node: the ceiling a converter is scored against.
 
@@ -255,15 +244,12 @@ def converters() -> dict[str, Callable[[str], str]]:
 
     """
     return {
-        "traf": extract_trafilatura,
+        "traf": functools.partial(html_to_text, extractor="trafilatura"),
         "traf-txt": reference_text,
-        # The shipped implementations, not re-parameterized copies: this script
-        # scored markdownify with ``strip=["script", "style"]`` for several runs,
-        # which keeps a stylesheet's TEXT and inflated one page to 567_708
-        # characters. A benchmark that configures its own candidates measures
+        # The shipped extractors: a benchmark configuring its own measures
         # something the product never runs.
-        "h2t": extract_html2text,
-        "mdfy": extract_markdownify,
+        "h2t": html_to_text,
+        "mdfy": functools.partial(html_to_text, extractor="markdownify"),
         "read-md": _readability_markdown,
     }
 
@@ -334,7 +320,7 @@ def cached_html(page: Page, *, cache_dir: Path, refresh: bool = False) -> str:
     path = cache_dir / f"{page.slug}.html"
     if path.exists() and not refresh:
         return path.read_text(errors="replace")
-    body, _ = fetch(
+    body = fetch(
         page.url,
         request=RequestParams(policy=PolicyParams(transport=page.transport)),
     )
@@ -386,20 +372,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if rows else 1
 
 
-def _html2text(html: str) -> str:
-    """Convert with html2text, unwrapped: a wrapped line breaks probe matching."""
-    converter = html2text.HTML2Text()
-    converter.ignore_images = True
-    converter.body_width = 0
-    return converter.handle(html)
-
-
 # Uses trafilatura's vendored readability fork so the comparison needs no separate
 # install; it is the same algorithm behind Firefox Reader View.
 def _readability_markdown(page_html: str) -> str:
     """Extract with readability, then convert -- the common two-step agent recipe."""
     article = try_readability(html.fromstring(page_html))
-    return _html2text(html.tostring(article, encoding="unicode"))
+    return html_to_text(html.tostring(article, encoding="unicode"))
 
 
 # Markdown link targets are stripped first. Left in, a URL's words interleave with the
@@ -427,6 +405,65 @@ def _gram_distortion(reference: frozenset[tuple[str, ...]], output: str) -> floa
         return 1.0
     precision, recall = shared / len(grams), shared / len(reference)
     return 1.0 - 2 * precision * recall / (precision + recall)
+
+
+def _parse_args(argv: Sequence[str] | None) -> _Flags:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("/opt/scratch/caches/wesearch-extractors"),
+        help="Where fetched pages are replayed from (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Re-fetch pages, replacing the cache.",
+    )
+    parser.add_argument(
+        "--url",
+        action="append",
+        default=[],
+        help="Limit to this corpus URL (repeat).",
+    )
+    parser.add_argument(
+        "--converter",
+        action="append",
+        default=[],
+        help="Limit to this converter (repeat).",
+    )
+    parser.add_argument(
+        "--samples",
+        type=Path,
+        default=Path("/opt/scratch/artifacts/wesearch-extractors"),
+        help="Where converter outputs are written for reading (default: %(default)s).",
+    )
+    return cast(_Flags, parser.parse_args(argv))
+
+
+class _Flags(Protocol):
+    cache_dir: Path
+    refresh: bool
+    url: list[str]
+    converter: list[str]
+    samples: Path
+
+
+def _write_samples(
+    page: Page,
+    *,
+    html: str,
+    out_dir: Path,
+    names: Sequence[str],
+) -> None:
+    """Write each converter's output so a reader can judge the content itself."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, convert in converters().items():
+        if name in names:
+            (out_dir / f"{page.slug}.{name}.txt").write_text(convert(html))
 
 
 # Both metric groups span the same converters in the same order, so a page reads left-
@@ -483,57 +520,6 @@ def _page_label(page: Page) -> str:
     """Return the host, plus a path hint when the host alone is ambiguous."""
     host = page.url.partition("//")[2].partition("/")[0].removeprefix("www.")
     return host.removesuffix(".com").removesuffix(".org")
-
-
-def _write_samples(
-    page: Page,
-    *,
-    html: str,
-    out_dir: Path,
-    names: Sequence[str],
-) -> None:
-    """Write each converter's output so a reader can judge the content itself."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, convert in converters().items():
-        if name in names:
-            (out_dir / f"{page.slug}.{name}.txt").write_text(convert(html))
-
-
-def _parse_args(argv: Sequence[str] | None) -> _Flags:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description=__doc__.split("\n", 2)[2] if __doc__ else None,
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=Path("/opt/scratch/caches/wesearch-extractors"),
-        help="Where fetched pages are replayed from (default: %(default)s).",
-    )
-    parser.add_argument(
-        "--refresh",
-        action="store_true",
-        help="Re-fetch pages, replacing the cache.",
-    )
-    parser.add_argument(
-        "--url",
-        action="append",
-        default=[],
-        help="Limit to this corpus URL (repeat).",
-    )
-    parser.add_argument(
-        "--converter",
-        action="append",
-        default=[],
-        help="Limit to this converter (repeat).",
-    )
-    parser.add_argument(
-        "--samples",
-        type=Path,
-        default=Path("/opt/scratch/artifacts/wesearch-extractors"),
-        help="Where converter outputs are written for reading (default: %(default)s).",
-    )
-    return cast(_Flags, parser.parse_args(argv))
 
 
 if __name__ == "__main__":

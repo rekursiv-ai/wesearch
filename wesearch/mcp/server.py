@@ -7,42 +7,41 @@ MCP server exposing wesearch to agent clients over stdio.
 
 Run with ``wesearch-mcp`` (installed via the ``mcp`` extra: ``pip install
 wesearch[mcp]``), as ``sh server.py``, or as ``python -m
-wesearch.mcp.server``. Every tool is a thin wrapper over a public wesearch
-function, with outputs reshaped to be token-lean for model consumption:
-abstracts are truncated, empty fields dropped, and PDF bytes are written to
-the user cache directory rather than returned inline.
+wesearch.mcp.server``. Every tool wraps a public wesearch function and
+returns token-lean output: abstracts are truncated, empty fields dropped, and
+PDF bytes are written to the user cache directory rather than returned inline.
 
-Tools are synchronous by design -- wesearch's rate limiting and cookie/UA
-profile state are cross-process safe on disk, so each MCP client session can
-run its own server process without coordination. Errors surface to the
-client as MCP tool errors carrying the underlying exception message
-(``BotDetectionError`` includes its recovery guidance).
+Each MCP client session may run its own server process; rate limits and
+cookie profiles are shared on disk. Errors reach the client as MCP tool errors
+carrying the underlying exception message.
 '''
 # fmt: on
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from typing import Literal
 
 import functools
 import hashlib
 import inspect
+import re
 
 
 try:
     from mcp.server import MCPServer
+    from mcp.server.mcpserver import Context
     from mcp.server.mcpserver.exceptions import ToolError
 except ImportError as e:  # pragma: no cover -- depends on the install's extras.
-    # The MCP SDK is an optional extra, so this module is the one place in the
-    # package where a missing dependency is expected. A bare ModuleNotFoundError
-    # names `mcp`, which tells a reader nothing about which extra supplies it.
+    # A bare ModuleNotFoundError names `mcp`, not the extra that supplies it.
     raise ImportError(
         "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]",
     ) from e
 
-from wesearch.fetch.custom_types import FetchParamsSchema
+from wesearch.fetch import FetchSession
 from wesearch.lib.userdirs import cache_dir
+from wesearch.mcp.types import FetchParamsSchema, SearchParamsSchema
 from wesearch.paper import (
     authors,
     details,
@@ -51,9 +50,13 @@ from wesearch.paper import (
 )
 from wesearch.paper.ids import id_slug, normalize_id
 from wesearch.paper.render import lean_author, lean_record
-from wesearch.search.custom_types import SearchBackends, SearxngCategory
 from wesearch.search.render import lean_result
-from wesearch.search.search import SearchParamsSchema, search
+from wesearch.search.search import search
+from wesearch.search.types import (
+    DEFAULT_SEARCH_CHAIN,
+    SearchBackends,
+    SearxngCategory,
+)
 from wesearch.types.params import (
     Extractor,
     PolicyParams,
@@ -62,7 +65,18 @@ from wesearch.types.params import (
 from wesearch.web import fetch_web
 
 
-mcp = MCPServer(
+@asynccontextmanager
+async def _lifespan(_: MCPServer[FetchSession]) -> AsyncGenerator[FetchSession]:
+    """Share one session -- connections, Chrome, the egress -- across every call."""
+    session = FetchSession()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+mcp = MCPServer[FetchSession](
+    lifespan=_lifespan,
     name="wesearch",
     instructions=(
         "Scholarly-paper search and resilient web access. Paper ids may be "
@@ -73,29 +87,8 @@ mcp = MCPServer(
 )
 
 
-# A docstring cannot interpolate, and the MCP SDK publishes ``__doc__`` as the tool
-# description -- so a generated list (the SearXNG tabs) would otherwise have to be hand-
-# copied into the docstring, which is exactly how both surfaces came to omit the
-# ``social media`` tab. Applied UNDER ``@mcp.tool()``, which reads the attribute after
-# this runs.
-def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
-    """Append generated prose to a tool's docstring before the SDK reads it."""
-
-    def decorate(fn: F) -> F:
-        # `getdoc` dedents: Python 3.12 keeps the indentation 3.13+ strips from
-        # __doc__, which would misalign the column-0 ``extra`` with the sections.
-        fn.__doc__ = f"{inspect.getdoc(fn) or ''}\n\n{extra}\n"
-        return fn
-
-    return decorate
-
-
-# The MCP SDK (2.x) reports any exception other than ``ToolError`` as a crash: the
-# client sees only ``Error executing tool <name>``, so a missing ``SEARXNG_URL``, a
-# DuckDuckGo CAPTCHA and a bad DOI all read identically, and a BotDetectionError's
-# recovery guidance never arrives. Every tool is a thin wrapper over the library,
-# whose errors are written for the caller, so all of them are forwarded. Applied
-# UNDER ``@mcp.tool()`` so the SDK registers the wrapped function.
+# The MCP SDK (2.x) hides any exception other than ``ToolError`` behind a generic
+# ``Error executing tool <name>``. Must sit UNDER ``@mcp.tool()``.
 def _surface_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     """Re-raise a tool's failure as ``ToolError`` so its message reaches the client."""
 
@@ -106,9 +99,9 @@ def _surface_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
         except Exception as e:
             raise ToolError(f"{type(e).__name__}: {e}") from e
 
-    # Python 3.12 keeps a docstring's indentation (3.13 strips it), and the SDK
-    # publishes ``__doc__`` verbatim, so 3.12 clients saw ``    Args:``.
-    wrapper.__doc__ = inspect.getdoc(fn)
+    # The SDK publishes ``__doc__`` verbatim, and Python 3.12 keeps the
+    # indentation 3.13+ strips. ``ctx`` is injected, so clients never see it.
+    wrapper.__doc__ = re.sub(r"(?m)^  ctx: .*\n", "", inspect.getdoc(fn) or "")
     return wrapper
 
 
@@ -122,6 +115,7 @@ def paper_search(
     year_from: int | None = None,
     year_to: int | None = None,
     open_access_only: bool = False,
+    ctx: Context[FetchSession] | None = None,
 ) -> dict[str, object]:
     """Search scholarly literature. The default "fused" source rank-fuses
     Semantic Scholar and OpenAlex and degrades gracefully if one is down
@@ -135,6 +129,7 @@ def paper_search(
       year_from: Minimum publication year (inclusive), or None for all.
       year_to: Maximum publication year (inclusive), or None for all.
       open_access_only: Restrict to papers with free full-text PDFs.
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       result: Dict with "records" (list of papers), "total" (estimated
@@ -151,6 +146,7 @@ def paper_search(
         year_from=year_from,
         year_to=year_to,
         open_access_only=open_access_only,
+        session=_session(ctx),
     )
     return {
         "records": [lean_record(r) for r in result.records],
@@ -161,21 +157,24 @@ def paper_search(
 
 @mcp.tool()
 @_surface_errors
-def paper_details(paper_id: str) -> dict[str, object]:
+def paper_details(
+    paper_id: str,
+    *,
+    ctx: Context[FetchSession] | None = None,
+) -> dict[str, object]:
     """Full metadata for one paper. Accepts a DOI or arXiv id in any common
     form (bare, doi:/arxiv: prefixed, or full URL).
 
     Args:
       paper_id: DOI or arXiv id (bare, prefixed, or full URL).
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       metadata: Dict of paper metadata with extended abstract (1500 chars).
 
     """
     kind, canonical = normalize_id(paper_id)
-    record = details.metadata(kind, canonical)
-    # Three times the search clip: a detail lookup is one paper the caller
-    # already chose, so the abstract is what they asked for.
+    record = details.metadata(kind, canonical, session=_session(ctx))
     lean = lean_record(record, abstract_chars=1_500)
     lean["id"] = f"{kind}:{canonical}"
     return lean
@@ -187,6 +186,8 @@ def paper_references(
     paper_id: str,
     limit: int = 20,
     source: Literal["s2", "openalex"] = "s2",
+    *,
+    ctx: Context[FetchSession] | None = None,
 ) -> dict[str, object]:
     """Papers this paper cites (its bibliography). source="openalex" reaches
     an independent quota when Semantic Scholar is throttled (DOI seeds only).
@@ -195,6 +196,7 @@ def paper_references(
       paper_id: DOI or arXiv id to fetch bibliography of.
       limit: Maximum citations to return.
       source: Search backend (s2 or openalex; openalex DOI-only).
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       references: Dict with "records" (papers this paper cites) and "complete"
@@ -204,7 +206,13 @@ def paper_references(
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
     kind, canonical = normalize_id(paper_id)
-    listing = details.references(kind, canonical, limit=limit, source=source)
+    listing = details.references(
+        kind,
+        canonical,
+        limit=limit,
+        source=source,
+        session=_session(ctx),
+    )
     return {
         "records": [lean_record(r) for r in listing.records],
         "complete": listing.complete,
@@ -219,6 +227,8 @@ def paper_citations(
     influential_only: bool = False,
     year_from: int | None = None,
     source: Literal["s2", "openalex"] = "s2",
+    *,
+    ctx: Context[FetchSession] | None = None,
 ) -> dict[str, object]:
     """Papers that cite this paper. influential_only keeps only citations
     Semantic Scholar flags as influential (S2 only). source="openalex" reaches
@@ -231,6 +241,7 @@ def paper_citations(
         influential (S2 backend only).
       year_from: Minimum publication year (inclusive), or None for all.
       source: Search backend (s2 or openalex; openalex DOI-only).
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       citations: Dict with "records" (papers citing this paper) and "complete"
@@ -247,6 +258,7 @@ def paper_citations(
         influential_only=influential_only,
         year_from=year_from,
         source=source,
+        session=_session(ctx),
     )
     return {
         "records": [lean_record(r) for r in listing.records],
@@ -256,12 +268,17 @@ def paper_citations(
 
 @mcp.tool()
 @_surface_errors
-def paper_pdf(paper_id: str) -> dict[str, object]:
+def paper_pdf(
+    paper_id: str,
+    *,
+    ctx: Context[FetchSession] | None = None,
+) -> dict[str, object]:
     """Download a paper's PDF (arXiv direct, then open-access lookup) into
     the local cache and return its filesystem path.
 
     Args:
       paper_id: DOI or arXiv id of the paper to download.
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       pdf: Dict with "path" (filesystem location in cache), "bytes" (size),
@@ -269,13 +286,11 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
 
     """
     kind, canonical = normalize_id(paper_id)
-    pdf_bytes, source = fetch.download(kind, canonical)
+    pdf_bytes, source = fetch.download(kind, canonical, session=_session(ctx))
     target_dir = cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
     target_dir.mkdir(parents=True, exist_ok=True)
-    # Slug for a human, digest for identity: ``id_slug`` maps every unsafe
-    # character to ``_``, so ``10.1/a_b`` and ``10.1/a/b`` collide and one
-    # paper overwrites the other. It is also unbounded, and a long DOI suffix
-    # exceeds the 255-byte filename limit.
+    # Slug for a human, digest for identity: ``id_slug`` maps ``10.1/a_b`` and
+    # ``10.1/a/b`` to one name, and a long DOI exceeds the 255-byte filename limit.
     digest = hashlib.sha256(f"{kind}:{canonical}".encode()).hexdigest()[:16]
     target = target_dir / f"{id_slug(kind, canonical)[:80]}.{digest}.pdf"
     target.write_bytes(pdf_bytes)
@@ -284,24 +299,27 @@ def paper_pdf(paper_id: str) -> dict[str, object]:
 
 @mcp.tool()
 @_surface_errors
-def author_search(query: str, limit: int = 10) -> dict[str, object]:
+def author_search(
+    query: str,
+    limit: int = 10,
+    *,
+    ctx: Context[FetchSession] | None = None,
+) -> dict[str, object]:
     """Find scholars by name; results are ranked by h-index.
 
     Args:
       query: Scholar name or name fragment.
       limit: Maximum results to return (ranked by h-index).
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       authors: Dict with "records" (author profiles) and "total" (estimated
         result count).
 
     """
-    # Same guard the paper tools carry: the library slices directly, so a
-    # negative limit performed the network call and then returned every record
-    # except the last.
     if limit < 1:
         raise ValueError(f"'limit' must be >= 1, got {limit}.")
-    result = authors.search_authors(query, limit=limit)
+    result = authors.search_authors(query, limit=limit, session=_session(ctx))
     return {
         "records": [lean_author(r) for r in result.records],
         "total": result.total,
@@ -315,6 +333,8 @@ def author_papers(
     limit: int = 20,
     year_from: int | None = None,
     year_to: int | None = None,
+    *,
+    ctx: Context[FetchSession] | None = None,
 ) -> dict[str, object]:
     """Publications of one author (author_id from author_search).
 
@@ -323,6 +343,7 @@ def author_papers(
       limit: Maximum papers to return.
       year_from: Minimum publication year (inclusive), or None for all.
       year_to: Maximum publication year (inclusive), or None for all.
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       papers: Dict with "records" (authored papers) and "complete" (false when
@@ -338,6 +359,7 @@ def author_papers(
         limit=limit,
         year_from=year_from,
         year_to=year_to,
+        session=_session(ctx),
     )
     return {
         "records": [lean_record(r) for r in listing.records],
@@ -345,24 +367,42 @@ def author_papers(
     }
 
 
+# Must sit UNDER ``@mcp.tool()``, which publishes ``__doc__`` at registration.
+def _append_doc[F: Callable[..., object]](extra: str) -> Callable[[F], F]:
+    """Append generated prose to a tool's docstring before the SDK reads it."""
+
+    def decorate(fn: F) -> F:
+        # `getdoc` dedents: Python 3.12 keeps the indentation 3.13+ strips from
+        # __doc__, which would misalign the column-0 ``extra`` with the sections.
+        fn.__doc__ = f"{inspect.getdoc(fn) or ''}\n\n{extra}\n"
+        return fn
+
+    return decorate
+
+
 @mcp.tool()
 @_surface_errors
-@_append_doc(SearchParamsSchema.asset_markdown())
+@_append_doc(
+    f"Omitting ``backend`` tries {', '.join(DEFAULT_SEARCH_CHAIN)} in order.\n\n"
+    f"{SearchParamsSchema.asset_markdown()}",
+)
 def web_search(
     query: str,
     num_results: int = 10,
     backend: SearchBackends | None = None,
     categories: SearxngCategory = "general",
     transport: Transport = "auto",
+    *,
+    ctx: Context[FetchSession] | None = None,
 ) -> list[dict[str, object]]:
     """Web search.
 
-    Omitting ``backend`` tries DuckDuckGo, SearXNG (needs ``SEARXNG_URL``), then
-    Brave (needs ``BRAVE_API_KEY``), skipping any that is blocked, unconfigured, or
-    empty; repeat queries are served from a host-wide cache. ``categories`` selects a
-    SearXNG result tab, which selects that backend when none is named and is rejected
-    alongside an explicit non-SearXNG one. The list at the end describes each
-    parameter, including every tab and what it returns.
+    Omitting ``backend`` walks the fallback order stated below, skipping any backend
+    that is blocked, unconfigured (SearXNG needs ``SEARXNG_URL``, Brave
+    ``BRAVE_API_KEY``), or empty; repeat queries are served from a host-wide cache.
+    ``categories`` selects a SearXNG result tab, which selects that backend when
+    none is named and is rejected alongside an explicit non-SearXNG one. The list
+    at the end describes each parameter, including every tab and what it returns.
 
     Args:
       query: Search terms.
@@ -371,26 +411,22 @@ def web_search(
         variable.
       categories: SearXNG result tab; the tabs are listed at the end.
       transport: Retrieval path, as for web_fetch; see the list at the end.
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       results: One dict per hit with its url, title, and snippet, plus the
         tab's own fields (a paper's DOI and authors, an image's resolution).
 
     """
-    # Deliberately not env-sniffing here: nothing in the dispatch path inspects
-    # SEARXNG_URL, so a docstring promising "SearXNG when configured" described
-    # a behavior no build had.
     results = search(
         query,
         backend=backend,
         num_results=num_results,
         categories=categories,
         transport=transport,
+        session=_session(ctx),
     )
-    # lean_result, not a hand-written projection: flattening to
-    # url/title/snippet here meant an MCP client could ASK for the science tab
-    # and receive none of the DOI, authors, or PDF link that make it a science
-    # result. The sagent tool rendered those all along.
+    # Not a url/title/snippet projection: that drops each tab's own fields.
     return [lean_result(r) for r in results]
 
 
@@ -400,23 +436,22 @@ def web_search(
 def web_fetch(
     url: str,
     max_chars: int = 8000,
-    # Module constants, not ``FetchParamsSchema.default(...)``: ruff B008 forbids a
-    # call in a signature default. The parity test asserts these EQUAL the
-    # spec's, so the constant cannot drift from the description beside it.
     transport: Transport = "auto",
     extractor: Extractor = "html2text",
+    *,
+    ctx: Context[FetchSession] | None = None,
 ) -> dict[str, object]:
     """Fetch a page and return its extracted text.
 
     GET only. ``url``, ``transport``, and ``extractor`` are described in the list at
-    the end, rendered from the spec the sagent tool shares, so the two surfaces
-    cannot document the same parameter differently.
+    the end.
 
     Args:
       url: The page to fetch; see the list at the end.
       max_chars: Most characters of text to return; at least 1.
       transport: Retrieval path; see the list at the end.
       extractor: How the page becomes text; the values are listed at the end.
+      ctx: The request, injected by the server; not a client argument.
 
     Returns:
       page: Dict with "url" (the URL as requested), "text" (the extracted text,
@@ -428,21 +463,14 @@ def web_fetch(
     """
     if max_chars < 1:
         raise ValueError(f"'max_chars' must be >= 1, got {max_chars}.")
-    # Through fetch_web, not fetch: this tool hand-rolled a BeautifulSoup text
-    # dump for a while, which meant the MCP surface silently missed the provider
-    # dispatch (Reddit/Google News/X), RSS and Atom rendering, the reader-proxy
-    # bot-wall ladder, and every extractor. Two paths to "a page as text" is the
-    # skew this package exists to avoid.
-    #
-    # The URL comes from a language model, so it is untrusted -- which is the
-    # default, leaving this call to state only transport and extractor. Under
-    # that default the host is validated to a public address before connecting,
-    # keeping the model off loopback, the metadata endpoint, and every
-    # private-range host.
+    # The URL comes from a model, so it stays untrusted (the PolicyParams
+    # default): the host must resolve to a public address, never loopback or
+    # private ranges.
     result = fetch_web(
         url,
         max_chars=max_chars,
         policy=PolicyParams(transport=transport, extractor=extractor),
+        session=_session(ctx),
     )
     return {
         "url": result.url,
@@ -463,10 +491,18 @@ def main() -> int:
     return 0
 
 
-# The executable lives here rather than in a package `__main__.py`: `mcp` is an
-# optional extra, and `python -m wesearch` starting a server that a default
-# install cannot import would make the whole package look broken. Named after
-# the server, the failure explains itself.
+def _session(ctx: Context[FetchSession] | None) -> FetchSession | None:
+    """Return the server's session; ``None`` (the process's shared one) outside a request."""
+    if not isinstance(ctx, Context):
+        return None
+    try:
+        return ctx.request_context.lifespan_context
+    except ValueError:
+        return None
+
+
+# Not a package `__main__.py`: `mcp` is an optional extra, so `python -m
+# wesearch` would fail to import on every install that did not ask for it.
 if __name__ == "__main__":
     raise SystemExit(main())
 # vim: ft=python

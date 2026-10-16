@@ -1,27 +1,22 @@
-"""Reddit provider: anonymous RSS, or richer OAuth JSON when configured.
+"""Reddit: fetch a page as its RSS feed, which Reddit serves to datacenter IPs.
 
-Reddit bot-walls datacenter-IP requests to its JSON API, HTML pages, and
-``old.reddit.com`` with a 403. The public ``.rss`` feed still serves
-anonymously: a thread feed carries top-level comments as Atom entries, so titles,
-bodies, and comment text survive.
-
-:func:`fetch_reddit` returns raw bytes plus a tag identifying the payload shape;
-rendering those bytes to text is the caller's concern, exactly as the other feed
-formats are rendered by the caller.
+Its pages and JSON API refuse them with a 403.
 """
 
 from __future__ import annotations
 
-from typing import Final, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 import re
 
 from wesearch.fetch import (
+    FetchSession,
     PolicyParams,
     RequestParams,
     fetch,
 )
+from wesearch.fetch.session import default_session
 
 
 __all__ = [
@@ -30,34 +25,30 @@ __all__ = [
     "rss_url",
 ]
 
-# The payload shape a fetch produced, so the caller selects the right renderer.
 type RedditPayload = Literal["rss", "thread_json", "listing_json"]
-
-_THREAD_RE: Final = re.compile(r"/r/[^/?#]+/comments/\w+")
 
 
 def matches(url: str) -> bool:
-    """Whether ``url`` is a Reddit URL (``reddit.com`` or any subdomain).
-
-    Args:
-      url: Url.
-
-    Returns:
-      result: The bool.
-
-    """
+    """Return whether ``url`` is on ``reddit.com`` or a subdomain."""
     hostname = urlparse(url).hostname
     if hostname is None:
         return False
     return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
 
-def fetch_reddit(url: str, *, policy: PolicyParams) -> tuple[bytes, RedditPayload]:
+def fetch_reddit(
+    url: str,
+    *,
+    policy: PolicyParams,
+    session: FetchSession | None = None,
+) -> tuple[bytes, RedditPayload]:
     """Fetch a Reddit URL; return its bytes and the payload shape.
 
     Args:
       url: A Reddit URL (thread, subreddit, or user page).
-      policy: Transport and trust forwarded to the HTTP layer.
+      policy: How to fetch.
+      session: Connections and the Reddit token to reuse; ``None`` uses the
+        process's shared session.
 
     Returns:
       body: The raw feed/JSON bytes.
@@ -68,8 +59,12 @@ def fetch_reddit(url: str, *, policy: PolicyParams) -> tuple[bytes, RedditPayloa
       FetchError: On an HTTP failure after any token refresh.
 
     """
-    body, _session = fetch(rss_url(url), request=RequestParams(policy=policy))
-    return body, "rss"
+    session = default_session() if session is None else session
+    return fetch(
+        rss_url(url),
+        request=RequestParams(policy=policy),
+        session=session,
+    ), "rss"
 
 
 def rss_url(raw_url: str) -> str:

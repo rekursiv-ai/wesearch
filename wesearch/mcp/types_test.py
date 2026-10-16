@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wesearch.fetch.custom_types import FetchBodyParamsSchema, FetchParamsSchema
+from wesearch.mcp.types import FetchBodyParamsSchema, FetchParamsSchema
 
 
 def test_fetch_schema_declares_url_and_policy_defaults() -> None:

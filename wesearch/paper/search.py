@@ -20,7 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fuse import fuse
 from wesearch.paper.providers import (
@@ -28,10 +27,11 @@ from wesearch.paper.providers import (
     s2,
     searxng,
 )
+from wesearch.paper.types import PaperRecord
 
 
 if TYPE_CHECKING:
-    from wesearch.fetch import Transport
+    from wesearch.fetch import FetchSession, Transport
 
 
 __all__ = [
@@ -41,28 +41,6 @@ __all__ = [
 ]
 
 Source = Literal["s2", "openalex", "searxng", "fused"]
-
-
-class _SingleBackend(Protocol):
-    """One backend's text search.
-
-    A Protocol rather than ``Callable[..., ...]``: the ellipsis form leaves
-    every keyword at the dispatch call site unchecked, so a provider renaming
-    a parameter would type-check clean and fail at runtime.
-    """
-
-    def __call__(
-        self,
-        query: str,
-        *,
-        limit: int | None,
-        year_from: int | None,
-        year_to: int | None,
-        open_access_only: bool,
-        transport: Transport,
-    ) -> tuple[list[PaperRecord], int, bool]:
-        """Return this backend's ``(records, total, complete)``."""
-        ...
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -96,6 +74,7 @@ def search(
     year_to: int | None = None,
     open_access_only: bool = False,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> SearchResult:
     """Search the scholarly literature and return ranked paper records.
 
@@ -107,6 +86,7 @@ def search(
       year_to: Inclusive upper publication-year bound.
       open_access_only: Restrict to papers with a known open-access PDF.
       transport: Retrieval transport forwarded to each selected provider.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       result: A :class:`SearchResult`.
@@ -123,6 +103,7 @@ def search(
             year_to=year_to,
             open_access_only=open_access_only,
             transport=transport,
+            session=session,
         )
     records, total, complete = _single_backend(source)(
         query,
@@ -131,54 +112,9 @@ def search(
         year_to=year_to,
         open_access_only=open_access_only,
         transport=transport,
+        session=session,
     )
     return SearchResult(records=records, total=total, complete=complete)
-
-
-def _s2_search(
-    query: str,
-    *,
-    limit: int | None,
-    year_from: int | None,
-    year_to: int | None,
-    open_access_only: bool,
-    transport: Transport = "auto",
-) -> tuple[list[PaperRecord], int, bool]:
-    """Query Semantic Scholar; return ``(records, total, complete)``."""
-    params: dict[str, str | int] = {
-        "query": query,
-        "fields": s2.S2_PAPER_FIELDS_STR,
-    }
-    year_spec = _s2_year_param(year_from, year_to)
-    if year_spec is not None:
-        params["year"] = year_spec
-    if open_access_only:
-        params["openAccessPdf"] = ""  # S2 treats it as a presence flag.
-    page, total = s2.search_paginate(params, limit=limit, transport=transport)
-    records = [s2.paper_record_from(row) for row in page.entries]
-    return records, total, page.complete
-
-
-def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
-    """Translate year bounds to S2's ``year=FROM-TO`` query form."""
-    if year_from is None and year_to is None:
-        return None
-    lo = str(year_from) if year_from is not None else ""
-    hi = str(year_to) if year_to is not None else ""
-    return f"{lo}-{hi}"
-
-
-def _single_backend(source: Source) -> _SingleBackend:
-    """Return the single-backend search function for ``source``."""
-    table: dict[str, _SingleBackend] = {
-        "s2": _s2_search,
-        "openalex": openalex.search,
-        "searxng": searxng.search,
-    }
-    backend = table.get(source)
-    if backend is None:
-        raise PaperError(f"Unknown search source: {source!r}")
-    return backend
 
 
 def _fused(
@@ -189,6 +125,7 @@ def _fused(
     year_to: int | None,
     open_access_only: bool,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> SearchResult:
     """Run S2 and OpenAlex, degrading gracefully when one fails."""
     s2_hits: list[PaperRecord] = []
@@ -206,6 +143,7 @@ def _fused(
             year_to=year_to,
             open_access_only=open_access_only,
             transport=transport,
+            session=session,
         )
         exhausted = exhausted and s2_complete
         answered = True
@@ -219,6 +157,7 @@ def _fused(
             year_to=year_to,
             open_access_only=open_access_only,
             transport=transport,
+            session=session,
         )
         exhausted = exhausted and oa_complete
         answered = True
@@ -252,3 +191,78 @@ def _fused(
         # cut short, or the trim above dropped a fused record.
         complete=not errors and exhausted and len(records) == len(fused),
     )
+
+
+def _s2_search(
+    query: str,
+    *,
+    limit: int | None,
+    year_from: int | None,
+    year_to: int | None,
+    open_access_only: bool,
+    transport: Transport = "auto",
+    session: FetchSession | None = None,
+) -> tuple[list[PaperRecord], int, bool]:
+    """Query Semantic Scholar; return ``(records, total, complete)``."""
+    params: dict[str, str | int] = {
+        "query": query,
+        "fields": s2.S2_PAPER_FIELDS_STR,
+    }
+    year_spec = _s2_year_param(year_from, year_to)
+    if year_spec is not None:
+        params["year"] = year_spec
+    if open_access_only:
+        params["openAccessPdf"] = ""  # S2 treats it as a presence flag.
+    page, total = s2.search_paginate(
+        params,
+        limit=limit,
+        transport=transport,
+        session=session,
+    )
+    records = [s2.paper_record_from(row) for row in page.entries]
+    return records, total, page.complete
+
+
+def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
+    """Translate year bounds to S2's ``year=FROM-TO`` query form."""
+    if year_from is None and year_to is None:
+        return None
+    lo = str(year_from) if year_from is not None else ""
+    hi = str(year_to) if year_to is not None else ""
+    return f"{lo}-{hi}"
+
+
+def _single_backend(source: Source) -> _SingleBackend:
+    """Return the single-backend search function for ``source``."""
+    table: dict[str, _SingleBackend] = {
+        "s2": _s2_search,
+        "openalex": openalex.search,
+        "searxng": searxng.search,
+    }
+    backend = table.get(source)
+    if backend is None:
+        raise PaperError(f"Unknown search source: {source!r}")
+    return backend
+
+
+class _SingleBackend(Protocol):
+    """One backend's text search.
+
+    A Protocol rather than ``Callable[..., ...]``: the ellipsis form leaves
+    every keyword at the dispatch call site unchecked, so a provider renaming
+    a parameter would type-check clean and fail at runtime.
+    """
+
+    def __call__(
+        self,
+        query: str,
+        *,
+        limit: int | None,
+        year_from: int | None,
+        year_to: int | None,
+        open_access_only: bool,
+        transport: Transport,
+        session: FetchSession | None,
+    ) -> tuple[list[PaperRecord], int, bool]:
+        """Return this backend's ``(records, total, complete)``."""
+        ...

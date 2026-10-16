@@ -1,13 +1,7 @@
-"""Render paper and author records as agent-readable text.
+"""Render paper and author records as agent-readable text or compact dicts.
 
-The text counterpart to the record types in
-:mod:`wesearch.paper.custom_types`: one greppable line per record, with an
-optional detail block. Lives in the library, not in a tool, because every
-surface that shows a paper to a model needs the SAME rendering -- the sagent
-tools and the MCP server each grew their own, and the two drifted (different
-author truncation, different id prefixes, one dropping the influential flag).
-
-Pure functions over records: no tool framework, no MCP, no I/O.
+Text renderings are one greppable line per record, or a multi-line detail
+block; ``lean_*`` renderings are JSON-ready dicts. Pure functions, no I/O.
 """
 
 from __future__ import annotations
@@ -16,7 +10,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from wesearch.paper.custom_types import AuthorRecord, PaperRecord
+    from wesearch.paper.types import AuthorRecord, PaperRecord
 
 
 __all__ = [
@@ -31,14 +25,18 @@ __all__ = [
 
 
 def format_record(rec: PaperRecord, abstract_chars: int | None = None) -> str:
-    """Format a paper as one greppable line, followed by optional abstract.
+    """Format a paper as one greppable line, followed by an indented abstract.
 
     Args:
       rec: Paper record to format.
-      abstract_chars: Character limit for abstract, or None to include full.
+      abstract_chars: Abstract character cap, or None for the full abstract.
 
     Returns:
-      formatted: Single-line header with optional multi-line abstract block.
+      formatted: ``[ids] title - authors, year, venue - meta`` header, plus
+        the abstract when present.
+
+    Raises:
+      ValueError: When ``abstract_chars`` < 1 and the abstract exceeds it.
 
     """
     id_block = _id_prefix(rec)
@@ -71,14 +69,17 @@ def format_record(rec: PaperRecord, abstract_chars: int | None = None) -> str:
 
 
 def format_block(rec: PaperRecord, abstract_chars: int | None = None) -> str:
-    """Render a multi-line metadata block for ``PaperDetails`` lookup.
+    """Render a paper as ``key: value`` lines, omitting empty fields.
 
     Args:
       rec: Paper record to format.
-      abstract_chars: Character limit for abstract, or None to include full.
+      abstract_chars: Abstract character cap, or None for the full abstract.
 
     Returns:
-      formatted: Multi-line metadata with fields like id, title, authors.
+      formatted: One line per present field (id, doi, title, authors, ...).
+
+    Raises:
+      ValueError: When ``abstract_chars`` < 1 and the abstract exceeds it.
 
     """
     lines: list[str] = []
@@ -107,13 +108,13 @@ def format_block(rec: PaperRecord, abstract_chars: int | None = None) -> str:
 
 
 def format_author_line(rec: AuthorRecord) -> str:
-    """Format one greppable line per author for search results.
+    """Format an author as one greppable line.
 
     Args:
       rec: Author record to format.
 
     Returns:
-      formatted: Single-line author summary with id, name, metrics.
+      formatted: ``[author:id] name - metrics - first affiliation``.
 
     """
     id_block = f"[author:{rec.author_id}]"
@@ -133,13 +134,13 @@ def format_author_line(rec: AuthorRecord) -> str:
 
 
 def format_author_block(rec: AuthorRecord) -> str:
-    """Render a multi-line metadata block for ``PaperAuthor`` details lookup.
+    """Render an author as ``key: value`` lines, omitting empty fields.
 
     Args:
       rec: Author record to format.
 
     Returns:
-      formatted: Multi-line metadata with author_id, name, affiliations.
+      formatted: One line per present field (author_id, name, aliases, ...).
 
     """
     lines: list[str] = [
@@ -165,11 +166,11 @@ def truncation_notice(shown: int, total: int) -> str:
     """Build a ``... showing N of M`` suffix for paginated output.
 
     Args:
-      shown: Shown.
-      total: Total.
+      shown: Number of records displayed.
+      total: Number of records available.
 
     Returns:
-      result: The str.
+      notice: The suffix, or ``""`` when nothing was withheld.
 
     """
     if total > shown and total > 0:
@@ -185,19 +186,16 @@ def lean_record(
 ) -> dict[str, object]:
     """Return one paper as a compact dict: empty fields dropped, abstract clipped.
 
-    The structured counterpart to :func:`format_record`, for a caller whose
-    protocol carries JSON rather than text. Beside it deliberately: the two
-    renderings pick the same fields and apply the same abstract cap, and when
-    they lived in separate packages they drifted -- different author
-    truncation, one silently omitting the influential flag.
-
     Args:
       rec: Paper record to format.
-      abstract_chars: Character limit for abstract; raises on value < 1.
-      author_limit: Maximum authors to include; raises on value < 1.
+      abstract_chars: Abstract character cap.
+      author_limit: Maximum authors to include; ``"et al."`` marks the rest.
 
     Returns:
-      compact: Dict with null/empty fields removed, "et al." added past limit.
+      compact: The record's non-empty fields.
+
+    Raises:
+      ValueError: When ``abstract_chars`` or ``author_limit`` is < 1.
 
     """
     if author_limit < 1:
@@ -231,7 +229,7 @@ def lean_author(rec: AuthorRecord) -> dict[str, object]:
       rec: Author record to format.
 
     Returns:
-      compact: Dict with null/empty fields removed.
+      compact: The record's non-empty fields.
 
     """
     fields: dict[str, object] = {
@@ -245,17 +243,6 @@ def lean_author(rec: AuthorRecord) -> dict[str, object]:
     return {k: v for k, v in fields.items() if v not in (None, [], "")}
 
 
-def _format_authors(authors: tuple[str, ...], limit: int = 3) -> str:
-    """Render first-``limit`` authors with ``+N`` suffix for the rest."""
-    if not authors:
-        return "unknown"
-    shown = ", ".join(authors[:limit])
-    extra = len(authors) - limit
-    if extra > 0:
-        return f"{shown} +{extra}"
-    return shown
-
-
 def _id_prefix(rec: PaperRecord) -> str:
     """Bracketed identifier prefix: ``[doi:... | arXiv:...]`` / subset."""
     parts: list[str] = []
@@ -267,11 +254,19 @@ def _id_prefix(rec: PaperRecord) -> str:
     return f"[{inner}]"
 
 
-# ``None`` means uncapped. A non-positive cap does NOT: it used to return the full
-# abstract, so ``abstract_chars=0`` -- the plainest way to ask for no abstract at all --
-# returned the longest possible one.
+def _format_authors(authors: tuple[str, ...], limit: int = 3) -> str:
+    """Render first-``limit`` authors with ``+N`` suffix for the rest."""
+    if not authors:
+        return "unknown"
+    shown = ", ".join(authors[:limit])
+    extra = len(authors) - limit
+    if extra > 0:
+        return f"{shown} +{extra}"
+    return shown
+
+
 def _trim_abstract(abstract: str, cap: int | None) -> str:
-    """Apply caller-supplied character cap to an abstract, if any."""
+    """Cut an abstract to ``cap`` characters; ``None`` means uncapped."""
     if cap is None or len(abstract) <= cap:
         return abstract
     if cap < 1:

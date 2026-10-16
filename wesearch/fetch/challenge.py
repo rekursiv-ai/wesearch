@@ -1,11 +1,6 @@
-"""Cross-site HTTP challenge detection for ``wesearch.fetch``.
+"""Recognize Cloudflare challenges and CAPTCHA widgets in a response.
 
-This module recognizes only challenge technology shared across providers:
-Cloudflare interstitials and generic CAPTCHA widgets. Provider page states belong
-beside their parsers.
-
-Cloudflare markers and titles follow FlareSolverr's structural detection model:
-challenge-only markup or an interstitial title, never prose keywords.
+Matches page structure and titles, never prose, after FlareSolverr's model.
 
 FlareSolverr -- MIT License, Copyright (c) 2025 Diego Heras (ngosang).
 https://github.com/FlareSolverr/FlareSolverr
@@ -96,15 +91,10 @@ def classify_http_error(
     headers: dict[str, str],
     body: bytes,
 ) -> FetchError:
-    """Build the most specific error proven by an HTTP failure.
+    """Return the error for an HTTP failure, a challenge error when one is proven.
 
-    Only evidence that Cloudflare AUTHORED the response counts: its challenge
-    markup, or the ``cf-mitigated: challenge`` header it sets on every challenge
-    page type. Presence alone does not -- ``server: cloudflare`` and ``cf-ray``
-    ride every proxied response, including the origin's own 403s and 503s, so
-    reading them as mitigation made an expired API token a bot wall. That sends
-    the caller to the browser and pins the domain there permanently, since the
-    learned routing list has no expiry.
+    Proof is challenge markup or ``cf-mitigated: challenge``; ``server:
+    cloudflare`` is not, since Cloudflare also fronts the origin's own errors.
 
     References:
       https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/
@@ -153,20 +143,14 @@ def _tags(
     text: str,
     *,
     tag: re.Pattern[str] = re.compile(r"<[^>]+>", re.DOTALL),
-    # Script and style CONTENTS are text, not markup: a template literal holding
-    # ``<div class="g-recaptcha">`` is indistinguishable from served markup to a
-    # tag regex, and read as a challenge on ordinary pages. Only the body
-    # between the tags is removed -- the tags themselves stay, because
-    # Cloudflare's own ``trk_jschal_js`` marker is an attribute ON the script
-    # element.
+    # Script and style bodies hold markup-looking strings; their tags stay, since
+    # Cloudflare's ``trk_jschal_js`` marker is an attribute of a script tag.
     script_body: re.Pattern[str] = re.compile(
         r"(<(script|style)\b[^>]*>).*?(</\2>)",
         re.DOTALL | re.IGNORECASE,
     ),
 ) -> list[str]:
     """Return the rendered tags of ``text``, with script/style bodies removed."""
-    # ``finditer`` + ``group(0)``, not ``findall``: typeshed types the latter's
-    # result as ``list[Any]``, which erases the element type downstream.
     return [
         match.group(0)
         for match in tag.finditer(script_body.sub(_replace_script_body, text))
@@ -182,38 +166,13 @@ def _replace_script_body(match: re.Match[str]) -> str:
     return opening + closing
 
 
-# Restricts each marker to a class/id attribute value or a bare attribute name (``data-
-# sitekey``) inside an HTML tag, excluding URLs and JSON strings that merely name a
-# captcha provider.
-#
-# EVERY occurrence in a tag is examined, not the first: an earlier mention in an
-# unrelated attribute (``data-provider="hcaptcha" class="hcaptcha"``) is not the widget,
-# and stopping there masked the real class beside it.
-def _occurrences(tag: str, marker: str) -> list[int]:
-    """Every start index of ``marker`` within ``tag``."""
-    found: list[int] = []
-    index = tag.find(marker)
-    while index >= 0:
-        found.append(index)
-        index = tag.find(marker, index + 1)
-    return found
-
-
-# Two positions count. A marker inside a class/id attribute VALUE identifies the
-# element. A ``data-`` marker additionally counts as an attribute NAME -- but only in
-# that position: accepted anywhere in the tag, a link to ``/docs/data-sitekey`` read as
-# a served widget.
+# A widget is a marker in a class or id value, or a ``data-`` marker as an attribute
+# name; one in a URL or a JSON string only mentions a CAPTCHA provider.
 def _is_widget_occurrence(
     tag: str,
     marker: str,
     index: int,
     *,
-    # A served CAPTCHA widget is a marker used as an element identity -- a class
-    # or id value (``class="h-captcha"``) or the ``data-sitekey`` attribute --
-    # inside a rendered tag. A marker inside a ``src``/``href`` URL
-    # (``js.hcaptcha.com``) or a JSON string (Wikipedia's ``mw.config`` names
-    # its edit-captcha backend) is a mention, not a challenge; matching those
-    # raised a false PuzzleChallengeError on ordinary pages.
     attr_context: re.Pattern[str] = re.compile(r'(?:class|id)\s*=\s*["\'][^"\']*$'),
 ) -> bool:
     """Whether ``marker`` at ``index`` names this tag's element, not its text."""
@@ -223,6 +182,16 @@ def _is_widget_occurrence(
         return False
     after = tag[index + len(marker) : index + len(marker) + 1]
     return (index > 0 and tag[index - 1].isspace()) and after in ("=", "", " ", ">")
+
+
+def _occurrences(tag: str, marker: str) -> list[int]:
+    """Every start index of ``marker`` within ``tag``."""
+    found: list[int] = []
+    index = tag.find(marker)
+    while index >= 0:
+        found.append(index)
+        index = tag.find(marker, index + 1)
+    return found
 
 
 def _is_cloudflare_mitigated(headers: dict[str, str]) -> bool:

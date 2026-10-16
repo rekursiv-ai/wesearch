@@ -1,272 +1,240 @@
-"""http.client reference transport for :mod:`wesearch.fetch`."""
+"""Fetch with only the standard library: Chrome's headers, Python's TLS."""
 
 from __future__ import annotations
 
 from http import client
+from types import MappingProxyType
 from typing import TYPE_CHECKING, cast, override
 from urllib.parse import urlparse
 
 import socket
 import ssl
+import time
 
+from wesearch.chrome.headers import (
+    chrome_headers_for_host,
+    chrome_navigation_headers,
+    chrome_platform,
+)
+from wesearch.chrome.useragents import newest_chrome_major
 from wesearch.fetch.challenge import classify_http_error
 from wesearch.fetch.common import (
-    _REDIRECT_STATUSES,
-    Observer,
-    apply_redirect,
+    PendingRequest,
     bracket_ipv6,
     decompress,
     decompress_error_body,
     host_header,
     join_headers,
+    merge_headers,
+    origin,
     pinned_host,
-    redirect_target,
 )
+from wesearch.types.errors import FetchError
+from wesearch.types.params import ignore, no_cookies
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
-    from wesearch.types.params import Trust
+    from wesearch.fetch.types import FetchSession
+    from wesearch.types.params import HttpMethod
 
 
 __all__ = ["fetch_stdlib"]
-
-HTTPConn = client.HTTPConnection | client.HTTPSConnection
 
 
 def fetch_stdlib(
     url: str,
     *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    connect_timeout_sec: float | None = None,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: Observer | None,
-    trust: Trust = "untrusted",
-    session: object | None = None,
-    reseat: Callable[[str], object | None] | None = None,
+    method: HttpMethod = "GET",
+    headers: Mapping[str, str | None] = MappingProxyType({}),
+    body: bytes = b"",
+    timeout_sec: float = 30.0,
+    connect_timeout_sec: float = 10.0,
+    max_redirects: int = 10,
+    on_redirect: Callable[[str], None] = ignore,
+    on_response: Callable[[int, dict[str, str], str], None] = ignore,
+    allow_private_hosts: bool = False,
+    session: FetchSession | None = None,
+    cookies_for_host: Callable[[str], Mapping[str, str]] = no_cookies,
 ) -> bytes:
-    """Stdlib transport: http.client with manual redirect following.
+    """Fetch ``url`` with only the standard library; return the response body.
 
-    A drop-in peer of ``curl.fetch_curl`` with the identical signature, so the
-    core dispatcher can select either transport. This backend has no TLS
-    impersonation and no pooled connection, so ``impersonate``, ``session``, and
-    ``reseat`` are accepted for interface parity and ignored; the coherent Chrome
-    header set is instead hand-built upstream, in ``fetch``'s own header assembly.
+    Sends Chrome's headers but Python's TLS fingerprint, so sites that check
+    the fingerprint refuse it. Use it where ``curl_cffi`` is not installed.
 
     Args:
-      url: Request target; scheme determines http or https.
-      method: HTTP verb (GET, POST, etc.); used verbatim.
-      headers: Request headers dict; caller must not include Content-Length.
-      body: Request body bytes; None for GET or empty POST.
-      timeout_sec: Total time limit for the request; raised if exceeded.
-      connect_timeout_sec: Connection open limit; defaults to timeout_sec.
-      max_redirects: Maximum 3xx follow count; 0 disables following.
-      impersonate: User-Agent style name; accepted but ignored by this transport.
-      on_redirect: Callback(url) fired before each redirect; None to skip.
-      on_response: Observer for status and headers; None to skip.
-      trust: Trust level ("untrusted" or "trusted"); affects TLS validation.
-      session: Session handle; accepted but ignored; always None.
-      reseat: Callable to session-hop; accepted but ignored; always None.
+      url: Fully-qualified URL.
+      method: HTTP method.
+      headers: Sent over Chrome's headers, names in any case; a ``None`` value
+        removes that header. A ``Cookie`` header is the request's cookies.
+      body: Request body.
+      timeout_sec: Seconds allowed for the whole request.
+      connect_timeout_sec: Seconds allowed to connect.
+      max_redirects: Redirects to follow; at 0 the redirect is returned.
+      on_redirect: Called with each redirect target; raise to stop.
+      on_response: Called with ``(status, headers, url)`` for every response.
+      allow_private_hosts: Allow loopback, private, and link-local addresses;
+        leave ``False`` for any URL you did not write.
+      session: Unused: every request opens its own connection.
+      cookies_for_host: Returns the cookies to send a host a redirect moves to;
+        the caller's ``Cookie`` stays with the first origin.
 
     Returns:
-      result: Response body as bytes, following redirects up to the limit.
+      body: The response body, decompressed.
+
+    Raises:
+      FetchError: On a status of 400 or more, or a failed connection (status 0).
 
     """
-    del impersonate, session, reseat  # No impersonation or pooling here.
-    # ``connect_timeout_sec`` is honored via _open_connection/_widen_after_connect.
-    # The connection is owned entirely here: opened locally and closed in the
-    # finally on every exit (success, HTTP error, redirect/decompress failure),
-    # so no socket leaks. Nothing escapes to the caller.
-    parsed = urlparse(url)
-    scheme = parsed.scheme
-    hostname = parsed.hostname or parsed.netloc
-    port = parsed.port
-    path = parsed.path or "/"
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-
-    validated = pinned_host(url, trust)
-    connect_host = validated.ip if validated is not None else ""
-    request_headers = headers
-    if validated is not None:
-        # Host first: real browsers and http.client's own auto-generated
-        # Host header both place it before User-Agent/Accept/etc. Servers
-        # that observe header order return 403 when Host is trailing. The
-        # resolver returns the bare host (its contract), so host_header
-        # re-appends any non-default port.
-        request_headers = {
-            "Host": host_header(validated.host, port, scheme),
-            **headers,
-        }
-
-    raw_conn = _open_connection(
-        scheme,
-        hostname,
-        timeout_sec,
-        connect_timeout_sec=connect_timeout_sec,
-        port=port,
-        resolved_ip=connect_host,
+    del session
+    platform = chrome_platform("chrome")
+    major = newest_chrome_major(platform)
+    content_type = next(
+        (
+            v
+            for k, v in headers.items()
+            if k.lower() == "content-type" and v is not None
+        ),
+        "",
     )
-    try:
-        current_url = url
-        remaining = max_redirects
-        while True:
-            raw_conn.request(method, path, body=body, headers=request_headers)
-            _widen_after_connect(raw_conn, timeout_sec)
-            response = raw_conn.getresponse()
-            resp_headers = join_headers(response.getheaders())
-            if on_response is not None:
-                on_response(response.status, resp_headers, current_url)
+    pending = PendingRequest(
+        url=url,
+        method=method,
+        headers=merge_headers(
+            chrome_navigation_headers(
+                major=major,
+                platform=platform,
+                method=method,
+                content_type=content_type,
+                origin=origin(url),
+            )
+            | chrome_headers_for_host(
+                urlparse(url).hostname or "",
+                major=major,
+                platform=platform,
+            ),
+            headers,
+        ),
+        body=body,
+        remaining=max_redirects,
+    )
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        requested = pending.url
+        parsed = urlparse(requested)
+        pin = pinned_host(requested, allow_private_hosts=allow_private_hosts)
+        hostname = parsed.hostname or ""
+        # First, as Chrome sends it: servers that check order 403 a trailing Host.
+        sent = (
+            {"Host": host_header(pin.host, parsed.port, parsed.scheme)} if pin else {}
+        )
+        sent |= pending.headers
+        connection = _connect(
+            parsed.scheme,
+            hostname,
+            port=parsed.port,
+            ip=pin.ip if pin else "",
+            connect_timeout_sec=connect_timeout_sec,
+        )
+        try:
+            connection.request(
+                pending.method,
+                f"{parsed.path or '/'}{f'?{parsed.query}' if parsed.query else ''}",
+                body=pending.body or None,
+                headers=sent,
+            )
+            # Held here: ``getresponse`` drops ``connection.sock`` when the
+            # server will close, yet the response still reads through it.
+            sock = connection.sock
+            chunks: list[bytes] = []
+            response: client.HTTPResponse | None = None
+            # A socket timeout bounds each read, so a server trickling bytes
+            # would never time out; the deadline bounds the whole request.
+            # The response closes the socket after the last byte, so stop there.
+            while response is None or not response.isclosed():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError(f"no response within {timeout_sec}s")
+                if sock is not None:
+                    sock.settimeout(left)
+                if response is None:
+                    response = connection.getresponse()
+                elif chunk := response.read(65_536):
+                    chunks.append(chunk)
+                else:
+                    break
+            received = join_headers(response.getheaders())
+            content = b"".join(chunks)
+        except (OSError, client.HTTPException) as error:
+            raise FetchError(requested, 0, {}, str(error).encode()) from error
+        finally:
+            connection.close()
+        if pending.follow(
+            response.status,
+            received,
+            on_response=on_response,
+            on_redirect=on_redirect,
+            cookies_for_host=cookies_for_host,
+        ):
+            continue
+        if response.status >= 400:
+            raise classify_http_error(
+                requested,
+                response.status,
+                received,
+                decompress_error_body(content, received),
+            )
+        return decompress(content, received.get("content-encoding", "identity"))
 
-            is_redirect = response.status in _REDIRECT_STATUSES
-            if is_redirect and remaining > 0:
-                remaining -= 1
-                response.read()  # Drain the socket before advancing the hop.
-                redirect_url = redirect_target(
-                    current_url,
-                    response.status,
-                    resp_headers,
-                )
-                redir = urlparse(redirect_url)
-                redir_scheme = redir.scheme or scheme
-                if on_redirect is not None:
-                    on_redirect(redirect_url)
-                redir_parsed = urlparse(redirect_url)
-                redir_hostname = redir_parsed.hostname or hostname
-                redir_port = redir_parsed.port
-                # Per-hop transform (Origin rewrite, 303 -> bodyless GET) via the
-                # ONE shared helper, so the stdlib and curl paths cannot drift.
-                # Applied to request_headers (which carries any validated Host).
-                request_headers, method, body = apply_redirect(
-                    current_url,
-                    request_headers,
-                    method,
-                    body=body,
-                    status=response.status,
-                    redirect_url=redirect_url,
-                )
-                if (
-                    redir_hostname != hostname
-                    or redir_port != port
-                    or redir_scheme != scheme
-                ):
-                    raw_conn.close()
-                    scheme = redir_scheme
-                    hostname = redir_hostname
-                    port = redir_port
-                    validated = pinned_host(redirect_url, trust)
-                    connect_host = validated.ip if validated is not None else ""
-                    # New host: replace the Host header (drop any prior first).
-                    # HTTP field names are case-insensitive, so drop any casing.
-                    request_headers = {
-                        k: v for k, v in request_headers.items() if k.lower() != "host"
-                    }
-                    if validated is not None:
-                        request_headers = {
-                            "Host": host_header(validated.host, port, scheme),
-                            **request_headers,
-                        }
-                    raw_conn = _open_connection(
-                        scheme,
-                        hostname,
-                        timeout_sec,
-                        connect_timeout_sec=connect_timeout_sec,
-                        port=port,
-                        resolved_ip=connect_host,
-                    )
-                path = redir.path or "/"
-                if redir.query:
-                    path = f"{path}?{redir.query}"
-                current_url = redirect_url
-                continue
 
-            raw_body = response.read()
-            if response.status >= 400:
-                raise classify_http_error(
-                    current_url,
-                    response.status,
-                    resp_headers,
-                    decompress_error_body(raw_body, resp_headers),
-                )
-            encoding = resp_headers.get("content-encoding", "identity")
-            return decompress(raw_body, encoding)
-    finally:
-        raw_conn.close()
+def _connect(
+    scheme: str,
+    hostname: str,
+    *,
+    port: int | None,
+    ip: str,
+    connect_timeout_sec: float,
+) -> client.HTTPConnection:
+    """Return an unopened connection to ``ip`` if given, else to ``hostname``."""
+    host = bracket_ipv6(ip or hostname)
+    if scheme != "https":
+        return client.HTTPConnection(host, port=port, timeout=connect_timeout_sec)
+    if ip:
+        return _PinnedHTTPSConnection(
+            host,
+            port=port,
+            hostname=hostname,
+            timeout=connect_timeout_sec,
+        )
+    return client.HTTPSConnection(
+        host,
+        port=port,
+        timeout=connect_timeout_sec,
+        context=ssl.create_default_context(),
+    )
 
 
-class _ValidatedHTTPSConnection(client.HTTPSConnection):
+class _PinnedHTTPSConnection(client.HTTPSConnection):
+    """An HTTPS connection to a fixed IP that verifies the certificate by name."""
+
     def __init__(
         self,
-        host: str,
+        ip: str,
         *,
-        port: int | None = None,
-        server_hostname: str,
+        port: int | None,
+        hostname: str,
         timeout: float,
-        context: ssl.SSLContext,
     ) -> None:
-        super().__init__(host, port=port, timeout=timeout, context=context)
-        self._server_hostname = server_hostname
-        self._ssl_context = context
+        context = ssl.create_default_context()
+        super().__init__(ip, port=port, timeout=timeout, context=context)
+        self._hostname = hostname
+        self._context = context
 
     @override
     def connect(self) -> None:
         client.HTTPConnection.connect(self)
-        # ``HTTPConnection.connect`` sets ``sock`` or raises.
-        self.sock = self._ssl_context.wrap_socket(
+        self.sock = self._context.wrap_socket(
             cast(socket.socket, self.sock),
-            server_hostname=self._server_hostname,
+            server_hostname=self._hostname,
         )
-
-
-# ``http.client`` keeps ONE timeout for the handshake and every later socket read. The
-# connection is therefore built with the CONNECT budget, and the caller widens the live
-# socket to ``timeout_sec`` once connected (:func:`_widen_after_connect`). Matches
-# curl_cffi's ``(connect, read)`` pair, which is what keeps the two backends from
-# disagreeing on ``RetryParams``.
-def _open_connection(
-    scheme: str,
-    hostname: str,
-    timeout_sec: float,
-    *,
-    connect_timeout_sec: float | None = None,
-    port: int | None = None,
-    resolved_ip: str = "",
-) -> HTTPConn:
-    """Open a new HTTP/HTTPS connection; pin to ``resolved_ip`` when given."""
-    handshake_sec = (
-        connect_timeout_sec if connect_timeout_sec is not None else timeout_sec
-    )
-    connect_host = bracket_ipv6(resolved_ip or hostname)
-    if scheme == "https":
-        ctx = ssl.create_default_context()
-        if resolved_ip:
-            return _ValidatedHTTPSConnection(
-                connect_host,
-                port=port,
-                server_hostname=hostname,
-                timeout=handshake_sec,
-                context=ctx,
-            )
-        return client.HTTPSConnection(
-            connect_host,
-            port=port,
-            timeout=handshake_sec,
-            context=ctx,
-        )
-    return client.HTTPConnection(connect_host, port=port, timeout=handshake_sec)
-
-
-# The connection was built with the narrower CONNECT budget, which would otherwise also
-# cap every response read -- turning a slow page into a spurious timeout. No-op before
-# the socket exists; ``http.client`` connects lazily, so the caller invokes this right
-# after the first request.
-def _widen_after_connect(conn: HTTPConn, timeout_sec: float) -> None:
-    """Restore the full read budget on an already-connected socket."""
-    if conn.sock is not None:
-        conn.sock.settimeout(timeout_sec)

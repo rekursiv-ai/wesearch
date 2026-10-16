@@ -12,9 +12,11 @@ from wesearch.types import params
 from wesearch.types.params import (
     NO_BODY,
     ContentParams,
+    ObserveParams,
     PolicyParams,
     RequestParams,
     RetryParams,
+    ignore,
 )
 
 
@@ -126,10 +128,18 @@ def test_retry_after_malformed_value_uses_jitter(
 def test_policy_field_default_and_missing_name() -> None:
     assert PolicyParams.field_default("transport") == "auto"
     assert PolicyParams.field_default("extractor") == "html2text"
-    assert PolicyParams.field_default("trust") == "untrusted"
+    assert PolicyParams.field_default("allow_private_hosts") is False
     with pytest.raises(KeyError) as exc:
         PolicyParams.field_default("missing")
     assert exc.value.args == ("PolicyParams has no field 'missing'.",)
+
+
+def test_observe_callbacks_default_to_ignore() -> None:
+    observe = ObserveParams()
+    assert observe.on_redirect is ignore
+    assert observe.on_response is ignore
+    assert observe.body_validator is ignore
+    assert ignore("anything", 1, b"") is None
 
 
 def test_request_defaults_are_independent() -> None:

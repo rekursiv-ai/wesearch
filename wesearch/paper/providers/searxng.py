@@ -15,15 +15,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import BackendError
 from wesearch.paper.ids import ARXIV_URL_RE, looks_like_paper_id
-from wesearch.search.custom_types import PaperResult, SearchError
+from wesearch.paper.types import PaperRecord
 from wesearch.search.searxng import searxng
+from wesearch.search.types import PaperResult, SearchError
 
 
 if TYPE_CHECKING:
-    from wesearch.fetch import Transport
+    from wesearch.fetch import FetchSession, Transport
 
 
 __all__ = ["search"]
@@ -38,6 +38,7 @@ def search(
     open_access_only: bool,
     default_fetch: int = 20,
     transport: Transport = "auto",
+    session: FetchSession | None = None,
 ) -> tuple[list[PaperRecord], int, bool]:
     """Query SearXNG's ``science`` category.
 
@@ -54,6 +55,7 @@ def search(
       open_access_only: Keep only records with an open-access PDF (client-side).
       default_fetch: Candidate count requested when ``limit`` is ``None``.
       transport: Retrieval transport forwarded to SearXNG.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       records: The mapped hits, in SearXNG rank order.
@@ -72,6 +74,7 @@ def search(
                 num_results=limit if limit is not None else default_fetch,
                 categories="science",
                 transport=transport,
+                session=session,
             ),
         )
     except (SearchError, RuntimeError) as e:
@@ -86,14 +89,6 @@ def search(
     else:
         capped = records[:limit]
     return capped, len(capped), len(capped) == len(hits)
-
-
-def _year_in_range(year: int | None, lo: int | None, hi: int | None) -> bool:
-    if year is None:
-        return False
-    if lo is not None and year < lo:
-        return False
-    return not (hi is not None and year > hi)
 
 
 def _to_record(hit: PaperResult) -> PaperRecord:
@@ -116,3 +111,11 @@ def _to_record(hit: PaperResult) -> PaperRecord:
         open_access_pdf=hit.pdf_url,
         sources=("searxng",),
     )
+
+
+def _year_in_range(year: int | None, lo: int | None, hi: int | None) -> bool:
+    if year is None:
+        return False
+    if lo is not None and year < lo:
+        return False
+    return not (hi is not None and year > hi)

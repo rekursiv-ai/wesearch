@@ -1,32 +1,24 @@
-"""Cross-process browser profiles: a per-``(egress_ip, domain)`` cookie jar.
+"""Cookies kept per public IP and host, shared across processes.
 
-A scraper that presents as a brand-new anonymous client on every request looks
-exactly like a bot: it never sends back the session cookie a real browser keeps,
-so the server's per-session budget never applies and it trips the anti-scrape
-limit fast. A :class:`Profile` fixes that -- it persists the cookie jar a
-domain handed us, keyed by the public egress IP so a VPN
-rotation yields a fresh identity, and shared across processes (an ``fcntl``-locked
-JSON file under :func:`wesearch.userdirs.data_dir`) so several workers behind
-one exit IP behave like one user with several browser tabs open.
-
-This module is a pure data store and the cookie vocabulary: it loads, saves,
-and merges profiles, and parses the values a profile holds. It owns no
-orchestration and takes no dependency on ``fetch`` or egress resolution -- the
-orchestrator (:func:`wesearch.fetch.fetch`) drives it.
+A site that sees the same cookies on every request sees one returning visitor;
+one that sees none sees a new client each time, which reads as a bot. A new
+public IP (a VPN roll) starts with none.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from functools import cache
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib.parse import quote
 
 import fcntl
 import json
 import os
+import tempfile
 import threading
 import time
 
@@ -36,7 +28,7 @@ from wesearch.lib.userdirs import data_dir
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Generator
 
 
 __all__ = [
@@ -47,23 +39,15 @@ __all__ = [
 
 
 def parse_set_cookie(header_value: str) -> dict[str, str]:
-    """Parse a ``Set-Cookie`` header value into live ``{name: value}`` pairs.
+    """Return the cookies a ``Set-Cookie`` value sets, without expired ones.
 
-    Keeps only the leading ``name=value`` of each cookie, dropping attributes
-    (``Path`` / ``Domain`` / ``Secure`` / ``SameSite`` / ...): we are the client
-    deciding what to send back, not a browser enforcing scope. A ``Max-Age`` of
-    zero or less, or a past ``Expires``, marks a deletion and is omitted.
-
-    Multiple ``Set-Cookie`` headers are newline-separated by
-    :func:`wesearch.fetch.common.join_headers` -- Set-Cookie is RFC-exempt
-    from comma folding because a cookie value may itself contain ``", "``, so a
-    newline (never present in a header value) is the unambiguous separator.
+    Attributes (``Path``, ``Domain``, ...) are dropped.
 
     Args:
-      header_value: The (possibly newline-separated) ``Set-Cookie`` header value.
+      header_value: One ``Set-Cookie`` value, or several joined by newlines.
 
     Returns:
-      cookies: Live cookie name-value pairs; empty when none are live.
+      cookies: Cookie names and values.
 
     """
     cookies: dict[str, str] = {}
@@ -84,11 +68,11 @@ def parse_set_cookie(header_value: str) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Profile:
-    """One browsing identity for a ``(egress_ip, domain)``: its cookies.
+    """The cookies one host set for one public IP.
 
     Attributes:
-      cookies: Live cookie jar (``name -> value``) for the domain.
-      created: Unix time the identity was minted, for TTL eviction.
+      cookies: Cookie names and values.
+      created: Unix time it was first saved; it expires ``ttl_sec`` later.
 
     """
 
@@ -97,19 +81,200 @@ class Profile:
     created: float = field(default_factory=time.time)
 
 
-def _encode(profile: Profile) -> bytes:
-    """Serialize a profile to JSON bytes."""
-    return json.dumps(
-        {
-            "cookies": profile.cookies,
-            "created": profile.created,
-        },
-    ).encode()
+class ProfileStore:
+    """Saves :class:`Profile` per public IP and host, one locked file each.
+
+    Safe across threads and processes.
+
+    Args:
+      base_dir: Where the files go; ``None`` is wesearch's data directory.
+      ttl_sec: Seconds a profile lives; an older one reads as absent.
+
+    """
+
+    def __init__(
+        self,
+        *,
+        base_dir: Path | None = None,
+        ttl_sec: float = 12 * 3600.0,
+    ) -> None:
+        self._base = (
+            data_dir() / "rekursiv-ai" / "wesearch" if base_dir is None else base_dir
+        )
+        self._ttl_sec = ttl_sec
+        self._lock = threading.Lock()
+
+    def load(self, egress_ip: str, domain: str) -> Profile | None:
+        """Return the profile for ``egress_ip`` and ``domain``, if live.
+
+        Args:
+          egress_ip: Public IP.
+          domain: Host.
+
+        Returns:
+          profile: The profile; ``None`` when absent, expired, or corrupt.
+
+        """
+        path = self._path(egress_ip, domain)
+        with self._locked(path):
+            raw = self._read(path)
+            if raw is None:
+                return None
+            profile = _try_decode(raw)
+            if profile is None:
+                return None
+            if time.time() - profile.created > self._ttl_sec:
+                path.unlink(missing_ok=True)
+                return None
+            return profile
+
+    def save(self, egress_ip: str, domain: str, profile: Profile) -> None:
+        """Save ``profile`` for ``egress_ip`` and ``domain``, replacing any.
+
+        Args:
+          egress_ip: Public IP.
+          domain: Host.
+          profile: The cookies to keep.
+
+        """
+        path = self._path(egress_ip, domain)
+        with self._locked(path):
+            self._write(path, _encode(profile))
+
+    def discard(self, egress_ip: str, domain: str) -> None:
+        """Delete the profile for ``egress_ip`` and ``domain``, if any.
+
+        Args:
+          egress_ip: Public IP.
+          domain: Host.
+
+        """
+        path = self._path(egress_ip, domain)
+        with self._locked(path):
+            path.unlink(missing_ok=True)
+
+    def update_cookies(
+        self,
+        egress_ip: str,
+        domain: str,
+        cookies: dict[str, str],
+    ) -> None:
+        """Set ``cookies`` in the saved profile, keeping its others; no-op if none.
+
+        Args:
+          egress_ip: Public IP.
+          domain: Host.
+          cookies: Cookie names and values that win.
+
+        """
+        if not cookies:
+            return
+        path = self._path(egress_ip, domain)
+        with self._locked(path):
+            raw = self._read(path)
+            if raw is None:
+                return
+            profile = _try_decode(raw)
+            if profile is None:
+                return
+            merged = {**profile.cookies, **cookies}
+            self._write(
+                path,
+                _encode(
+                    Profile(cookies=merged, created=profile.created),
+                ),
+            )
+
+    def _path(self, egress_ip: str, domain: str) -> Path:
+        # Quoted: an IPv6 address's colons are illegal in some filenames.
+        key = (
+            f"{quote(egress_ip).replace('/', '%2F')}|"
+            f"{quote(domain).replace('/', '%2F')}"
+        )
+        return self._base / f"{key}.json"
+
+    # A sidecar, not the key file: ``_write`` renames over the key file, so a
+    # lock on it would bind to the replaced inode and serialize nothing.
+    @contextmanager
+    def _locked(self, path: Path) -> Generator[None]:
+        """Hold the key's lock against every thread, store, and process."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            fd = os.open(
+                path.with_name(f".{path.name}.lock"),
+                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+                0o600,
+            )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(fd)
+
+    def _read(self, path: Path, *, max_bytes: int = 1 << 20) -> bytes | None:
+        """Read a key's bytes, or ``None`` when absent."""
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return None
+        try:
+            data = os.read(fd, max_bytes)
+        finally:
+            os.close(fd)
+        return data or None
+
+    def _write(self, path: Path, data: bytes) -> None:
+        """Atomically replace a key's file: write a unique temp sibling, then rename."""
+        fd, tmp = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            _ = os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        Path(tmp).replace(path)
 
 
-# A partial write, a manual edit, or a disk error yields bytes that are not a valid
-# profile; the store treats those as absent so a bad file never raises out of a fetch
-# (it self-heals on the next save).
+def parsedate_to_datetime_or_none(value: str) -> datetime | None:
+    """Return an HTTP date as an aware datetime, or ``None`` if malformed.
+
+    Args:
+      value: An HTTP date, e.g. ``Wed, 21 Oct 2015 07:28:00 GMT``.
+
+    Returns:
+      when: The time, UTC when the date names no zone.
+
+    """
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+# ``Max-Age`` wins over ``Expires`` (RFC 6265); a malformed value keeps the cookie.
+def _is_deletion(attributes: list[str]) -> bool:
+    """Whether cookie attributes mark it expired (past ``Max-Age`` or ``Expires``)."""
+    for attr in attributes:
+        key, _, value = attr.strip().partition("=")
+        if key.strip().lower() == "max-age":
+            try:
+                return int(value.strip()) <= 0
+            except ValueError:
+                return False
+    for attr in attributes:
+        key, _, value = attr.strip().partition("=")
+        if key.strip().lower() == "expires":
+            expires = parsedate_to_datetime_or_none(value.strip())
+            if expires is not None:
+                return expires <= datetime.now(UTC)
+    return False
+
+
+# A corrupt file reads as absent and is replaced on the next save.
 def _try_decode(raw: bytes) -> Profile | None:
     """Deserialize JSON bytes to a profile, or ``None`` if corrupt/malformed."""
     try:
@@ -135,211 +300,11 @@ def _try_decode(raw: bytes) -> Profile | None:
         return None
 
 
-class ProfileStore:
-    """Persists :class:`Profile` per ``(egress_ip, domain)`` across processes.
-
-    Each key maps to one ``fcntl``-locked JSON file under ``base_dir``. Reads
-    honor ``ttl_sec`` (a profile older than the TTL is treated as absent, so a
-    stale identity is retired rather than reused). Writes are a locked
-    read-modify-write, so concurrent workers behind one exit IP never corrupt
-    the jar.
-
-    Args:
-      base_dir: Directory holding the per-key files. Defaults to
-        ``data_dir() / "rekursiv-ai" / "web_profiles"``. Created on first write.
-      ttl_sec: Seconds a profile stays valid after ``created``. Default 12h.
-
-    """
-
-    def __init__(
-        self,
-        *,
-        base_dir: Path | None = None,
-        ttl_sec: float = 12 * 3600.0,
-    ) -> None:
-        self._base = (
-            data_dir() / "rekursiv-ai" / "wesearch" if base_dir is None else base_dir
-        )
-        self._ttl_sec = ttl_sec
-        self._lock = threading.Lock()
-
-    @classmethod
-    @cache
-    def shared(cls) -> ProfileStore:
-        """Return the process-wide store, built once (the default for every fetch)."""
-        return cls()
-
-    def load(self, egress_ip: str, domain: str) -> Profile | None:
-        """Return the live profile for the key, or ``None`` if absent or stale.
-
-        A corrupt or partial file (a crash mid-write, a manual edit, a disk
-        error) is treated as absent -- it self-heals on the next :meth:`save` --
-        so a bad file never propagates an exception out of a fetch. An
-        expired file is unlinked, not merely ignored, so stale keys don't
-        accumulate.
-
-        Args:
-          egress_ip: Source IP address for this profile.
-          domain: Registrable domain.
-
-        Returns:
-          profile: The Profile | None.
-
-        """
-        path = self._path(egress_ip, domain)
-        with self._lock:
-            raw = self._read(path)
-            if raw is None:
-                return None
-            profile = _try_decode(raw)
-            if profile is None:
-                return None  # Corrupt: absent, self-heals on next save.
-            if time.time() - profile.created > self._ttl_sec:
-                path.unlink(missing_ok=True)
-                return None
-            return profile
-
-    def save(self, egress_ip: str, domain: str, profile: Profile) -> None:
-        """Persist ``profile`` for the key, replacing any prior one.
-
-        Args:
-          egress_ip: Egress ip.
-          domain: Domain.
-          profile: Profile.
-
-        """
-        path = self._path(egress_ip, domain)
-        with self._lock:
-            self._write(path, _encode(profile))
-
-    def discard(self, egress_ip: str, domain: str) -> None:
-        """Delete the profile for the key (a burn); absent keys are a no-op.
-
-        Args:
-          egress_ip: Egress ip.
-          domain: Domain.
-
-        """
-        path = self._path(egress_ip, domain)
-        with self._lock:
-            path.unlink(missing_ok=True)
-
-    def update_cookies(
-        self,
-        egress_ip: str,
-        domain: str,
-        cookies: dict[str, str],
-    ) -> None:
-        """Merge ``cookies`` into an existing key's jar (locked read-modify-write).
-
-        Preserves prior cookies (new names add, repeated names overwrite). A
-        no-op when no profile exists for the key; :meth:`save` establishes
-        the profile first.
-
-        Args:
-          egress_ip: Source IP address.
-          domain: Registrable domain.
-          cookies: Name=value pairs to add or update.
-
-        """
-        if not cookies:
-            return
-        path = self._path(egress_ip, domain)
-        with self._lock:
-            raw = self._read(path)
-            if raw is None:
-                return
-            profile = _try_decode(raw)
-            if profile is None:
-                return  # Corrupt: nothing to merge into; heals on next save.
-            merged = {**profile.cookies, **cookies}
-            self._write(
-                path,
-                _encode(
-                    Profile(cookies=merged, created=profile.created),
-                ),
-            )
-
-    def _path(self, egress_ip: str, domain: str) -> Path:
-        # One file per identity. Percent-encode each part before joining so an
-        # IPv6 literal's colons (in the egress OR the domain) neither collide
-        # with the "|" separator nor produce a colon in the filename (illegal on
-        # some filesystems). quote(safe="") escapes ":" -> "%3A", so distinct
-        # (egress, domain) pairs never map to one path.
-        key = (
-            f"{quote(egress_ip).replace('/', '%2F')}|"
-            f"{quote(domain).replace('/', '%2F')}"
-        )
-        return self._base / f"{key}.json"
-
-    # ``max_bytes`` (default 1 MiB) caps a runaway file; cookie jars are small.
-    def _read(self, path: Path, *, max_bytes: int = 1 << 20) -> bytes | None:
-        """Read a key's bytes under the file lock, or ``None`` when absent."""
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
-        except FileNotFoundError:
-            return None
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH)
-            data = os.read(fd, max_bytes)
-        finally:
-            os.close(fd)
-        return data or None
-
-    # ``os.replace`` is atomic on POSIX, so a concurrent reader (or a crash) sees either
-    # the complete old file or the complete new one -- never a truncated partial. A
-    # crash after the temp is written but before the rename leaves only the stray temp
-    # (cleaned on the next successful write to the key), never a corrupt file at the key
-    # path.
-    def _write(self, path: Path, data: bytes) -> None:
-        """Atomically replace a key's file: write a temp sibling, then rename."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # A per-pid temp name avoids two writers colliding on one temp file; the
-        # atomic rename serializes them so the key always holds a complete file.
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
-        try:
-            _ = os.write(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        tmp.replace(path)
-
-
-def parsedate_to_datetime_or_none(value: str) -> datetime | None:
-    """Parse an HTTP-date; return ``None`` on any malformed value.
-
-    Args:
-      value: HTTP date string (RFC 2822 or similar).
-
-    Returns:
-      result: The datetime | None.
-
-    """
-    try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    # A naive datetime (no tz in the header) is interpreted as UTC, per HTTP.
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-
-
-# ``Max-Age`` wins when present (RFC 6265 precedence); otherwise a past ``Expires`` date
-# is a deletion. A malformed value is treated as non-deletion (keep the cookie) rather
-# than raising.
-def _is_deletion(attributes: list[str]) -> bool:
-    """Whether cookie attributes mark it expired (past ``Max-Age`` or ``Expires``)."""
-    for attr in attributes:
-        key, _, value = attr.strip().partition("=")
-        if key.strip().lower() == "max-age":
-            try:
-                return int(value.strip()) <= 0
-            except ValueError:
-                return False
-    for attr in attributes:
-        key, _, value = attr.strip().partition("=")
-        if key.strip().lower() == "expires":
-            expires = parsedate_to_datetime_or_none(value.strip())
-            if expires is not None:
-                return expires <= datetime.now(UTC)
-    return False
+def _encode(profile: Profile) -> bytes:
+    """Serialize a profile to JSON bytes."""
+    return json.dumps(
+        {
+            "cookies": profile.cookies,
+            "created": profile.created,
+        },
+    ).encode()

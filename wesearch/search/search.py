@@ -21,10 +21,11 @@ import json
 import logging
 import sys
 
-from wesearch.fetch import Transport
 from wesearch.search.brave import brave
 from wesearch.search.cache import cached_search
-from wesearch.search.custom_types import (
+from wesearch.search.duckduckgo import duckduckgo
+from wesearch.search.searxng import SearxngResult, searxng
+from wesearch.search.types import (
     DEFAULT_SEARCH_CHAIN,
     CodeResult,
     FileResult,
@@ -40,11 +41,7 @@ from wesearch.search.custom_types import (
     TorrentResult,
     VideoResult,
 )
-from wesearch.search.duckduckgo import duckduckgo
-from wesearch.search.searxng import SearxngResult, category_gloss, searxng
 from wesearch.types.errors import BotDetectionError, FetchError
-from wesearch.types.params import PolicyParams
-from wesearch.types.schema import Field, Schema
 
 
 logger = logging.getLogger(__name__)
@@ -56,56 +53,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-
-class SearchParamsSchema(Schema):
-    """What every search surface accepts.
-
-    The counterpart to
-    :class:`wesearch.fetch.custom_types.FetchParamsSchema`, and here for
-    the same reason: the sagent tool's schema, that tool's directive
-    validation, and the MCP server's signature are three renderings of one
-    description rather than three copies of it.
-
-    Beside :func:`search` rather than in ``custom_types`` because the
-    ``categories`` prose is rendered from ``searxng.CATEGORIES``, which reads
-    the vocabulary FROM ``custom_types``. Declaring the schema at the leaf
-    would close that loop; declaring it here, where importing a backend is
-    already the point, leaves each tab's gloss beside the parser it names.
-    """
-
-    query = Field[str](
-        annotation=str,
-        required=True,
-        description="Search query string.",
-    )
-    backend = Field[SearchBackends](
-        annotation=SearchBackends,
-        # No default: an unnamed backend is RESOLVED by ``search`` -- a
-        # non-general category selects SearXNG, anything else walks the
-        # fallback chain. Naming one here would preempt that.
-        description=(
-            "Search backend. Omit to let a category choose, else try "
-            f"{', '.join(DEFAULT_SEARCH_CHAIN)} in order, skipping any that is "
-            "unconfigured, blocked, or empty."
-        ),
-    )
-    categories = Field[SearxngCategory](
-        annotation=SearxngCategory,
-        default="general",
-        description=(
-            "SearXNG result category (tab). A non-default value selects the "
-            "SearXNG backend when none is named, and is rejected alongside an "
-            f"explicit non-SearXNG one.\n{category_gloss()}"
-        ),
-    )
-    transport = Field[Transport](
-        annotation=Transport,
-        default=PolicyParams.field_default("transport", Transport),
-        description=(
-            "Retrieval path. 'auto' tries curl and escalates to Zendriver when "
-            "a site bot-blocks it. Set an explicit transport to stress a path."
-        ),
-    )
+    from wesearch.fetch import FetchSession, Transport
 
 
 @overload
@@ -118,6 +66,7 @@ def search(
     categories: Literal["science"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[PaperResult]: ...
 
 
@@ -131,6 +80,7 @@ def search(
     categories: Literal["images"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[ImageResult]: ...
 
 
@@ -144,6 +94,7 @@ def search(
     categories: Literal["videos"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[VideoResult]: ...
 
 
@@ -157,6 +108,7 @@ def search(
     categories: Literal["news", "music"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[MediaResult]: ...
 
 
@@ -170,6 +122,7 @@ def search(
     categories: Literal["map"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[MapResult]: ...
 
 
@@ -183,6 +136,7 @@ def search(
     categories: Literal["it"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
 
@@ -196,6 +150,7 @@ def search(
     categories: Literal["files"],
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
 
@@ -209,6 +164,7 @@ def search(
     categories: SearxngCategory = ...,
     transport: Transport = ...,
     cache_ttl_sec: float = ...,
+    session: FetchSession | None = ...,
 ) -> Sequence[SearchResult]: ...
 
 
@@ -221,6 +177,7 @@ def search(
     categories: SearxngCategory = "general",
     transport: Transport = "auto",
     cache_ttl_sec: float = 3600.0,
+    session: FetchSession | None = None,
 ) -> Sequence[SearxngResult]:
     """Search one named backend, or walk the fallback chain when none is named.
 
@@ -236,6 +193,7 @@ def search(
       transport: Retrieval transport forwarded to the selected backend.
       cache_ttl_sec: Seconds a cached answer stays valid; ``0`` bypasses the
         host-wide cache (a probe that must see the backend as it is now).
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       results: One typed record per hit. SearXNG categories with extra
@@ -269,6 +227,7 @@ def search(
         headers=headers,
         categories=categories,
         transport=transport,
+        session=session,
     )
     unknown = [name for name in chain if name not in runners]
     if unknown:
@@ -319,24 +278,33 @@ def _runners(
     headers: dict[str, str] | None,
     categories: SearxngCategory,
     transport: Transport,
+    session: FetchSession | None = None,
 ) -> Mapping[str, Callable[[], Sequence[SearxngResult]]]:
     """Return one zero-argument call per backend, bound to this query."""
     # A table rather than an if-chain: a chain over a closed ``Literal`` exhausts
     # it, so the unknown-backend guard becomes provably dead -- at a DIFFERENT
     # branch per build, since the export drops ``google``.
     return {
-        "brave": lambda: brave(query, num_results, headers, transport=transport),
+        "brave": lambda: brave(
+            query,
+            num_results,
+            headers,
+            transport=transport,
+            session=session,
+        ),
         "searxng": lambda: searxng(
             query,
             num_results,
             headers,
             categories=categories,
             transport=transport,
+            session=session,
         ),
         "duckduckgo": lambda: duckduckgo(
             query,
             num_results,
             headers,
             transport=transport,
+            session=session,
         ),
     }

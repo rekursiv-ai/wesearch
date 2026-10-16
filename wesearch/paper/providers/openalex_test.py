@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from wesearch.fetch import FetchSession, RequestParams
+from wesearch.fetch import FetchSession
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
 from wesearch.paper.providers import openalex
 from wesearch.types.errors import CooldownError, FetchError
@@ -17,6 +17,8 @@ from wesearch.types.errors import CooldownError, FetchError
 
 if TYPE_CHECKING:
     from treekle import MutablePlainTree
+
+    from wesearch.fetch import RequestParams
 
 
 class TestSearch:
@@ -179,7 +181,7 @@ class TestRequestErrors:
         with (
             patch(
                 "wesearch.paper.providers.openalex.fetch",
-                _RecordingFetch((b"not json", FetchSession())),
+                _RecordingFetch(b"not json"),
             ),
             pytest.raises(BackendError) as ei,
         ):
@@ -208,7 +210,7 @@ class TestRequestErrors:
         with (
             patch(
                 "wesearch.paper.providers.openalex.fetch",
-                _RecordingFetch((payload, FetchSession())),
+                _RecordingFetch(payload),
             ),
             pytest.raises(BackendError, match="expected a JSON object"),
         ):
@@ -226,7 +228,7 @@ class TestRequestErrors:
         with (
             patch(
                 "wesearch.paper.providers.openalex.fetch",
-                _RecordingFetch((b"\xff", FetchSession())),
+                _RecordingFetch(b"\xff"),
             ),
             pytest.raises(BackendError, match="invalid JSON"),
         ):
@@ -285,6 +287,17 @@ class TestReconstructAbstract:
 
     def test_all_empty_positions_returns_empty(self) -> None:
         assert openalex._reconstruct_abstract({"word": []}) == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(3, 3), ("3", 3), (3.0, 3), (None, 0), ("many", 0), ([3], 0), ({"n": 3}, 0)],
+)
+def test_count_reads_numbers_and_text_and_zeroes_the_rest(
+    value: object,
+    expected: int,
+) -> None:
+    assert openalex._count(value) == expected
 
 
 class TestWorkToRecord:
@@ -421,8 +434,8 @@ class TestReferences:
             "results": [{"title": "ref-a"}, {"title": "ref-b"}],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(batch).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(batch).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -456,8 +469,8 @@ class TestReferences:
             "results": [{"title": "ref-a"}],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(batch).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(batch).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -478,8 +491,8 @@ class TestReferences:
             "results": [{"title": "ref"}],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(batch).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(batch).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -510,8 +523,8 @@ class TestReferences:
             "results": [{"title": "ref-a"}, {"title": "ref-b"}],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(batch).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(batch).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -535,8 +548,8 @@ class TestReferences:
             "results": [{"title": "ref-a"}],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(batch).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(batch).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=1)
@@ -569,8 +582,8 @@ class TestCitations:
             "results": [{"title": "citer"}],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(citing).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(citing).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=1)
@@ -585,8 +598,8 @@ class TestCitations:
         }
         citing: dict[str, MutablePlainTree] = {"meta": {"count": 0}, "results": []}
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(citing).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(citing).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             openalex.citations("doi", "10.1/x", limit=None, year_from=2020)
@@ -615,9 +628,9 @@ class TestCitations:
             "results": [{"title": f"c{200 + i}"} for i in range(200)],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(page1).encode(), FetchSession()),
-            (json.dumps(page2).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(page1).encode(),
+            json.dumps(page2).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=250)
@@ -644,8 +657,8 @@ class TestCitations:
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(citing).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(citing).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             _, total, complete = openalex.citations("doi", "10.1/x", limit=None)
@@ -664,8 +677,8 @@ class TestCitations:
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(citing).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(citing).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=None)
@@ -688,9 +701,9 @@ class TestCitations:
             "results": [{"title": f"c{200 + i}"} for i in range(200)],
         }
         fetch = _RecordingFetch(
-            (json.dumps(resolve).encode(), FetchSession()),
-            (json.dumps(page1).encode(), FetchSession()),
-            (json.dumps(page2).encode(), FetchSession()),
+            json.dumps(resolve).encode(),
+            json.dumps(page1).encode(),
+            json.dumps(page2).encode(),
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=400)
@@ -700,7 +713,7 @@ class TestCitations:
 
 
 def _fetch_returning(payload: object) -> _RecordingFetch:
-    return _RecordingFetch((json.dumps(payload).encode(), FetchSession()))
+    return _RecordingFetch(json.dumps(payload).encode())
 
 
 def _search(
@@ -734,26 +747,76 @@ def _params(fetch: _RecordingFetch) -> dict[str, str | int]:
 class _RecordingFetch:
     """Replays typed responses or exceptions and records each request."""
 
-    def __init__(self, *outcomes: tuple[bytes, FetchSession] | BaseException) -> None:
+    def __init__(self, *outcomes: bytes | BaseException) -> None:
         self._outcomes = list(outcomes)
         self.requests: list[RequestParams] = []
         self.urls: list[str] = []
+        self.sessions: list[FetchSession | None] = []
 
     def __call__(
         self,
         url: str,
         *,
-        session: FetchSession | None = None,
         request: RequestParams | None = None,
-    ) -> tuple[bytes, FetchSession]:
-        del session
+        session: FetchSession | None = None,
+    ) -> bytes:
         assert request is not None
         self.urls.append(url)
         self.requests.append(request)
+        self.sessions.append(session)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+
+def _bodies(*payloads: object) -> _RecordingFetch:
+    return _RecordingFetch(*(json.dumps(p).encode() for p in payloads))
+
+
+class TestSessionForwarding:
+    """Every fetch an OpenAlex call makes reuses the caller's session."""
+
+    def test_search_every_page(self) -> None:
+        session = FetchSession()
+        fetch = _bodies(
+            {"meta": {"count": 3}, "results": [{"title": "a"}] * 2},
+            {"meta": {"count": 3}, "results": [{"title": "b"}]},
+        )
+        with patch("wesearch.paper.providers.openalex.fetch", fetch):
+            openalex.search(
+                "q",
+                limit=3,
+                year_from=None,
+                year_to=None,
+                open_access_only=False,
+                session=session,
+            )
+        assert [s is session for s in fetch.sessions] == [True, True]
+
+    def test_references_resolve_and_batch(self) -> None:
+        session = FetchSession()
+        fetch = _bodies(
+            {
+                "results": [
+                    {"id": "W1", "referenced_works": ["https://openalex.org/W2"]},
+                ],
+            },
+            {"meta": {"count": 1}, "results": [{"title": "r"}]},
+        )
+        with patch("wesearch.paper.providers.openalex.fetch", fetch):
+            openalex.references("doi", "10.1/x", limit=None, session=session)
+        assert [s is session for s in fetch.sessions] == [True, True]
+
+    def test_citations_resolve_and_walk(self) -> None:
+        session = FetchSession()
+        fetch = _bodies(
+            {"results": [{"id": "https://openalex.org/W1"}]},
+            {"meta": {"count": 1}, "results": [{"title": "c"}]},
+        )
+        with patch("wesearch.paper.providers.openalex.fetch", fetch):
+            openalex.citations("doi", "10.1/x", limit=5, session=session)
+        assert [s is session for s in fetch.sessions] == [True, True]
 
 
 class TestExactInternals:
@@ -763,7 +826,7 @@ class TestExactInternals:
         assert openalex._select("referenced_works") == f"{fields},referenced_works"
 
     def test_get_builds_exact_request(self) -> None:
-        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with (
             patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
             patch("wesearch.paper.providers.openalex.fetch", fetch),
@@ -785,7 +848,7 @@ class TestExactInternals:
         assert fetch.requests[0].policy.transport == "curl"
 
     def test_get_defaults_are_exact(self) -> None:
-        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with (
             patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
             patch("wesearch.paper.providers.openalex.fetch", fetch),
@@ -843,7 +906,7 @@ class TestExactInternals:
         with (
             patch(
                 "wesearch.paper.providers.openalex.fetch",
-                _RecordingFetch((b"[]", FetchSession())),
+                _RecordingFetch(b"[]"),
             ),
             pytest.raises(
                 BackendError,
@@ -942,7 +1005,7 @@ class TestExactInternals:
             "/works",
             {"select": openalex._select(), "filter": "x", "page": 1, "per-page": 200},
         )
-        assert get.call_args.kwargs == {"transport": "curl"}
+        assert get.call_args.kwargs == {"transport": "curl", "session": None}
 
     def test_paginate_works_limit_zero_does_not_fetch(self) -> None:
         with patch.object(openalex, "_get") as get:
@@ -965,6 +1028,7 @@ class TestExactInternals:
             limit=200,
             per_page_max=200,
             transport="auto",
+            session=None,
         )
 
     def test_resolve_work_default_transport_and_exact_error(self) -> None:
@@ -980,6 +1044,7 @@ class TestExactInternals:
             "/works",
             {"filter": "doi:10.1/x", "select": "id,id"},
             transport="auto",
+            session=None,
         )
 
     def test_search_without_filters_omits_empty_filter_prefix(self) -> None:
@@ -1035,6 +1100,7 @@ class TestExactInternals:
             },
             limit=3,
             transport="curl",
+            session=None,
         )
 
     def test_citations_forwards_seed_and_transport(self) -> None:
@@ -1063,11 +1129,13 @@ class TestExactInternals:
             "10.1/x",
             extra_select="id",
             transport="curl",
+            session=None,
         )
         paginate_mock.assert_called_once_with(
             {"filter": "cites:W1,from_publication_date:2020-01-01"},
             limit=2,
             transport="curl",
+            session=None,
         )
 
     def test_references_forwards_seed_batch_and_transport(self) -> None:
@@ -1092,8 +1160,9 @@ class TestExactInternals:
             "10.1/x",
             extra_select="referenced_works",
             transport="curl",
+            session=None,
         )
-        batch.assert_called_once_with(["W1"], transport="curl")
+        batch.assert_called_once_with(["W1"], transport="curl", session=None)
 
     def test_work_id_tail_handles_multiple_slashes(self) -> None:
         assert openalex._work_id_tail("https://openalex.org/works/W123") == "W123"
@@ -1105,7 +1174,7 @@ class TestExactInternals:
             return_value={"meta": {"count": 0}, "results": []},
         ) as get:
             openalex._paginate_works({}, limit=None)
-        assert get.call_args.kwargs == {"transport": "auto"}
+        assert get.call_args.kwargs == {"transport": "auto", "session": None}
 
     def test_public_default_transports_are_forwarded(self) -> None:
         page = MagicMock(entries=[], complete=True)
@@ -1121,7 +1190,11 @@ class TestExactInternals:
                 year_to=None,
                 open_access_only=False,
             )
-        assert paginate_mock.call_args.kwargs == {"limit": None, "transport": "auto"}
+        assert paginate_mock.call_args.kwargs == {
+            "limit": None,
+            "transport": "auto",
+            "session": None,
+        }
         with (
             patch.object(
                 openalex,
@@ -1140,6 +1213,7 @@ class TestExactInternals:
             "10.1/x",
             extra_select="id",
             transport="auto",
+            session=None,
         )
         assert paginate_mock.call_args.kwargs["transport"] == "auto"
         with (
@@ -1156,8 +1230,9 @@ class TestExactInternals:
             "10.1/x",
             extra_select="referenced_works",
             transport="auto",
+            session=None,
         )
-        batch.assert_called_once_with([], transport="auto")
+        batch.assert_called_once_with([], transport="auto", session=None)
 
     def test_references_exact_limit_is_complete(self) -> None:
         with (

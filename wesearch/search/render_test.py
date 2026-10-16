@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from wesearch.search.custom_types import (
+from wesearch.search.render import detail_fields, format_result, lean_result
+from wesearch.search.types import (
     CodeResult,
     FileResult,
     ImageResult,
@@ -17,7 +18,6 @@ from wesearch.search.custom_types import (
     TorrentResult,
     VideoResult,
 )
-from wesearch.search.render import detail_fields, format_result, lean_result
 
 
 def test_format_paper_result() -> None:
@@ -86,6 +86,12 @@ def test_format_torrent_result() -> None:
 def test_format_plain_search_result_has_no_detail() -> None:
     out = format_result(SearchResult(url="https://w", title="W", snippet="s"))
     assert out == "[W](https://w)\ns"
+
+
+def test_format_result_without_snippet_or_detail_is_the_bare_link() -> None:
+    assert format_result(SearchResult(url="https://w", title="W", snippet="")) == (
+        "[W](https://w)"
+    )
 
 
 def test_video_detail_precedes_media_dispatch() -> None:

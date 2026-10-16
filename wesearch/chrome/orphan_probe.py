@@ -77,6 +77,12 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _Flags(Protocol):
+    proofed: bool
+    sleep: bool
+    hang_seconds: float
+
+
 def _spawn_child(*, proofed: bool, hang_seconds: float) -> int:
     """Start the hanging child and return its PID."""
     if not proofed:
@@ -91,12 +97,6 @@ def _spawn_child(*, proofed: bool, hang_seconds: float) -> int:
         [sys.executable, __file__, "--sleep", "--hang-seconds", str(hang_seconds)],
         preexec_fn=die_with_parent,  # noqa: PLW1509 -- bare syscalls only; takes no lock a forked thread could hold.
     ).pid
-
-
-class _Flags(Protocol):
-    proofed: bool
-    sleep: bool
-    hang_seconds: float
 
 
 if __name__ == "__main__":

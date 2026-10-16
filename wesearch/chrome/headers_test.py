@@ -15,6 +15,7 @@ from wesearch.chrome.headers import (
     chrome_brands,
     chrome_client_hints,
     chrome_headers_for_google,
+    chrome_headers_for_host,
     chrome_identity_headers,
     chrome_navigation_headers,
     chrome_platform,
@@ -26,10 +27,10 @@ from wesearch.chrome.headers import (
 
 
 class TestChromeClientHints:
-    def test_default_platform_is_macos(self) -> None:
+    def test_default_platform_is_linux(self) -> None:
         assert chrome_client_hints(major=146) == chrome_client_hints(
             major=146,
-            platform="macOS",
+            platform="Linux",
         )
 
     def test_desktop_extended_hints(self) -> None:
@@ -81,15 +82,9 @@ class TestChromeClientHints:
 
 
 class TestGoogleChromeHeaders:
-    def test_default_platform_is_macos(self) -> None:
-        assert chrome_headers_for_google(major=146) == chrome_headers_for_google(
-            major=146,
-            platform="macOS",
-        )
-
     def test_has_google_only_headers_not_client_hints(self) -> None:
         # chrome_headers_for_google is the Google-ONLY set; the extended client
-        # hints are fetch's Accept-CH job, so they must NOT appear here.
+        # hints are a separate set, so they must NOT appear here.
         h = chrome_headers_for_google(major=146, platform="macOS")
         assert list(h) == [
             "x-browser-channel",
@@ -135,6 +130,15 @@ class TestGoogleChromeHeaders:
         droid = chrome_headers_for_google(major=131, platform="Android")
         desk = chrome_headers_for_google(major=131, platform="Linux")
         assert droid["x-browser-validation"] != desk["x-browser-validation"]
+
+    def test_a_host_gets_the_google_set_only_on_google(self) -> None:
+        assert chrome_headers_for_host("example.com", major=150, platform="Linux") == {}
+        assert chrome_headers_for_host("", major=150, platform="Linux") == {}
+        assert chrome_headers_for_host(
+            "scholar.google.com",
+            major=150,
+            platform="Linux",
+        ) == chrome_headers_for_google(major=150, platform="Linux")
 
 
 class TestImpersonateVersionPlatform:
@@ -242,12 +246,6 @@ class TestImpersonateVersionPlatform:
             "User-Agent": chrome_user_agent(150, "Linux"),
         }
 
-    def test_navigation_headers_default_platform_is_macos(self) -> None:
-        assert chrome_navigation_headers(major=146) == chrome_navigation_headers(
-            major=146,
-            platform="macOS",
-        )
-
     def test_navigation_headers_are_exact_for_get(self) -> None:
         headers = chrome_navigation_headers(
             major=146,
@@ -274,7 +272,7 @@ class TestImpersonateVersionPlatform:
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
             "Upgrade-Insecure-Requests": "1",
-            "User-Agent": chrome_user_agent(146),
+            "User-Agent": chrome_user_agent(146, "macOS"),
             "Accept": (
                 "text/html,application/xhtml+xml,application/xml;q=0.9,"
                 "image/avif,image/webp,image/apng,*/*;q=0.8,"

@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import time
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.search import SearchResult
+from wesearch.paper.types import PaperRecord
 from wesearch.scripts import measure_fusion_quality
 
 

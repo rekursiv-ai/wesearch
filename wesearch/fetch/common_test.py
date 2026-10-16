@@ -1,34 +1,77 @@
-"""Tests for wesearch.fetch."""
+"""Tests for wesearch.fetch.common."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import TYPE_CHECKING
+from unittest.mock import Mock, patch
 
 import gzip
+import io
 import socket
+import sys
 import zlib
 
 import brotli
 import pytest
 
+from wesearch.chrome.headers import chrome_client_hints
 from wesearch.fetch.common import (
-    _netloc,
-    apply_redirect,
+    ORIGIN_BOUND,
+    PendingRequest,
     bracket_ipv6,
+    cookie_header,
     decompress,
     decompress_error_body,
-    default_port,
     host_header,
     join_headers,
+    merge_headers,
     origin,
     pinned_host,
     public_host,
     redirect_target,
-    rewrite_origin,
 )
-from wesearch.fetch.testing import zstd_compress
 from wesearch.types.errors import FetchError
+from wesearch.types.params import ignore, no_cookies
+
+
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    import zstandard
+else:
+    from wrapt import lazy_import
+
+    zstandard = lazy_import("zstandard")  # 5ms.
+
+
+def zstd_compress(data: bytes, *, streaming: bool = False) -> bytes:
+    """Compress ``data`` as one zstd frame, via stdlib on 3.14+, else the wheel.
+
+    Args:
+      data: Bytes to compress.
+      streaming: Emit a streaming frame, which omits the content size from the
+        frame header -- the shape Cloudflare serves.
+
+    Returns:
+      frame: The compressed frame.
+
+    """
+    if zstd is not None:
+        if not streaming:
+            return zstd.compress(data)
+        compressor = zstd.ZstdCompressor()
+        return compressor.compress(data) + compressor.flush()
+    if not streaming:
+        return zstandard.ZstdCompressor().compress(data)
+    buf = io.BytesIO()
+    with zstandard.ZstdCompressor().stream_writer(buf, closefd=False) as w:
+        _ = w.write(data)
+    return buf.getvalue()
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -185,8 +228,8 @@ class TestOrigin:
 
     The raw ``scheme://netloc`` kept host case, userinfo, and an explicit
     default port, so four equivalent URLs produced four keys. This value is the
-    cookie-jar key, the Accept-CH key, and the browser leg's same-origin test:
-    a second spelling fragments the jar and strips a credential from a hop that
+    cookie-jar key and the browser leg's same-origin test:
+    a second spelling fragments the jar and strips a credential from a pending that
     never left the origin.
     """
 
@@ -212,174 +255,336 @@ class TestOrigin:
     def test_an_ipv6_host_stays_bracketed(self) -> None:
         assert origin("https://[2606:4700::1]/x") == "https://[2606:4700::1]"
 
-    def test_the_rewritten_origin_header_is_the_canonical_one(self) -> None:
-        # ``apply_redirect`` decides same-origin with ``origin()`` and then
-        # writes the header with ``rewrite_origin()``. Two spellings of one
-        # origin means the value announced to the target disagrees with the
-        # value the hop was judged against.
-        out = rewrite_origin({"Origin": "https://a.com"}, "https://b.com:443/x")
-        assert out["Origin"] == origin("https://b.com:443/x")
-
     def test_a_credential_survives_a_canonically_same_origin_hop(self) -> None:
-        headers, _m, _b = apply_redirect(
+        pending = _pending(
             "https://User:pw@EXAMPLE.com:443/1",
-            {"Authorization": "Bearer secret"},
-            "GET",
-            body=None,
-            status=307,
-            redirect_url="https://example.com/2",
+            {"Authorization": "Bearer x"},
         )
-        assert headers.get("Authorization") == "Bearer secret"
+        assert _follow(pending, 307, {"location": "https://example.com/2"})
+        assert pending.headers == {"Authorization": "Bearer x"}
 
 
-class TestRewriteOrigin:
+def _pending(
+    url: str,
+    headers: dict[str, str],
+    *,
+    method: str = "GET",
+    body: bytes = b"",
+    remaining: int = 1,
+) -> PendingRequest:
+    return PendingRequest(
+        url=url,
+        method=method,
+        headers=headers,
+        body=body,
+        remaining=remaining,
+    )
+
+
+def _follow(
+    pending: PendingRequest,
+    status: int,
+    headers: dict[str, str],
+    *,
+    cookies_for_host: Callable[[str], Mapping[str, str]] = no_cookies,
+) -> bool:
+    return pending.follow(
+        status,
+        headers,
+        on_response=ignore,
+        on_redirect=ignore,
+        cookies_for_host=cookies_for_host,
+    )
+
+
+class TestPendingRequestOrigin:
+    """``Origin`` names the hop's new target, in its canonical spelling."""
+
     def test_cross_origin_rewrite(self) -> None:
-        out = rewrite_origin({"Origin": "https://a.com"}, "https://b.com/land")
-        assert out["Origin"] == "https://b.com"
+        pending = _pending("https://a.com/1", {"Origin": "https://a.com"})
+        assert _follow(pending, 307, {"location": "https://b.com:443/land"})
+        assert pending.headers["Origin"] == origin("https://b.com:443/land")
+        assert pending.headers["Origin"] == "https://b.com"
 
-    def test_no_origin_header_unchanged(self) -> None:
-        h = {"Accept": "*/*"}
-        assert rewrite_origin(h, "https://b.com/x") is h
+    def test_no_origin_header_none_added(self) -> None:
+        pending = _pending("https://a.com/1", {"Accept": "*/*"})
+        assert _follow(pending, 307, {"location": "https://b.com/x"})
+        assert pending.headers == {"Accept": "*/*"}
 
     def test_ipv6_target_is_bracketed(self) -> None:
-        # REV2061-003: a v6 redirect target must yield a BRACKETED Origin;
+        # A v6 redirect target must yield a BRACKETED Origin;
         # "https://2606:...::1" is an invalid Origin (colons unbracketed).
-        out = rewrite_origin({"Origin": "https://a.com"}, "https://[2606:4700::1]/x")
-        assert out["Origin"] == "https://[2606:4700::1]"
+        pending = _pending("https://a.com/1", {"Origin": "https://a.com"})
+        assert _follow(pending, 307, {"location": "https://[2606:4700::1]/x"})
+        assert pending.headers["Origin"] == "https://[2606:4700::1]"
 
     def test_case_variant_origin_is_rewritten_not_leaked(self) -> None:
-        # REVE559-003: HTTP field names are case-insensitive. A caller-supplied
-        # "origin" (lowercase) must still be rewritten, not leaked verbatim.
-        out = rewrite_origin({"origin": "https://a.com"}, "https://b.com/x")
-        assert not any(
-            v == "https://a.com" for k, v in out.items() if k.lower() == "origin"
-        )
-        assert any(
-            v == "https://b.com" for k, v in out.items() if k.lower() == "origin"
-        )
+        # HTTP field names are case-insensitive. A caller-supplied "origin"
+        # (lowercase) must still be rewritten, not leaked verbatim.
+        pending = _pending("https://a.com/1", {"origin": "https://a.com"})
+        assert _follow(pending, 307, {"location": "https://b.com/x"})
+        assert pending.headers == {"Origin": "https://b.com"}
 
 
-class TestApplyRedirect:
+class TestPendingRequestFollow:
+    """``PendingRequest.follow`` is the one redirect step curl and stdlib both take."""
+
+    def test_reports_the_response_and_the_redirect_then_advances(self) -> None:
+        pending = _pending(
+            "https://a.example/submit",
+            {"Origin": "https://a.example", "Content-Type": "x"},
+            method="POST",
+            body=b"body",
+        )
+        responses: list[tuple[int, dict[str, str], str]] = []
+        redirects: list[str] = []
+
+        def record(status: int, headers: dict[str, str], url: str) -> None:
+            responses.append((status, headers, url))
+
+        assert pending.follow(
+            303,
+            {"location": "https://b.example/result"},
+            on_response=record,
+            on_redirect=redirects.append,
+            cookies_for_host=no_cookies,
+        )
+        assert responses == [
+            (303, {"location": "https://b.example/result"}, "https://a.example/submit"),
+        ]
+        assert redirects == ["https://b.example/result"]
+        assert (pending.url, pending.method, pending.body, pending.remaining) == (
+            "https://b.example/result",
+            "GET",
+            b"",
+            0,
+        )
+        assert pending.headers == {"Origin": "https://b.example"}
+
+    def test_does_not_follow_at_zero_but_still_reports(self) -> None:
+        pending = _pending("https://a.example/", {}, remaining=0)
+        seen: list[int] = []
+        assert not pending.follow(
+            302,
+            {"location": "https://b.example/"},
+            on_response=lambda status, _h, _u: seen.append(status),
+            on_redirect=lambda _u: pytest.fail("followed past the budget"),
+            cookies_for_host=no_cookies,
+        )
+        assert seen == [302]
+        assert (pending.url, pending.remaining) == ("https://a.example/", 0)
+
+    @pytest.mark.parametrize("status", [200, 304, 404])
+    def test_a_non_redirect_status_is_terminal(self, status: int) -> None:
+        pending = _pending("https://a.example/", {})
+        assert not _follow(pending, status, {"location": "https://b.example/"})
+        assert pending.url == "https://a.example/"
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_every_redirect_status_is_followed(self, status: int) -> None:
+        pending = _pending("https://a.example/", {})
+        assert _follow(pending, status, {"location": "https://a.example/next"})
+        assert pending.url == "https://a.example/next"
+
+    def test_a_raising_redirect_callback_leaves_the_hop_unchanged(self) -> None:
+        pending = _pending("https://a.example/", {"Cookie": "a=1"})
+
+        def refuse(url: str) -> None:
+            raise ValueError(url)
+
+        with pytest.raises(ValueError, match=r"b\.example"):
+            pending.follow(
+                302,
+                {"location": "https://b.example/"},
+                on_response=ignore,
+                on_redirect=refuse,
+                cookies_for_host=no_cookies,
+            )
+        assert (pending.url, pending.headers) == (
+            "https://a.example/",
+            {"Cookie": "a=1"},
+        )
+
+    def test_a_redirect_without_location_raises_with_status(self) -> None:
+        pending = _pending("https://a.example/base/start", {}, method="POST", body=b"b")
+        with pytest.raises(FetchError, match="302"):
+            _follow(pending, 302, {})
+
+    def test_resolves_a_relative_location_and_307_keeps_the_post(self) -> None:
+        pending = _pending(
+            "https://a.example/base/start",
+            {"Content-Type": "x"},
+            method="POST",
+            body=b"body",
+        )
+        assert _follow(pending, 307, {"location": "next"})
+        assert (pending.url, pending.method, pending.body) == (
+            "https://a.example/base/next",
+            "POST",
+            b"body",
+        )
+        assert pending.headers == {"Content-Type": "x"}
+
     def test_303_drops_case_variant_content_type(self) -> None:
-        # REVE559-002: a 303 POST->GET must drop Content-Type regardless of case.
-        headers, method, body = apply_redirect(
+        pending = _pending(
             "https://x/submit",
             {"content-type": "application/json", "Accept": "*/*"},
-            "POST",
+            method="POST",
             body=b"{}",
-            status=303,
-            redirect_url="https://x/result",
         )
-        assert method == "GET"
-        assert body is None
-        assert not any(k.lower() == "content-type" for k in headers)
+        assert _follow(pending, 303, {"location": "https://x/result"})
+        assert (pending.method, pending.body) == ("GET", b"")
+        assert pending.headers == {"Accept": "*/*"}
 
-    def test_301_downgrades_post_to_get(self) -> None:
-        _headers, method, body = apply_redirect(
-            "https://x/submit",
-            {},
-            "POST",
-            body=b"{}",
-            status=301,
-            redirect_url="https://x/land",
-        )
-        assert method == "GET"
-        assert body is None
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_301_to_303_downgrade_a_post_to_get(self, status: int) -> None:
+        pending = _pending("https://x/submit", {}, method="POST", body=b"{}")
+        assert _follow(pending, status, {"location": "https://x/land"})
+        assert (pending.method, pending.body) == ("GET", b"")
 
-    def test_302_downgrades_post_to_get(self) -> None:
-        _headers, method, body = apply_redirect(
-            "https://x/submit",
-            {},
-            "POST",
-            body=b"{}",
-            status=302,
-            redirect_url="https://x/land",
-        )
-        assert method == "GET"
-        assert body is None
+    @pytest.mark.parametrize("status", [307, 308])
+    def test_307_and_308_preserve_method_and_body(self, status: int) -> None:
+        pending = _pending("https://x/submit", {}, method="POST", body=b"{}")
+        assert _follow(pending, status, {"location": "https://x/land"})
+        assert (pending.method, pending.body) == ("POST", b"{}")
 
-    def test_307_preserves_method_and_body(self) -> None:
-        _headers, method, body = apply_redirect(
-            "https://x/submit",
-            {},
-            "POST",
-            body=b"{}",
-            status=307,
-            redirect_url="https://x/land",
-        )
-        assert method == "POST"
-        assert body == b"{}"
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_a_get_keeps_its_method_and_origin(self, status: int) -> None:
+        pending = _pending("https://a.com/1", {"Origin": "https://a.com"}, body=b"kept")
+        assert _follow(pending, status, {"location": "https://a.com/2"})
+        assert (pending.method, pending.body) == ("GET", b"kept")
+        assert pending.headers == {"Origin": "https://a.com"}
 
     def test_cross_origin_drops_cookie_and_hints(self) -> None:
-        headers, _m, _b = apply_redirect(
+        pending = _pending(
             "https://a.com/1",
             {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"', "Accept": "*/*"},
-            "GET",
-            body=None,
-            status=302,
-            redirect_url="https://b.com/2",
         )
-        assert "Cookie" not in headers
-        assert "sec-ch-ua-arch" not in headers
-        assert headers.get("Accept") == "*/*"  # non-origin-bound survives.
+        assert _follow(pending, 302, {"location": "https://b.com/2"})
+        assert pending.headers == {"Accept": "*/*"}
 
     def test_same_origin_keeps_cookie_and_hints(self) -> None:
-        headers, _m, _b = apply_redirect(
-            "https://a.com/1",
-            {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"'},
-            "GET",
-            body=None,
-            status=302,
-            redirect_url="https://a.com/2",
-        )
-        assert headers.get("Cookie") == "SID=x"
-        assert headers.get("sec-ch-ua-arch") == '"x86"'
+        sent = {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"'}
+        pending = _pending("https://a.com/1", dict(sent))
+        assert _follow(pending, 302, {"location": "https://a.com/2"})
+        assert pending.headers == sent
 
     @pytest.mark.parametrize("name", ["Authorization", "authorization"])
     def test_cross_origin_drops_authorization(self, name: str) -> None:
         """A credential is origin-bound exactly like a cookie.
 
         Forwarding it hands the source origin's secret to whatever host answered
-        the hop. Both casings: HTTP field names are case-insensitive.
+        the pending. Both casings: HTTP field names are case-insensitive.
         """
-        headers, _m, _b = apply_redirect(
-            "https://a.com/1",
-            {name: "Bearer secret", "Accept": "*/*"},
-            "GET",
-            body=None,
-            status=307,
-            redirect_url="https://evil.example/2",
-        )
-
-        assert not any(k.lower() == "authorization" for k in headers)
-        assert headers.get("Accept") == "*/*"
-
-    def test_get_methods_are_preserved_for_every_redirect_status(self) -> None:
-        for status in (301, 302, 303):
-            headers, method, body = apply_redirect(
-                "https://a.com/1",
-                {"Origin": "https://a.com"},
-                "GET",
-                body=b"ignored",
-                status=status,
-                redirect_url="https://a.com/2",
-            )
-            assert headers["Origin"] == "https://a.com"
-            assert method == "GET"
-            assert body == b"ignored"
+        pending = _pending("https://a.com/1", {name: "Bearer secret", "Accept": "*/*"})
+        assert _follow(pending, 307, {"location": "https://evil.example/2"})
+        assert pending.headers == {"Accept": "*/*"}
 
     def test_same_origin_keeps_authorization(self) -> None:
         """A same-origin hop is still the origin the credential belongs to."""
-        headers, _m, _b = apply_redirect(
+        pending = _pending("https://a.com/1", {"Authorization": "Bearer secret"})
+        assert _follow(pending, 307, {"location": "https://a.com/2"})
+        assert pending.headers == {"Authorization": "Bearer secret"}
+
+    def test_same_origin_sends_the_cookies_the_hop_set(self) -> None:
+        pending = _pending(
             "https://a.com/1",
-            {"Authorization": "Bearer secret"},
-            "GET",
-            body=None,
-            status=307,
-            redirect_url="https://a.com/2",
+            {"Accept": "*/*", "cookie": "old=1; keep=2"},
+        )
+        assert _follow(
+            pending,
+            302,
+            {"location": "/2", "set-cookie": "old=new; Path=/\nfresh=3"},
+        )
+        assert pending.headers == {
+            "Accept": "*/*",
+            "cookie": "old=new; keep=2; fresh=3",
+        }
+
+    def test_same_origin_set_cookie_starts_a_cookie_header(self) -> None:
+        pending = _pending("https://a.com/1", {"Accept": "*/*"})
+        assert _follow(pending, 302, {"location": "/2", "set-cookie": "s=1"})
+        assert pending.headers == {"Accept": "*/*", "Cookie": "s=1"}
+
+    def test_cross_origin_sends_no_cookie_the_hop_set(self) -> None:
+        pending = _pending("https://a.com/1", {"Accept": "*/*"})
+        assert _follow(
+            pending,
+            302,
+            {"location": "https://b.com/", "set-cookie": "s=1"},
+        )
+        assert pending.headers == {"Accept": "*/*"}
+
+    def test_cross_origin_sends_the_targets_cookies_alone(self) -> None:
+        asked: list[str] = []
+
+        def stored(host: str) -> Mapping[str, str]:
+            asked.append(host)
+            return {"B": "1"}
+
+        pending = _pending("https://a.com/1", {"Accept": "*/*", "cookie": "A=1"})
+        assert _follow(
+            pending,
+            302,
+            {"location": "https://b.com:8443/2"},
+            cookies_for_host=stored,
+        )
+        assert asked == ["b.com"]
+        assert pending.headers == {"Accept": "*/*", "Cookie": "B=1"}
+
+    def test_same_origin_asks_for_no_stored_cookies(self) -> None:
+        def refuse(host: str) -> Mapping[str, str]:
+            raise AssertionError(host)
+
+        pending = _pending("https://a.com/1", {"Cookie": "A=1"})
+        assert _follow(pending, 302, {"location": "/2"}, cookies_for_host=refuse)
+        assert pending.headers == {"Cookie": "A=1"}
+
+
+class TestOriginBound:
+    def test_cookie_authorization_and_every_extended_hint(self) -> None:
+        hints = {name.lower() for name in chrome_client_hints(major=1)}
+        assert hints
+        assert {"cookie", "authorization"} | hints == ORIGIN_BOUND
+
+
+class TestCookieHeader:
+    def test_new_cookies_win_and_keep_the_sent_order(self) -> None:
+        assert (
+            cookie_header({"COOKIE": "a=1; b=2"}, {"b": "3", "c": "4"})
+            == "a=1; b=3; c=4"
         )
 
-        assert headers.get("Authorization") == "Bearer secret"
+    def test_no_cookie_header_and_no_cookies_is_empty(self) -> None:
+        assert not cookie_header({"Accept": "*/*"}, {})
+
+    def test_malformed_pairs_are_dropped(self) -> None:
+        assert cookie_header({"Cookie": "a=1; junk; =v; b="}, {}) == "a=1; b="
+
+
+class TestMergeHeaders:
+    def test_keeps_the_default_slot_and_appends_new_names(self) -> None:
+        merged = merge_headers(
+            {"A": "1", "User-Agent": "chrome", "B": "2"},
+            {"user-agent": "mine", "C": "3", "B": None},
+        )
+        assert list(merged.items()) == [("A", "1"), ("User-Agent", "mine"), ("C", "3")]
+
+    def test_a_none_for_an_absent_name_is_dropped(self) -> None:
+        assert merge_headers({"A": "1"}, {"X": None}) == {"A": "1"}
+
+    def test_case_variant_overrides_collapse_to_the_last(self) -> None:
+        # Two names for one header send it twice on the wire: a bot tell.
+        assert merge_headers({}, {"cookie": "a=1", "Cookie": "a=1; b=2"}) == {
+            "Cookie": "a=1; b=2",
+        }
+
+    def test_a_case_variant_override_of_a_default_keeps_its_slot(self) -> None:
+        merged = merge_headers(
+            {"A": "1", "Accept": "x", "B": "2"},
+            {"accept": "y", "ACCEPT": "z"},
+        )
+        assert list(merged.items()) == [("A", "1"), ("Accept", "z"), ("B", "2")]
 
 
 class TestDecompress:
@@ -439,16 +644,16 @@ class TestDecompress:
 
 
 class TestSharedHelpers:
-    def test_netloc_handles_port_and_missing_port(self) -> None:
-        assert _netloc("example.com", 8443) == "example.com:8443"
-        assert _netloc("example.com", None) == "example.com"
-
-    def test_default_port_and_host_header_boundaries(self) -> None:
-        assert default_port("https") == 443
-        assert default_port("http") == 80
+    def test_host_header_omits_only_the_scheme_default_port(self) -> None:
         assert host_header("example.com", 443, "https") == "example.com"
+        assert host_header("example.com", 80, "http") == "example.com"
         assert host_header("example.com", 444, "https") == "example.com:444"
+        assert host_header("example.com", 443, "http") == "example.com:443"
         assert host_header("example.com", None, "https") == "example.com"
+
+    def test_an_unknown_scheme_has_no_default_port(self) -> None:
+        assert host_header("example.com", 80, "ftp") == "example.com:80"
+        assert origin("ftp://example.com:80/x") == "ftp://example.com:80"
 
     def test_join_headers_folds_regular_and_cookie_duplicates_differently(self) -> None:
         assert join_headers(
@@ -492,20 +697,91 @@ class TestSharedHelpers:
             assert decompress_error_body(b"raw", {}) == b"ok"
         decode.assert_called_once_with(b"raw", "")
 
-    def test_pinned_host_internal_skips_resolution(self) -> None:
+    def test_pinned_host_allowing_private_hosts_skips_resolution(self) -> None:
         with patch("socket.getaddrinfo", side_effect=AssertionError):
-            assert pinned_host("https://example.com", "internal") is None
+            assert pinned_host("https://example.com", allow_private_hosts=True) is None
 
-    def test_pinned_host_untrusted_returns_public_pin(self) -> None:
+    def test_pinned_host_public_only_returns_public_pin(self) -> None:
         with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")) as resolve:
-            pin = pinned_host("https://example.com", "untrusted")
+            pin = pinned_host("https://example.com", allow_private_hosts=False)
         assert pin is not None
         assert pin.ip == "8.8.8.8"
         resolve.assert_called_once_with("example.com", None)
 
-    def test_pinned_host_rejects_hostless_untrusted_url(self) -> None:
+    @pytest.mark.parametrize("allow_private_hosts", [False, True])
+    @pytest.mark.parametrize("url", ["ftp://example.com/", "file:///etc/passwd"])
+    def test_pinned_host_refuses_a_non_http_scheme(
+        self,
+        url: str,
+        allow_private_hosts: bool,
+    ) -> None:
+        with (
+            patch("socket.getaddrinfo", side_effect=AssertionError),
+            pytest.raises(ValueError, match="Unsupported URL scheme"),
+        ):
+            pinned_host(url, allow_private_hosts=allow_private_hosts)
+
+    def test_pinned_host_rejects_hostless_public_only_url(self) -> None:
         with pytest.raises(ValueError, match="no host"):
-            pinned_host("/relative", "untrusted")
+            pinned_host("https:///relative", allow_private_hosts=False)
+
+
+class TestZstdCompress:
+    """The test-only zstd encoder other fetch tests feed the decoder with."""
+
+    def test_round_trips_both_frame_modes(self) -> None:
+        data = b"payload" * 100
+        regular = zstd_compress(data)
+        streaming = zstd_compress(data, streaming=True)
+        assert decompress(regular, "zstd") == data
+        assert decompress(streaming, "zstd") == data
+        assert regular != streaming
+
+    def test_uses_the_wheel_without_stdlib_zstd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys.modules[__name__], "zstd", None)
+        data = b"wheel payload"
+        assert decompress(zstd_compress(data), "zstd") == data
+        assert decompress(zstd_compress(data, streaming=True), "zstd") == data
+
+    def test_selects_the_stdlib_frame_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compressor = Mock()
+        compressor.compress.return_value = b"regular"
+        compressor.flush.return_value = b"flush"
+        stdlib = Mock()
+        stdlib.compress.return_value = b"one-shot"
+        stdlib.ZstdCompressor.return_value = compressor
+        monkeypatch.setattr(sys.modules[__name__], "zstd", stdlib)
+        assert zstd_compress(b"data") == b"one-shot"
+        assert zstd_compress(b"data", streaming=True) == b"regularflush"
+        stdlib.compress.assert_called_once_with(b"data")
+        compressor.compress.assert_called_once_with(b"data")
+        compressor.flush.assert_called_once_with()
+
+    def test_selects_the_wheel_frame_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compressor = Mock()
+        compressor.compress.return_value = b"regular"
+        writer = Mock()
+        writer.__enter__ = Mock(return_value=writer)
+        writer.__exit__ = Mock(return_value=None)
+        compressor.stream_writer.return_value = writer
+        wheel = Mock()
+        wheel.ZstdCompressor.return_value = compressor
+        monkeypatch.setattr(sys.modules[__name__], "zstd", None)
+        monkeypatch.setattr(sys.modules[__name__], "zstandard", wheel)
+        assert zstd_compress(b"data") == b"regular"
+        zstd_compress(b"data", streaming=True)
+        compressor.stream_writer.assert_called_once()
+        assert compressor.stream_writer.call_args.kwargs == {"closefd": False}
+        writer.write.assert_called_once_with(b"data")
 
 
 class TestIPv6Bracketing:

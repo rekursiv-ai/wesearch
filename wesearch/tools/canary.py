@@ -25,9 +25,8 @@ import argparse
 import time
 
 from wesearch.fetch.transport import zendriver
-from wesearch.lib.userdirs import data_dir
-from wesearch.search.custom_types import SearchBackends
 from wesearch.search.search import search
+from wesearch.search.types import SearchBackends
 
 
 def main() -> int:
@@ -127,12 +126,6 @@ def _probe_shared_browser(processes: int, url: str) -> tuple[bool, str, float]:
 def _browser_fetch(url: str) -> bool:
     """Fetch ``url`` through the shared Chrome from a worker process."""
     try:
-        result = zendriver.fetch_zendriver(
-            url,
-            profile_dir=data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver",
-        )
+        return bool(zendriver.fetch_zendriver(url))
     except Exception:  # noqa: BLE001 -- a failed fetch is a probe result.
         return False
-    finally:
-        zendriver.shutdown_browsers()
-    return bool(result.body)

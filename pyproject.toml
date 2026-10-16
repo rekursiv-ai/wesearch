@@ -253,7 +253,7 @@ exclude_lines = [
     # callers' results, not by line coverage.
     "^def \\w+_numba\\(",
 ]
-# fail_under = 90
+fail_under = 100
 show_missing = true
 skip_covered = true
 

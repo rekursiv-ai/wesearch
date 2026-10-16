@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wesearch.paper.custom_types import AuthorRecord, PaperRecord
+from wesearch.paper.types import AuthorRecord, PaperRecord
 
 
 def test_paper_merge_fills_empty_primary_values() -> None:

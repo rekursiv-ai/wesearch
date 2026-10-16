@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import PolicyParams, RequestParams, RetryParams
+from wesearch.fetch import FetchSession, PolicyParams, RequestParams, RetryParams
 from wesearch.fetch.providers import reader_proxy
 from wesearch.types.errors import FetchError
 
@@ -64,10 +64,16 @@ class TestFetch:
         monkeypatch.delenv("JINA_AI_API_KEY", raising=False)
         seen: dict[str, object] = {}
 
-        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
+        def fake_fetch(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del session
             seen["url"] = url
             seen["headers"] = request.content.headers
-            return b"# rendered", None
+            return b"# rendered"
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
             body = reader_proxy.fetch_reader_proxy(
@@ -76,16 +82,21 @@ class TestFetch:
             )
         assert body == b"# rendered"
         assert seen["url"] == "https://r.jina.ai/https://x.com/user"
-        assert seen["headers"] is None
+        assert seen["headers"] == {}
 
     def test_injects_bearer_when_key_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("JINA_AI_API_KEY", "jina_secret")
         seen: dict[str, object] = {}
 
-        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
-            del url
+        def fake_fetch(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, session
             seen["headers"] = request.content.headers
-            return b"ok", None
+            return b"ok"
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
             reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
@@ -94,9 +105,14 @@ class TestFetch:
     def test_soft_fail_sentinel_raises(self) -> None:
         soft = b"A" * 200 + b"Warning: Target URL returned error 404 while fetching"
 
-        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
-            del url, request
-            return soft, None
+        def fake_fetch(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
+            return soft
 
         with (
             patch.object(reader_proxy, "fetch", fake_fetch),
@@ -116,9 +132,15 @@ class TestFetch:
         policy = PolicyParams()
         seen: list[object] = []
 
-        def fake_fetch(url: str, *, request: RequestParams) -> tuple[bytes, None]:
+        def fake_fetch(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del session
             seen.extend((url, request))
-            return b"ok", None
+            return b"ok"
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
             assert (

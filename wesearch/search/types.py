@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    bs4 = lazy_import("bs4")
+    bs4 = lazy_import("bs4")  # 39ms.
 
 
 # The order an unnamed backend is tried in: the free engines first, Brave last

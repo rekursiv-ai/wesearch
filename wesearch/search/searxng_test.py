@@ -3,25 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal, cast, get_args
 from unittest.mock import patch
 
+import importlib
 import json
 
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
-from wesearch.search.custom_types import (
-    CodeResult,
-    FileResult,
-    ImageResult,
-    MapResult,
-    MediaResult,
-    PackageResult,
-    PaperResult,
-    SearchError,
-    SearchResult,
-    TorrentResult,
-    VideoResult,
+from wesearch.search import (
+    searxng as searxng_module,
+    types,
 )
 from wesearch.search.searxng import (
     _coordinate,
@@ -36,6 +29,42 @@ from wesearch.search.searxng import (
     category_parser,
     searxng,
 )
+from wesearch.search.types import (
+    CodeResult,
+    FileResult,
+    ImageResult,
+    MapResult,
+    MediaResult,
+    PackageResult,
+    PaperResult,
+    SearchError,
+    SearchResult,
+    TorrentResult,
+    VideoResult,
+)
+
+
+type _OneTab = Literal["general"]
+
+
+def test_import_refuses_a_tab_without_a_categories_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The guard runs at import, so re-import against a vocabulary that has a tab
+    # ``CATEGORIES`` does not list, then restore the real module.
+    monkeypatch.setattr(types, "SearxngCategory", _OneTab)
+    try:
+        with pytest.raises(
+            ValueError,
+            match=r"^every SearxngCategory needs a CATEGORIES record$",
+        ):
+            importlib.reload(searxng_module)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(searxng_module)
+    assert set(searxng_module.CATEGORIES) == set(
+        get_args(cast(object, types.SearxngCategory.__value__)),
+    )
 
 
 def test_category_gloss_lists_every_category() -> None:
@@ -100,6 +129,22 @@ def test_media_parser_defaults_wrong_typed_fields() -> None:
         },
     )
     assert result == MediaResult(url="u", title="", snippet="", length="")
+
+
+def test_a_non_iso_published_date_reads_as_absent() -> None:
+    assert _searxng_media({"publishedDate": "yesterday"}).published is None
+    assert _searxng_paper({"publishedDate": "2 days ago"}).published is None
+
+
+def test_map_address_keeps_only_string_entries() -> None:
+    parse = category_parser("map")
+    result = parse({"address": {"road": "Main", "house": 7, "city": "Paris"}})
+    assert isinstance(result, MapResult)
+    assert dict(result.address) == {"road": "Main", "city": "Paris"}
+    for address in (["Main"], "Main", None):
+        other = parse({"address": address})
+        assert isinstance(other, MapResult)
+        assert dict(other.address) == {}
 
 
 def test_paper_parser_recovers_bounded_citations() -> None:
@@ -271,7 +316,7 @@ def test_searxng_public_request_decodes_and_caps(
     payload = b'{"results": [{"title": " t ", "content": " c "}, {"title": "u"}]}'
     with patch(
         "wesearch.search.searxng.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ) as fetch_mock:
         results = searxng("q", 1, categories="general")
     assert results == [SearchResult(url="", title="t", snippet="c")]
@@ -286,7 +331,7 @@ def test_searxng_public_request_forwards_parameters(
     monkeypatch.setenv("SEARXNG_URL", "https://search.example")
     with patch(
         "wesearch.search.searxng.fetch",
-        return_value=(b'{"results": []}', FetchSession()),
+        return_value=b'{"results": []}',
     ) as fetch_mock:
         searxng(
             "q",
@@ -304,19 +349,19 @@ def test_searxng_public_request_forwards_parameters(
     assert request.retry.timeout_sec == 4
     assert request.retry.connect_timeout_sec == 2
     assert request.policy.transport == "zendriver"
-    assert request.policy.trust == "internal"
+    assert request.policy.allow_private_hosts is True
 
 
 def test_searxng_defaults_and_count_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SEARXNG_URL", "https://search.example")
     with patch(
         "wesearch.search.searxng.fetch",
-        return_value=(b'{"results": []}', FetchSession()),
+        return_value=b'{"results": []}',
     ) as fetch_mock:
         assert searxng("q") == []
     request = fetch_mock.call_args.kwargs["request"]
     assert isinstance(request, RequestParams)
-    assert request.content.headers is None
+    assert request.content.headers == {}
     assert request.retry.retries == 1
     assert request.retry.timeout_sec == 15.0
     assert request.retry.connect_timeout_sec == 3.0
@@ -401,13 +446,24 @@ def test_searxng_defaults_to_ten_results_and_auto_transport(
     payload = {"results": [{"title": str(index)} for index in range(11)]}
     with patch(
         "wesearch.search.searxng.fetch",
-        return_value=(json.dumps(payload).encode(), FetchSession()),
+        return_value=json.dumps(payload).encode(),
     ) as fetch_mock:
         results = searxng("q")
     assert len(results) == 10
     request = fetch_mock.call_args.kwargs["request"]
     assert isinstance(request, RequestParams)
     assert request.policy.transport == "auto"
+
+
+def test_searxng_session_reaches_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEARXNG_URL", "https://search.example")
+    session = FetchSession()
+    with patch(
+        "wesearch.search.searxng.fetch",
+        return_value=b'{"results": []}',
+    ) as fetch_mock:
+        searxng("q", session=session)
+    assert fetch_mock.call_args.kwargs["session"] is session
 
 
 def test_searxng_zero_skips_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -424,7 +480,7 @@ def test_searxng_reports_decode_and_json_errors(
     with (
         patch(
             "wesearch.search.searxng.fetch",
-            return_value=(b"\xff", FetchSession()),
+            return_value=b"\xff",
         ),
         pytest.raises(SearchError, match=r"^searxng returned undecodable bytes:"),
     ):
@@ -432,7 +488,7 @@ def test_searxng_reports_decode_and_json_errors(
     with (
         patch(
             "wesearch.search.searxng.fetch",
-            return_value=(b"not json", FetchSession()),
+            return_value=b"not json",
         ),
         pytest.raises(
             SearchError,

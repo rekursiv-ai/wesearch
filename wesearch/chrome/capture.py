@@ -1,14 +1,9 @@
 """Drive a real headless Chrome at a URL, for parity testing.
 
-A parity test needs a real Chrome to issue a real request so it can assert
-:mod:`wesearch.fetch` sends the same thing. This module launches that
-Chrome; the request itself is read off the server that received it
-(:class:`wesearch.chrome.echo.EchoOracle` records ordered header names as
-they arrive), so nothing here has to interpret Chrome's own bookkeeping.
-
-Requires a ``google-chrome`` / ``google-chrome-stable`` binary; callers gate on
-:func:`chrome_available` and skip when absent (Chrome is not a hard dependency).
-A snap-confined Chromium does not count: see :func:`_chrome_binary`.
+The request is recorded by the receiving server (e.g.
+:class:`wesearch.chrome.echo.EchoOracle`), not here. Callers gate on
+:func:`chrome_available` and skip when no usable Chrome is installed; a
+snap-confined Chromium does not count.
 """
 
 from __future__ import annotations
@@ -49,12 +44,7 @@ _libc = _load_libc()
 
 
 def chrome_available() -> bool:
-    """Whether a Chrome binary that honors ``--user-data-dir`` is on ``PATH``.
-
-    Returns:
-      result: The bool.
-
-    """
+    """Whether a Chrome binary that honors ``--user-data-dir`` is on ``PATH``."""
     return _chrome_binary() is not None
 
 
@@ -72,20 +62,14 @@ def drive_chrome(
       url: The URL to navigate to.
       timeout_sec: How long to wait for Chrome before killing it.
       reap_timeout_sec: How long to wait for the killed browser's pipes to
-        close. Bounded because a descendant that left the process group survives
-        the kill still holding them; see the call site.
-      ignore_certificate_errors: Accept an untrusted TLS certificate. Required
-        only to reach a loopback oracle serving a self-signed cert; never enable
-        against a real host.
-      disable_sandbox: Drop Chrome's process sandbox. Required only where the
-        harness runs as root (a CI container), which is the one environment
-        where Chrome refuses to start otherwise; never enable against a real
-        host, where the sandbox is the containment boundary for hostile pages.
+        close.
+      ignore_certificate_errors: Accept an untrusted TLS certificate, e.g. a
+        loopback oracle's self-signed one. Never enable against a real host.
+      disable_sandbox: Drop Chrome's process sandbox, which it requires when
+        run as root. Never enable against a real host.
 
     Returns:
-      timed_out: Whether Chrome had to be killed at ``timeout_sec``. Reported
-        rather than raised so a caller holding the server-side record can tell
-        a hang that already navigated (harmless) from one that never did.
+      timed_out: Whether Chrome had to be killed at ``timeout_sec``.
 
     Raises:
       RuntimeError: When no Chrome binary is available.
@@ -96,9 +80,8 @@ def drive_chrome(
         raise RuntimeError("No Chrome binary found on PATH.")
     timed_out = False
     with tempfile.TemporaryDirectory(prefix="chrome-capture-") as profile:
-        # `Popen` + explicit group kill, not `subprocess.run`: its timeout path
-        # kills only the direct child, and Chrome forks a zygote and a renderer
-        # per tab, so the rest reparent to init at ~70 MB each.
+        # `Popen` + group kill, not `subprocess.run`: its timeout kills only the
+        # direct child, orphaning Chrome's zygote and renderers.
         process = subprocess.Popen(  # noqa: S603 -- fixed argv, binary from PATH.
             [
                 binary,
@@ -106,16 +89,11 @@ def drive_chrome(
                 "--disable-gpu",
                 "--incognito",
                 f"--user-data-dir={profile}",
-                # Without this, Chrome asks the D-Bus Secret Service for its
-                # password-store key, and a registered-but-locked keyring --
-                # any headless server someone has logged into -- never
-                # answers. Every page load then hangs forever while
-                # about:blank still renders. Safe because this profile is
-                # incognito and discarded per call; the persistent one that
-                # can hold a seated login belongs to the zendriver backend,
-                # which launches its own Chrome.
+                # Otherwise Chrome asks D-Bus for its keyring, and a locked
+                # keyring never answers, hanging every page load. Safe: the
+                # profile is discarded per call.
                 "--password-store=basic",
-                # Host feature experiments change wire headers; pin Chrome146 defaults.
+                # Field-trial features change Accept and Accept-Language per build.
                 (
                     "--disable-features=JXLImageFormat,ReduceAcceptLanguage,"
                     "ReduceAcceptLanguageHTTP"
@@ -135,8 +113,7 @@ def drive_chrome(
             timed_out = True
             _kill_group(process)
             # Bounded: a descendant that left the group survives the kill
-            # holding the inherited pipes, and an unbounded wait for EOF hangs
-            # here forever instead of reporting the timeout.
+            # holding the pipes, so waiting for EOF could hang forever.
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.communicate(timeout=reap_timeout_sec)
     return timed_out
@@ -145,14 +122,10 @@ def drive_chrome(
 def die_with_parent() -> None:
     """Make the calling child its own group leader, killed when its parent dies.
 
-    Runs in the forked child before ``exec``, so it must never raise and must
-    call nothing that takes a lock -- the ``PLW1509`` hazard. That holds only
-    because ``_libc`` is already resolved; see :func:`_load_libc`.
+    Use as ``preexec_fn``: it never raises and takes no lock.
 
-    ``PR_SET_PDEATHSIG`` is THREAD-scoped: the kernel fires it when the forking
-    thread exits, not the process. Correct here, where the caller blocks on the
-    child, and WRONG for a pool that outlives its launching thread -- measured,
-    a real Chrome died with ``rc=-9`` when only that thread ended.
+    ``PR_SET_PDEATHSIG`` fires when the forking THREAD exits, not the process,
+    so use it only where the launching thread outlives the child.
     """
     with contextlib.suppress(OSError):
         os.setpgid(0, 0)
@@ -174,24 +147,17 @@ def _chrome_binary() -> str | None:
         "chrome",
     ):
         found = shutil.which(name)
-        # A snap-confined Chromium cannot read a ``--user-data-dir`` outside its
-        # sandbox (measured: "Failed To Create Data Directory" for a profile
-        # under ``TMPDIR``), so it silently falls back to its one persistent
-        # profile. That breaks both halves of :func:`drive_chrome`'s contract:
-        # the run is no longer incognito-and-discarded, and a second concurrent
-        # launch aborts on that profile's ``SingletonLock`` without ever
-        # requesting the page.
+        # A snap-confined Chromium ignores a ``--user-data-dir`` outside its
+        # sandbox and falls back to its persistent profile, so runs are not
+        # discarded and concurrent launches abort on its ``SingletonLock``.
         if found is None or _snap_confined(found):
             continue
         return name
     return None
 
 
-# Two shapes reach the snap. ``/snap/bin/chromium`` is a symlink to the ``snap``
-# binary itself. Ubuntu's transitional ``chromium-browser`` deb installs a shell
-# script under ``/usr/bin`` that execs the snap, so a ``/snap/`` prefix check
-# accepts it and the wrapper drops the temp profile just the same; its text
-# names the snap, which is what the byte scan looks for.
+# The byte scan catches Ubuntu's ``/usr/bin/chromium-browser`` shell wrapper,
+# which execs the snap but passes a ``/snap/`` path check.
 def _snap_confined(launcher: str) -> bool:
     """Whether ``launcher`` is the snap entry point or a wrapper that execs it."""
     resolved = Path(launcher).resolve()
@@ -204,10 +170,8 @@ def _snap_confined(launcher: str) -> bool:
     return b"snap run" in head or b"/snap/bin/" in head
 
 
-# :func:`die_with_parent` made it a group leader, so one ``killpg`` reaches the zygote
-# and renderers. A missing group is the normal race between the timeout firing and
-# Chrome finishing, not an error.
+# A missing group is the race of Chrome exiting as the timeout fires, not an error.
 def _kill_group(process: subprocess.Popen[bytes]) -> None:
-    """SIGKILL a process and every child it forked."""
+    """SIGKILL the process group led by ``process``."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)

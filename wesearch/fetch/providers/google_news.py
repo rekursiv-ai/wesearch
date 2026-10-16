@@ -1,19 +1,14 @@
-"""Google News provider: rewrite SPA URLs to their public RSS endpoints.
+"""Google News: fetch the RSS feed for front-page and search URLs, else the page.
 
-The ``news.google.com`` single-page app server-renders only a sparse "Your
-briefing" block; the bulk is hydrated by JS. The public RSS feed at the same
-hostname serves the full set of story clusters as structured XML, which a feed
-formatter renders cleanly. This provider maps the known front-page and search
-paths to their RSS equivalents; article-detail and topic URLs have no RSS
-analogue and pass through unchanged.
+The page shows little without JavaScript; the feed has every story.
 """
 
 from __future__ import annotations
 
-from typing import Final, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
-from wesearch.fetch import PolicyParams, RequestParams, fetch
+from wesearch.fetch import FetchSession, PolicyParams, RequestParams, fetch
 
 
 __all__ = [
@@ -22,35 +17,26 @@ __all__ = [
     "matches",
 ]
 
-# The payload shape a fetch produced, so the caller selects the right renderer.
 type NewsPayload = Literal["rss", "html"]
-
-# Front-page paths that route to the top-stories RSS feed. Article-detail
-# (``/articles/...``) and topic (``/topics/...``) URLs fall through unrewritten:
-# topic ids don't map cleanly between the SPA and RSS URL spaces, and article
-# pages have no RSS equivalent.
-_TOP_PATHS: Final = frozenset({"", "/home", "/topstories", "/foryou"})
 
 
 def matches(url: str) -> bool:
-    """Whether ``url`` is the ``news.google.com`` host (no subdomains).
-
-    Args:
-      url: Url.
-
-    Returns:
-      result: The bool.
-
-    """
+    """Return whether ``url`` is on ``news.google.com``."""
     return urlparse(url).hostname == "news.google.com"
 
 
-def fetch_google_news(url: str, *, policy: PolicyParams) -> tuple[bytes, NewsPayload]:
+def fetch_google_news(
+    url: str,
+    *,
+    policy: PolicyParams,
+    session: FetchSession | None = None,
+) -> tuple[bytes, NewsPayload]:
     """Fetch a Google News URL via RSS when the path has a rewrite, else HTML.
 
     Args:
       url: A ``news.google.com`` URL.
-      policy: Transport and trust forwarded to the HTTP layer.
+      policy: How to fetch.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       body: The RSS XML or the raw HTML bytes.
@@ -58,7 +44,7 @@ def fetch_google_news(url: str, *, policy: PolicyParams) -> tuple[bytes, NewsPay
 
     """
     target = _rewrite(url) or url
-    body, _session = fetch(target, request=RequestParams(policy=policy))
+    body = fetch(target, request=RequestParams(policy=policy), session=session)
     payload: NewsPayload = "rss" if urlparse(target).path.startswith("/rss") else "html"
     return body, payload
 
@@ -67,7 +53,8 @@ def _rewrite(url: str) -> str | None:
     """Return the RSS-equivalent URL, or None for paths left unrewritten."""
     parsed = urlparse(url)
     path = parsed.path.rstrip("/")
-    if path in _TOP_PATHS:
+    # Paths whose feed is the top stories; article and topic pages have no feed.
+    if path in {"", "/home", "/topstories", "/foryou"}:
         return parsed._replace(path="/rss").geturl()
     if path == "/search":
         return parsed._replace(path="/rss/search").geturl()

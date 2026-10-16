@@ -6,22 +6,32 @@ from unittest.mock import patch
 
 import pytest
 
-from wesearch.fetch import PolicyParams, RequestParams
+from wesearch.fetch import FetchSession, PolicyParams, RequestParams
 from wesearch.fetch.providers import fallback
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 
 
 def _fetch_raising(status: int) -> object:
-    def _fake(url: str, *, request: object) -> tuple[bytes, None]:
-        del url, request
+    def _fake(
+        url: str,
+        *,
+        request: object,
+        session: FetchSession | None = None,
+    ) -> bytes:
+        del url, request, session
         raise FetchError("https://s.example/", status, {}, b"blocked")
 
     return _fake
 
 
 def _fetch_raising_challenge() -> object:
-    def _fake(url: str, *, request: object) -> tuple[bytes, None]:
-        del url, request
+    def _fake(
+        url: str,
+        *,
+        request: object,
+        session: FetchSession | None = None,
+    ) -> bytes:
+        del url, request, session
         raise CloudflareChallengeError(
             url="https://s.example/",
             status=403,
@@ -34,9 +44,14 @@ def _fetch_raising_challenge() -> object:
 
 class TestFallback:
     def test_primary_success_skips_proxy(self) -> None:
-        def ok(url: str, *, request: object) -> tuple[bytes, None]:
-            del url, request
-            return b"<html>ok</html>", None
+        def ok(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
+            return b"<html>ok</html>"
 
         with patch.object(fallback, "fetch", ok):
             body, via = fallback.fetch_with_reader_fallback(
@@ -47,8 +62,13 @@ class TestFallback:
         assert via is False
 
     def test_bot_wall_falls_through_to_proxy(self) -> None:
-        def proxy_ok(url: str, *, policy: object = None) -> bytes:
-            del url, policy
+        def proxy_ok(
+            url: str,
+            *,
+            policy: object = None,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, policy, session
             return b"# md"
 
         with (
@@ -65,8 +85,13 @@ class TestFallback:
     def test_a_rate_limit_falls_through_to_proxy(self) -> None:
         # A 429 is keyed to the EGRESS, and the proxy fetches from its own, so
         # this rung genuinely can clear it even though it is not a challenge.
-        def proxy_ok(url: str, *, policy: object = None) -> bytes:
-            del url, policy
+        def proxy_ok(
+            url: str,
+            *,
+            policy: object = None,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, policy, session
             return b"# md"
 
         with (
@@ -91,8 +116,13 @@ class TestFallback:
         """
         called: list[str] = []
 
-        def proxy(url: str, *, policy: object = None) -> bytes:
-            del policy
+        def proxy(
+            url: str,
+            *,
+            policy: object = None,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del policy, session
             called.append(url)
             return b"# md"
 
@@ -121,8 +151,13 @@ class TestFallback:
         assert exc.value.status == status
 
     def test_proxy_failure_reraises_primary(self) -> None:
-        def proxy_fail(url: str, *, policy: object = None) -> bytes:
-            del url, policy
+        def proxy_fail(
+            url: str,
+            *,
+            policy: object = None,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, policy, session
             raise FetchError("https://r.jina.ai/", 401, {}, b"auth")
 
         with (
@@ -141,11 +176,23 @@ class TestFallback:
         policy = PolicyParams()
         calls: list[tuple[str, object]] = []
 
-        def primary(url: str, *, request: object) -> tuple[bytes, None]:
+        def primary(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del session
             calls.append((url, request))
             raise FetchError(url, 429, {}, b"blocked")
 
-        def proxy(url: str, *, policy: object) -> bytes:
+        def proxy(
+            url: str,
+            *,
+            policy: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del session
             calls.append((url, policy))
             return b"proxy"
 
@@ -171,12 +218,22 @@ class TestFallback:
             body=b"blocked",
         )
 
-        def primary_fetch(url: str, *, request: object) -> tuple[bytes, None]:
-            del url, request
+        def primary_fetch(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
             raise primary
 
-        def proxy_fail(url: str, *, policy: object) -> bytes:
-            del url, policy
+        def proxy_fail(
+            url: str,
+            *,
+            policy: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, policy, session
             raise FetchError("https://r.jina.ai/", 401, {}, b"auth")
 
         with (
@@ -193,12 +250,22 @@ class TestFallback:
     def test_rate_limit_proxy_failure_reraises_exact_primary(self) -> None:
         primary = FetchError("https://s.example/", 429, {}, b"blocked")
 
-        def primary_fetch(url: str, *, request: object) -> tuple[bytes, None]:
-            del url, request
+        def primary_fetch(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
             raise primary
 
-        def proxy_fail(url: str, *, policy: object) -> bytes:
-            del url, policy
+        def proxy_fail(
+            url: str,
+            *,
+            policy: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, policy, session
             raise OSError("proxy down")
 
         with (
@@ -215,8 +282,13 @@ class TestFallback:
     def test_non_fallback_fetch_error_preserves_exception(self) -> None:
         error = FetchError("https://s.example/", 418, {}, b"teapot")
 
-        def primary(url: str, *, request: object) -> tuple[bytes, None]:
-            del url, request
+        def primary(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
             raise error
 
         with (

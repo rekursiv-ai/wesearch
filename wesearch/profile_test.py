@@ -140,6 +140,18 @@ class TestCookieMerge:
         store.update_cookies("1.2.3.4", "x.com", {"a": "2"})
         assert _loaded(store, "1.2.3.4", "x.com").cookies == {"a": "2"}
 
+    def test_update_cookies_with_none_writes_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
+        store.save("1.2.3.4", "x.com", Profile(cookies={"a": "1"}))
+        write = Mock()
+        monkeypatch.setattr(store, "_write", write)
+        store.update_cookies("1.2.3.4", "x.com", {})
+        write.assert_not_called()
+
     def test_update_cookies_on_absent_is_noop(self, tmp_path: Path) -> None:
         # The store does not mint a profile; the caller saves one first.
         store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
@@ -202,27 +214,25 @@ class TestCorruptFileResilience:
         # atomic replace means the reader sees either the old file or the new one.
         store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         store.save("1.2.3.4", "x.com", Profile(cookies={"a": "1"}))
-        # No temp/partial siblings linger after a successful save.
-        siblings = list(tmp_path.glob("*.json*"))
-        assert all(s.suffix == ".json" for s in siblings), siblings
+        # Only the key file and its lock: no temp sibling lingers after a save.
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            ".1.2.3.4|x.com.json.lock",
+            "1.2.3.4|x.com.json",
+        ]
 
-    def test_write_creates_nested_parent_and_private_file(self, tmp_path: Path) -> None:
+    def test_write_creates_nested_parent_and_private_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
         base = tmp_path / "nested" / "profiles"
         store = ProfileStore(base_dir=base, ttl_sec=3600.0)
-        real_open = os.open
-        open_mock = Mock(wraps=real_open)
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr("wesearch.profile.os.open", open_mock)
-        try:
-            store.save("1.2.3.4", "x.com", Profile())
-        finally:
-            monkeypatch.undo()
+        store.save("1.2.3.4", "x.com", Profile())
         path = store._path("1.2.3.4", "x.com")
         assert path.parent == base
-        assert path.stat().st_mode & 0o777 == 0o600
-        _, flags, mode = open_mock.call_args.args
-        assert flags == os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC
-        assert mode == 0o600
+        assert [p.stat().st_mode & 0o777 for p in sorted(base.iterdir())] == [
+            0o600,
+            0o600,
+        ]
 
     def test_read_uses_close_on_exec(self, tmp_path: Path) -> None:
         store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
@@ -379,6 +389,50 @@ class TestConcurrentSafety:
         assert got is not None
         # Every worker's last write survives -> jar is coherent, not truncated.
         assert all(f"k{n}" in got.cookies for n in range(4))
+
+    def test_two_stores_on_one_file_lose_no_cookie(self, tmp_path: Path) -> None:
+        # Two sessions in one process each hold their own store, so a per-store
+        # thread lock cannot serialize them; only the file lock can.
+        stores = [ProfileStore(base_dir=tmp_path, ttl_sec=3600.0) for _ in range(4)]
+        stores[0].save("1.2.3.4", "x.com", Profile(cookies={}))
+        start = threading.Barrier(len(stores))
+
+        def worker(n: int) -> None:
+            start.wait()
+            for i in range(12):
+                stores[n].update_cookies("1.2.3.4", "x.com", {f"k{n}-{i}": "v"})
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        got = _loaded(stores[0], "1.2.3.4", "x.com")
+        assert set(got.cookies) == {f"k{n}-{i}" for n in range(4) for i in range(12)}
+
+    def test_concurrent_writes_never_share_a_temp_file(self, tmp_path: Path) -> None:
+        stores = [ProfileStore(base_dir=tmp_path, ttl_sec=3600.0) for _ in range(2)]
+        start = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def worker(store: ProfileStore) -> None:
+            start.wait()
+            try:
+                for i in range(40):
+                    store.save("1.2.3.4", "x.com", Profile(cookies={"i": str(i)}))
+            except OSError as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(s,)) for s in stores]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            ".1.2.3.4|x.com.json.lock",
+            "1.2.3.4|x.com.json",
+        ]
 
 
 if __name__ == "__main__":

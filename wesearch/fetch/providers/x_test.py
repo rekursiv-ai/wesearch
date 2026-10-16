@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
-from wesearch.fetch import PolicyParams
 from wesearch.fetch.providers import x
 
 
@@ -28,32 +25,7 @@ class TestMatches:
         assert not x.matches(url)
 
 
-class TestFetch:
-    def test_delegates_to_reader_proxy(self) -> None:
-        seen: dict[str, str] = {}
-
-        def fake_proxy(url: str, *, policy: object = None) -> bytes:
-            del policy
-            seen["url"] = url
-            return b"# tweet md"
-
-        with patch.object(x, "fetch_reader_proxy", fake_proxy):
-            body = x.fetch_x("https://x.com/user", policy=PolicyParams())
-        assert body == b"# tweet md"
-        assert seen["url"] == "https://x.com/user"
-
-    def test_forwards_policy_to_proxy(self) -> None:
-        policy = PolicyParams()
-        seen: list[object] = []
-
-        def fake_proxy(url: str, *, policy: object) -> bytes:
-            seen.extend((url, policy))
-            return b"ok"
-
-        with patch.object(x, "fetch_reader_proxy", fake_proxy):
-            assert x.fetch_x("https://twitter.com/a", policy=policy) == b"ok"
-        assert seen == ["https://twitter.com/a", policy]
-
+class TestMatchesExactDomain:
     @pytest.mark.parametrize(
         "url",
         ["x.com", "https://", "https://x.com.evil", "not-a-url"],

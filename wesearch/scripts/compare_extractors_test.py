@@ -11,7 +11,6 @@ import time
 
 from lxml import html
 
-import html2text
 import pytest
 
 from wesearch.fetch import PolicyParams, RequestParams
@@ -196,20 +195,6 @@ def test_main_returns_one_when_all_pages_unavailable(tmp_path: Path) -> None:
         assert compare_extractors.main(["--cache-dir", str(tmp_path)]) == 1
 
 
-def test_html2text_configures_unwrapped_converter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeConverter:
-        ignore_images = False
-        body_width = 80
-
-        def handle(self, value: str) -> str:
-            return value
-
-    monkeypatch.setattr(html2text, "HTML2Text", FakeConverter)
-    assert compare_extractors._html2text("<p>x</p>") == "<p>x</p>"
-
-
 def test_readability_markdown_extracts_article(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
 
@@ -228,7 +213,7 @@ def test_readability_markdown_extracts_article(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(html, "fromstring", fromstring)
     monkeypatch.setattr(compare_extractors, "try_readability", readability)
     monkeypatch.setattr(html, "tostring", tostring)
-    monkeypatch.setattr(compare_extractors, "_html2text", _uppercase)
+    monkeypatch.setattr(compare_extractors, "html_to_text", _uppercase)
     assert compare_extractors._readability_markdown("<p>x</p>") == "<P>X</P>"
     assert calls == [
         ("fromstring", "<p>x</p>"),
@@ -250,7 +235,7 @@ def test_cached_html_fetches_and_writes_bytes(tmp_path: Path) -> None:
     with patch.object(
         compare_extractors,
         "fetch",
-        return_value=(b"fresh", object()),
+        return_value=b"fresh",
     ) as fetch:
         assert (
             compare_extractors.cached_html(page, cache_dir=tmp_path, refresh=True)
@@ -321,22 +306,6 @@ def test_reference_text_forwards_clean_false(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(compare_extractors, "html2txt", html2txt)
     assert compare_extractors.reference_text("raw") == "text"
     assert calls == [("raw", False)]
-
-
-def test_html2text_sets_exact_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[bool, int]] = []
-
-    class FakeConverter:
-        ignore_images = False
-        body_width = 80
-
-        def handle(self, value: str) -> str:
-            seen.append((self.ignore_images, self.body_width))
-            return value
-
-    monkeypatch.setattr(html2text, "HTML2Text", FakeConverter)
-    assert compare_extractors._html2text("x") == "x"
-    assert seen == [(True, 0)]
 
 
 def test_gram_distortion_uses_f1_not_one_sided_score() -> None:
@@ -417,9 +386,9 @@ def test_cached_html_forwards_url_and_request_and_replaces_invalid_bytes(
     cache_dir = tmp_path / "nested" / "cache"
     calls: list[tuple[str, object]] = []
 
-    def fake_fetch(url: str, *, request: object) -> tuple[bytes, object]:
+    def fake_fetch(url: str, *, request: object) -> bytes:
         calls.append((url, request))
-        return b"\xff", object()
+        return b"\xff"
 
     monkeypatch.setattr(compare_extractors, "fetch", fake_fetch)
     assert compare_extractors.cached_html(page, cache_dir=cache_dir) == "\ufffd"

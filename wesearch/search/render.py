@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from wesearch.search.custom_types import (
+from wesearch.search.types import (
     CodeResult,
     FileResult,
     ImageResult,

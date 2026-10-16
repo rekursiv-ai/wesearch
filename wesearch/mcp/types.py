@@ -1,28 +1,32 @@
-"""The vocabulary and parameter descriptions every web-fetch surface exposes.
-
-Declared here, in the library both adapters import, so the sagent tool's
-schema, that tool's directive validation, and the MCP server's signature are
-three renderings of one description rather than three copies of it.
-"""
+"""Parameters of the fetch and search tools, for the MCP server and sagent."""
 
 from __future__ import annotations
 
 from typing import Literal
 
+from wesearch.mcp.schema import Field, Schema
+from wesearch.search.searxng import category_gloss
+from wesearch.search.types import (
+    DEFAULT_SEARCH_CHAIN,
+    SearchBackends,
+    SearxngCategory,
+)
 from wesearch.types.params import Extractor, PolicyParams, Transport
-from wesearch.types.schema import Field, Schema
 
 
-# The methods a fetch surface accepts. Declared here beside the param that
-# constrains it, so the tool's guard and its schema enum cannot disagree.
-HttpMethod = Literal["GET", "POST"]
+FetchMethod = Literal["GET", "POST"]
 
 
-__all__ = ["FetchBodyParamsSchema", "FetchParamsSchema", "HttpMethod"]
+__all__ = [
+    "FetchBodyParamsSchema",
+    "FetchMethod",
+    "FetchParamsSchema",
+    "SearchParamsSchema",
+]
 
 
 class FetchParamsSchema(Schema):
-    """What every fetch surface accepts, including the GET-only MCP tool."""
+    """What the fetch tools accept."""
 
     url = Field[str](
         annotation=str,
@@ -61,10 +65,10 @@ class FetchParamsSchema(Schema):
 
 
 class FetchBodyParamsSchema(FetchParamsSchema):
-    """Adds the request-body params a GET-only surface deliberately omits."""
+    """What the fetch tools that can POST accept."""
 
-    method = Field[HttpMethod](
-        annotation=HttpMethod,
+    method = Field[FetchMethod](
+        annotation=FetchMethod,
         default="GET",
         description=(
             "HTTP method. Defaults to GET. Use POST to call JSON or form APIs."
@@ -79,11 +83,47 @@ class FetchBodyParamsSchema(FetchParamsSchema):
     )
     form = Field[dict[str, str]](
         annotation=dict,
-        # A free-form object of string fields, so the schema pins the VALUE
-        # type rather than enumerating keys.
         schema_extra={"additionalProperties": {"type": "string"}},
         description=(
             "Form fields for POST requests. Sets Content-Type: "
             "application/x-www-form-urlencoded. Mutually exclusive with 'json'."
+        ),
+    )
+
+
+class SearchParamsSchema(Schema):
+    """What the search tools accept."""
+
+    query = Field[str](
+        annotation=str,
+        required=True,
+        description="Search query string.",
+    )
+    backend = Field[SearchBackends](
+        annotation=SearchBackends,
+        # No default: an unnamed backend is RESOLVED by ``search`` -- a
+        # non-general category selects SearXNG, anything else walks the
+        # fallback chain. Naming one here would preempt that.
+        description=(
+            "Search backend. Omit to let a category choose, else try "
+            f"{', '.join(DEFAULT_SEARCH_CHAIN)} in order, skipping any that is "
+            "unconfigured, blocked, or empty."
+        ),
+    )
+    categories = Field[SearxngCategory](
+        annotation=SearxngCategory,
+        default="general",
+        description=(
+            "SearXNG result category (tab). A non-default value selects the "
+            "SearXNG backend when none is named, and is rejected alongside an "
+            f"explicit non-SearXNG one.\n{category_gloss()}"
+        ),
+    )
+    transport = Field[Transport](
+        annotation=Transport,
+        default=PolicyParams.field_default("transport", Transport),
+        description=(
+            "Retrieval path. 'auto' tries curl and escalates to Zendriver when "
+            "a site bot-blocks it. Set an explicit transport to stress a path."
         ),
     )

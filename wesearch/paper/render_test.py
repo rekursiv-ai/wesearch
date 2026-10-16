@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.render import (
     format_author_block,
     format_author_line,
@@ -14,6 +13,7 @@ from wesearch.paper.render import (
     lean_record,
     truncation_notice,
 )
+from wesearch.paper.types import AuthorRecord, PaperRecord
 
 
 _RECORD = PaperRecord(

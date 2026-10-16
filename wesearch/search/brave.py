@@ -1,13 +1,8 @@
-"""The Brave Search API backend: a keyed JSON API, so nothing to bot-wall.
-
-Requires ``BRAVE_API_KEY``. The only backend whose throughput is bought
-rather than borrowed from the egress IP's reputation -- and billed per request,
-which is why the default chain tries it last.
-"""
+"""Brave Search API backend; requires ``BRAVE_API_KEY`` and bills per request."""
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from urllib.parse import urlencode
 
 import html
@@ -24,7 +19,11 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
-from wesearch.search.custom_types import SearchError, SearchResult, clean_text
+from wesearch.search.types import SearchError, SearchResult, clean_text
+
+
+if TYPE_CHECKING:
+    from wesearch.fetch import FetchSession
 
 
 __all__ = ["BRAVE_API_KEY_ENV", "brave"]
@@ -42,6 +41,7 @@ def brave(
     retries: int = 1,
     transport: Transport = "auto",
     max_count: int = 20,
+    session: FetchSession | None = None,
 ) -> list[SearchResult]:
     """Query the Brave Search web endpoint and return parsed results.
 
@@ -54,11 +54,13 @@ def brave(
       retries: Retry attempts for a transient failure.
       transport: Retrieval transport.
       max_count: Brave's per-request ``count`` ceiling.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
-      results: Parsed search results.
+      results: Up to ``num_results`` hits with an http(s) URL, in API order.
 
     Raises:
+      ValueError: If ``num_results`` is negative.
       SearchError: When ``BRAVE_API_KEY`` is unset.
 
     """
@@ -70,7 +72,7 @@ def brave(
     if not key:
         raise SearchError(f"{BRAVE_API_KEY_ENV} must be set to use Brave search")
     params = urlencode({"q": query, "count": min(num_results, max_count)})
-    body, _ = fetch(
+    body = fetch(
         f"https://api.search.brave.com/res/v1/web/search?{params}",
         request=RequestParams(
             content=ContentParams(
@@ -87,6 +89,7 @@ def brave(
             ),
             policy=PolicyParams(transport=transport),
         ),
+        session=session,
     )
     return _brave_parse(body, num_results)
 
@@ -109,8 +112,6 @@ def _brave_parse(body: bytes, num_results: int) -> list[SearchResult]:
     ]
 
 
-# Brave marks query terms with ``<strong>`` and escapes entities in titles and
-# descriptions; a model reading the snippet wants the text.
 def _plain(text: str) -> str:
-    """Strip inline markup and unescape entities."""
+    """Strip Brave's ``<strong>`` term markup and unescape entities."""
     return clean_text(html.unescape(re.sub(r"<[^>]+>", "", text)))

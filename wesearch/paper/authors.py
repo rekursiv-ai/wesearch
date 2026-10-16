@@ -6,15 +6,19 @@ Sync -- a coroutine call site lifts these with ``asyncio.to_thread``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import functools
 
 from treekle import MutablePlainTree, from_plain
 
-from wesearch.paper.custom_types import AuthorRecord
 from wesearch.paper.details import Listing
 from wesearch.paper.providers import s2
+from wesearch.paper.types import AuthorRecord
+
+
+if TYPE_CHECKING:
+    from wesearch.fetch import FetchSession
 
 
 __all__ = [
@@ -40,21 +44,28 @@ class AuthorSearchResult:
     total: int
 
 
-def search_authors(query: str, *, limit: int | None) -> AuthorSearchResult:
+def search_authors(
+    query: str,
+    *,
+    limit: int | None,
+    session: FetchSession | None = None,
+) -> AuthorSearchResult:
     """Search authors by name, ranked by h-index descending.
 
     Args:
       query: Author-name query string.
       limit: Maximum authors to return, or ``None`` for backend page size.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       result: AuthorSearchResult with matching records and total count.
 
-    Returns:
-      result: The AuthorSearchResult.
-
     """
-    data = s2.get("/author/search", {"query": query, "fields": s2.AUTHOR_FIELDS_STR})
+    data = s2.get(
+        "/author/search",
+        {"query": query, "fields": s2.AUTHOR_FIELDS_STR},
+        session=session,
+    )
     total = s2.search_total(data)
     entries = cast(list[dict[str, MutablePlainTree]], data.get("data") or [])
     records = [s2.author_record_from(e) for e in entries]
@@ -67,17 +78,27 @@ def search_authors(query: str, *, limit: int | None) -> AuthorSearchResult:
     return AuthorSearchResult(records=records, total=total)
 
 
-def author_metadata(author_ids: list[str]) -> list[AuthorRecord | None]:
+def author_metadata(
+    author_ids: list[str],
+    *,
+    session: FetchSession | None = None,
+) -> list[AuthorRecord | None]:
     """Batch-fetch author metadata; ``None`` per unresolved id.
 
     Args:
       author_ids: S2 author ids to resolve in one batched request.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       result: The list[AuthorRecord | None].
 
     """
-    records = s2.batch(author_ids, s2.AUTHOR_FIELDS_STR, endpoint="author")
+    records = s2.batch(
+        author_ids,
+        s2.AUTHOR_FIELDS_STR,
+        endpoint="author",
+        session=session,
+    )
     return [s2.author_record_from(r) if r is not None else None for r in records]
 
 
@@ -87,6 +108,7 @@ def author_papers(
     limit: int | None = None,
     year_from: int | None = None,
     year_to: int | None = None,
+    session: FetchSession | None = None,
 ) -> Listing:
     """Fetch an author's publications with optional client-side year filter.
 
@@ -95,13 +117,14 @@ def author_papers(
       limit: Maximum papers to return, or ``None`` for one page.
       year_from: Inclusive lower publication-year bound, when set.
       year_to: Inclusive upper publication-year bound, when set.
+      session: Connections to reuse; ``None`` uses the process's shared session.
 
     Returns:
       listing: Listing with paper records and completeness flag.
 
     """
     keep = functools.partial(_year_in_bounds, year_from=year_from, year_to=year_to)
-    page = s2.author_papers(author_id, limit=limit, keep=keep)
+    page = s2.author_papers(author_id, limit=limit, keep=keep, session=session)
     return Listing(
         records=[s2.paper_record_from(e) for e in page.entries],
         complete=page.complete,

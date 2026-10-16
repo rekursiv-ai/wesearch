@@ -7,15 +7,17 @@ from unittest.mock import patch
 
 import pytest
 
+from wesearch.fetch import FetchSession
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.paper import search
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.paginate import Page
 from wesearch.paper.providers import (
     openalex,
     s2,
+    searxng,
 )
+from wesearch.paper.types import PaperRecord
 
 
 if TYPE_CHECKING:
@@ -125,7 +127,7 @@ class TestFusedSearch:
                 "_s2_search",
                 return_value=([_rec("s", "s2")], 1, True),
             ),
-            patch.object(openalex, "fetch", return_value=(b"[]", object())),
+            patch.object(openalex, "fetch", return_value=b"[]"),
         ):
             result = search.search("q")
         assert [r.title for r in result.records] == ["s"]
@@ -238,8 +240,9 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
+            session: FetchSession | None = None,
         ) -> dict[str, MutablePlainTree]:
-            del transport
+            del transport, session
             del path
             captured.update(params)
             return {"total": 0, "data": []}
@@ -265,8 +268,9 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
+            session: FetchSession | None = None,
         ) -> dict[str, MutablePlainTree]:
-            del transport
+            del transport, session
             del path
             captured.update(params)
             return {"total": 0, "data": []}
@@ -285,8 +289,9 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
+            session: FetchSession | None = None,
         ) -> dict[str, MutablePlainTree]:
-            del transport
+            del transport, session
             del path
             lim = params.get("limit")
             if isinstance(lim, int):
@@ -306,8 +311,9 @@ class TestS2SearchParams:
             params: dict[str, str | int],
             *,
             transport: object = "auto",
+            session: FetchSession | None = None,
         ) -> dict[str, MutablePlainTree]:
-            del transport
+            del transport, session
             del path
             offset = int(params.get("offset", 0))
             rows: list[MutablePlainTree] = [
@@ -343,6 +349,7 @@ def test_fused_forwards_all_options_and_computes_partial_completeness() -> None:
         "year_to": 2020,
         "open_access_only": True,
         "transport": "zendriver",
+        "session": None,
     }
     assert s2_search.call_args.args == ("query",)
     assert s2_search.call_args.kwargs == expected
@@ -366,6 +373,7 @@ def test_search_default_options_are_forwarded_to_fused() -> None:
         "year_to": None,
         "open_access_only": False,
         "transport": "auto",
+        "session": None,
     }
 
 
@@ -388,6 +396,7 @@ def test_single_backend_forwards_all_options() -> None:
         "year_to": 2002,
         "open_access_only": True,
         "transport": "zendriver",
+        "session": None,
     }
     assert result == search.SearchResult(
         records=list(result_value[0]),
@@ -416,7 +425,11 @@ def test_s2_search_passes_exact_params_to_provider() -> None:
             "openAccessPdf": "",
         },
     )
-    assert provider.call_args.kwargs == {"limit": 4, "transport": "zendriver"}
+    assert provider.call_args.kwargs == {
+        "limit": 4,
+        "transport": "zendriver",
+        "session": None,
+    }
     assert len(records) == 1
     assert total == 7
     assert complete is False
@@ -453,6 +466,47 @@ def test_fused_default_transport_is_auto() -> None:
         )
     assert s2_search.call_args.kwargs["transport"] == "auto"
     assert oa_search.call_args.kwargs["transport"] == "auto"
+
+
+class _SessionFetch:
+    """A ``fetch`` that answers every provider's JSON shape and records sessions."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.sessions: list[FetchSession | None] = []
+
+    def __call__(
+        self,
+        url: str,
+        *,
+        request: object = None,
+        session: FetchSession | None = None,
+    ) -> bytes:
+        del url, request
+        self.sessions.append(session)
+        return self._body
+
+
+@pytest.mark.parametrize("source", ["fused", "s2", "openalex"])
+def test_search_forwards_the_session_to_every_fetch(source: search.Source) -> None:
+    session = FetchSession()
+    s2_fetch = _SessionFetch(b'{"total": 0, "data": []}')
+    oa_fetch = _SessionFetch(b'{"meta": {"count": 0}, "results": []}')
+    with (
+        patch.object(s2, "fetch", s2_fetch),
+        patch.object(openalex, "fetch", oa_fetch),
+    ):
+        search.search("q", source=source, session=session)
+    sessions = s2_fetch.sessions + oa_fetch.sessions
+    assert sessions
+    assert all(s is session for s in sessions)
+
+
+def test_search_forwards_the_session_to_searxng() -> None:
+    session = FetchSession()
+    with patch.object(searxng, "searxng", return_value=[]) as sx:
+        search.search("q", source="searxng", session=session)
+    assert sx.call_args.kwargs["session"] is session
 
 
 def test_s2_year_param_boundaries() -> None:

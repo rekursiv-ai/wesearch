@@ -12,7 +12,7 @@ import time
 from wesearch.lib.userdirs import cache_dir
 from wesearch.search import cache
 from wesearch.search.cache import cached_search
-from wesearch.search.custom_types import PaperResult, SearchResult
+from wesearch.search.types import PaperResult, SearchResult
 
 
 if TYPE_CHECKING:

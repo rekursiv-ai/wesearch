@@ -1,9 +1,9 @@
-"""Shared contracts and HTTP policy for fetch transports."""
+"""HTTP helpers the fetch transports share."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
@@ -15,71 +15,53 @@ import zlib
 import brotli
 
 from wesearch.chrome.headers import chrome_client_hints
+from wesearch.fetch.types import ValidatedHost
 from wesearch.lib import zstd_compat
+from wesearch.profile import parse_set_cookie
 from wesearch.types.errors import FetchError
 
 
 if TYPE_CHECKING:
-    from wesearch.types.params import Trust
+    from collections.abc import Callable, Iterable, Mapping
 
 
 __all__ = [
-    "Observer",
-    "ValidatedHost",
-    "ValidatedHosts",
-    "apply_redirect",
+    "DEFAULT_PORTS",
+    "ORIGIN_BOUND",
+    "PendingRequest",
     "bracket_ipv6",
+    "cookie_header",
     "decompress",
     "decompress_error_body",
-    "default_port",
     "host_header",
     "join_headers",
+    "merge_headers",
     "origin",
     "pinned_host",
     "public_host",
     "redirect_target",
-    "rewrite_origin",
 ]
 
+DEFAULT_PORTS: Mapping[str, int] = MappingProxyType({"http": 80, "https": 443})
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ValidatedHost:
-    """A validated hostname and its IP address."""
-
-    host: str
-
-    ip: str
-
-
-ValidatedHosts = Callable[[str], ValidatedHost]
+# Headers a hop to another origin drops: they belong to the origin that set them.
+ORIGIN_BOUND: frozenset[str] = frozenset(
+    {"cookie", "authorization"}
+    | {name.lower() for name in chrome_client_hints(major=1)},
+)
 
 
 def public_host(hostname: str) -> ValidatedHost:
-    """Resolve a host to a public IP, refusing every non-public one.
-
-    The ``ValidatedHosts`` resolver an application passes when the URL comes
-    from somewhere it does not trust -- an agent, a user, a fetched page.
-    Without it the caller can be steered to the loopback interface, the cloud
-    metadata endpoint, and every private-range host the process can see.
-    Returning ONE address also pins the connection, so a name that passes
-    validation cannot be re-resolved to a private one before the socket opens.
-
-    Lives here, beside the contract it satisfies, because a security denylist
-    that exists in two places drifts: the next address class added to one copy
-    silently leaves the other exploitable.
+    """Resolve ``hostname``; refuse it unless every address it has is public.
 
     Args:
-      hostname: The bare host the ``ValidatedHosts`` contract passes, never a
-        netloc with a port.
+      hostname: Host name or IP literal, without a port.
 
     Returns:
-      validated: The bare host and the single public IP to connect to. Bare
-        because the transport re-appends any port itself, so a port here would
-        be doubled on the wire.
+      validated: The host and the one public IP to connect to.
 
     Raises:
-      ValueError: When ``hostname`` has no host, does not resolve, or resolves
-        to any non-public address.
+      ValueError: When the host does not resolve or any address is not public.
 
     """
     host = urlparse(f"//{hostname}").hostname
@@ -90,8 +72,6 @@ def public_host(hostname: str) -> ValidatedHost:
     except (socket.gaierror, UnicodeError) as e:
         raise ValueError(f"DNS resolution failed for {host!r}: {e}") from e
     for candidate in ips:
-        # ``ipaddress`` handles the IPv4-mapped IPv6 form (``::ffff:127.0.0.1``)
-        # on every flag below, so no separate unwrapping is needed.
         address = ipaddress.ip_address(candidate)
         if (
             address.is_loopback
@@ -107,118 +87,130 @@ def public_host(hostname: str) -> ValidatedHost:
             )
     if not ips:
         raise ValueError(f"DNS resolution returned no address for {host!r}.")
-    # Prefer IPv4: getaddrinfo commonly lists AAAA first, but many networks
-    # have no working v6 route, and pinning a single unreachable v6 address
-    # turns a servable page into a connection failure -- unlike an unpinned
-    # client, which Happy-Eyeballs to v4.
+    # IPv4 first: a pinned IPv6 address on a network with no v6 route fails,
+    # where an unpinned client would have fallen back to v4.
     return ValidatedHost(host=host, ip=next((a for a in ips if ":" not in a), ips[0]))
 
 
-def pinned_host(url: str, trust: Trust) -> ValidatedHost | None:
-    """Resolve ``url``'s host under ``trust``; return the IP to pin, or ``None``.
-
-    The ONE place a trust level is interpreted, so no transport can decide for
-    itself what "untrusted" means. Under ``"untrusted"`` the host must resolve
-    to a public address (raising otherwise) and the resolved IP is returned so
-    the connection can be pinned to it -- a name that passes validation cannot
-    then be re-resolved to a private one before the socket opens. ``"internal"``
-    is the caller's explicit statement that it authored the URL, so no check and
-    no pin.
+def pinned_host(url: str, *, allow_private_hosts: bool) -> ValidatedHost | None:
+    """Return the public IP to connect to for ``url``, or ``None`` when allowed any.
 
     Args:
-      url: The URL whose host is being connected to. A redirect target is a URL
-        like any other and must be re-checked; skipping that is the classic SSRF
-        bypass.
-      trust: Provenance of the URL.
+      url: The URL about to be requested.
+      allow_private_hosts: Skip the public-address check.
 
     Returns:
-      pin: The validated host and the single public IP to connect to, or
-        ``None`` when the caller declared the URL internal.
+      pin: The host and the public IP its connection must use.
 
     Raises:
-      ValueError: When ``trust`` is ``"untrusted"`` and the host is missing,
-        unresolvable, or resolves to any non-public address.
+      ValueError: When the scheme is not ``http`` or ``https``, or the host is
+        missing, unresolvable, or not public.
 
     """
-    if trust == "internal":
+    parsed = urlparse(url)
+    if parsed.scheme not in DEFAULT_PORTS:
+        raise ValueError(f"Unsupported URL scheme {parsed.scheme!r}: {url!r}.")
+    if allow_private_hosts:
         return None
-    hostname = urlparse(url).hostname
+    hostname = parsed.hostname
     if hostname is None:
         raise ValueError(f"URL has no host: {url!r}.")
     return public_host(hostname)
 
 
-# Internal per-hop response sink: (status, response headers, responding URL).
-# The URL lets a sink scope what it learns (cookies, hints) to the hop's origin,
-# so a cross-origin redirect never mis-attributes the target's Set-Cookie to the
-# source. The public ``RequestParams.on_response`` stays (status, headers).
-Observer = Callable[[int, dict[str, str], str], None]
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+def merge_headers(
+    defaults: Mapping[str, str],
+    overrides: Mapping[str, str | None],
+) -> dict[str, str]:
+    """Return ``defaults`` with ``overrides`` set over them, names in any case.
+
+    Each name is sent once. A replaced header keeps its default's position on
+    the wire; a new one goes last; of names differing only in case, the last
+    override wins.
+
+    Args:
+      defaults: Headers in wire order.
+      overrides: Headers that win; a ``None`` value removes that header.
+
+    Returns:
+      merged: The headers to send.
+
+    """
+    replaced = {name.lower(): (name, value) for name, value in overrides.items()}
+    merged = {
+        name: replaced.pop(name.lower(), (name, value))[1]
+        for name, value in defaults.items()
+    }
+    merged.update(replaced.values())
+    return {name: value for name, value in merged.items() if value is not None}
 
 
 def origin(url: str) -> str:
-    """Return the ``scheme://host[:port]`` origin of a URL.
+    """Return ``url``'s origin, ``scheme://host[:port]``, lower-case, no default port.
 
-    The Accept-CH opt-in key and the unit of same-origin cookie/hint scoping,
-    shared by the fetch orchestrator and the redirect transform.
-
-    Canonical, not the raw netloc: RFC 6454 defines an origin as the
-    scheme/host/port TRIPLE, so ``https://User:pw@EXAMPLE.com:443/a`` and
-    ``https://example.com/a`` are one origin. Spelling them differently gave
-    one host several jar keys -- a cookie set under one was never sent back --
-    and made a hop that never left the origin read as cross-origin, which
-    strips the credential it was entitled to keep.
+    ``https://User:pw@EXAMPLE.com:443/a`` and ``https://example.com/b`` have the
+    same origin.
 
     Args:
-      url: The URL to reduce to its origin.
+      url: Any URL.
 
     Returns:
-      origin: The canonical ``scheme://host[:port]`` of ``url``.
+      origin: The canonical origin.
 
     """
     parsed = urlparse(url)
-    # ``.hostname`` already lowercases and drops userinfo; ``host_header``
-    # owns the omit-the-default-port rule.
     host = bracket_ipv6(parsed.hostname or "")
     return f"{parsed.scheme}://{host_header(host, parsed.port, parsed.scheme)}"
 
 
 def decompress(body: bytes, encoding: str) -> bytes:
-    """Decompress a response body per Content-Encoding; raise ValueError if bad.
-
-    ``Content-Encoding`` may chain several codings (RFC 9110 SS 8.4.1, e.g.
-    ``gzip, br``); they are applied left-to-right on encode, so decode
-    right-to-left. Each token is one coding.
+    """Return ``body`` decoded per its ``Content-Encoding``.
 
     Args:
-      body: Compressed response body bytes.
-      encoding: Content-Encoding header value (comma-separated codings).
+      body: Response body.
+      encoding: ``Content-Encoding`` value, e.g. ``gzip`` or ``gzip, br``.
 
     Returns:
-      body: Decompressed bytes.
+      body: The decoded body.
+
+    Raises:
+      ValueError: On an unknown encoding or a corrupt body.
 
     """
     for enc in reversed([tok.strip().lower() for tok in encoding.split(",")]):
-        body = _decompress_one(body, enc)
+        if enc not in ("", "identity", "gzip", "deflate", "br", "zstd"):
+            raise ValueError(f"Unknown Content-Encoding: {enc!r}")
+        if enc == "deflate":
+            try:
+                body = zlib.decompress(body)
+                continue
+            except zlib.error:
+                pass  # Some servers send raw deflate, no zlib header; browsers accept it.
+        try:
+            if enc == "gzip":
+                body = gzip.decompress(body)
+            elif enc == "deflate":
+                body = zlib.decompress(body, -zlib.MAX_WBITS)
+            elif enc == "br":
+                body = brotli.decompress(body)
+            elif enc == "zstd":
+                body = zstd_compat.decompress(body)
+        except (OSError, ValueError, zlib.error, brotli.error) as e:
+            raise ValueError(f"Decompression failed ({enc}): {e}") from None
     return body
 
 
 def decompress_error_body(body: bytes, headers: dict[str, str]) -> bytes:
-    """Decompress an ERROR response body best-effort, never raising.
+    """Return an error response's body decoded, or as is if it will not decode.
 
     Args:
-      body: Body.
-      headers: Headers.
+      body: Response body.
+      headers: Response headers, names lower-case.
 
     Returns:
-      body: The bytes.
+      body: The decoded body, or ``body`` unchanged.
 
     """
-    # Error pages are compressed like any success body (Cloudflare serves its
-    # challenge pages zstd/br), so a raw FetchError.body is undecodable garbage
-    # and a caller cannot tell a challenge from a genuine 404. This must NOT
-    # raise: an undecodable body must still surface the original HTTP error, so
-    # a decompression failure returns the raw bytes rather than mask the status.
     encoding = headers.get("content-encoding") or ""
     try:
         return decompress(body, encoding)
@@ -227,19 +219,16 @@ def decompress_error_body(body: bytes, headers: dict[str, str]) -> bytes:
 
 
 def join_headers(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """Lowercase header pairs, folding duplicates into one value.
+    """Return response headers as a dict, names lower-case.
 
-    Duplicates join with ``", "`` per RFC 9110 SS 5.3 -- EXCEPT ``set-cookie``,
-    which that RFC explicitly exempts (a cookie value may itself contain ``", "``,
-    so folding then re-splitting mis-parses it). Multiple ``set-cookie`` headers
-    join with a newline instead -- a byte that never appears in a header value --
-    so :func:`wesearch.profile.parse_set_cookie` can split them back exactly.
+    A repeated header joins with ``", "``; a repeated ``set-cookie`` joins with
+    a newline, since cookie values contain ``", "``.
 
     Args:
-      pairs: (header_name, header_value) tuples.
+      pairs: ``(name, value)`` pairs as received.
 
     Returns:
-      out: Lowercased header dictionary with merged duplicate keys.
+      headers: One value per name.
 
     """
     out: dict[str, str] = {}
@@ -255,15 +244,18 @@ def join_headers(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
 
 
 def redirect_target(current_url: str, status: int, headers: dict[str, str]) -> str:
-    """Resolve a redirect ``Location`` against *current_url*; raise if absent.
+    """Return the absolute URL a redirect's ``Location`` points to.
 
     Args:
-      current_url: The request URL before the redirect.
-      status: HTTP redirect status code (3xx).
-      headers: Response headers including Location.
+      current_url: The URL that answered with the redirect.
+      status: Its status.
+      headers: Its headers, names lower-case.
 
     Returns:
-      result: Absolute URL after resolving Location relative to current_url.
+      target: The redirect target.
+
+    Raises:
+      FetchError: When there is no ``Location``.
 
     """
     location = headers.get("location", "")
@@ -274,163 +266,108 @@ def redirect_target(current_url: str, status: int, headers: dict[str, str]) -> s
             headers,
             b"Redirect with no Location header",
         )
-    # RFC 3986 relative resolution: handles absolute, scheme-relative, and
-    # path-relative Locations without corrupting the host.
     return urljoin(current_url, location)
 
 
-def default_port(scheme: str) -> int:
-    """Return the default TCP port for an HTTP scheme.
-
-    Args:
-      scheme: Scheme.
-
-    Returns:
-      result: The int.
-
-    """
-    return 443 if scheme == "https" else 80
-
-
 def host_header(host: str, port: int | None, scheme: str) -> str:
-    """Return the ``Host`` header value: bare host, plus a non-default port."""
-    # RFC 9110 requires the port in Host only when it is not the scheme default;
-    # a real browser omits :443/:80. The ONE place this rule lives, so the
-    # initial hop and the cross-host-redirect rebuild cannot disagree.
-    if port is not None and port != default_port(scheme):
-        return _netloc(host, port)
-    return host
+    """Return the ``Host`` header value: the host, plus a non-default port."""
+    if port is None or port == DEFAULT_PORTS.get(scheme):
+        return host
+    return f"{host}:{port}"
 
 
 def bracket_ipv6(host: str) -> str:
-    """Wrap an IPv6 literal in brackets; pass hostnames and IPv4 through.
-
-    Args:
-      host: Host.
-
-    Returns:
-      host: The str.
-
-    """
-    # http.client splits host on the last ':' for a port, misparsing a bare
-    # "2606:4700::6810:7c60" as host+port. Bracketing avoids that heuristic.
+    """Return an IPv6 literal in brackets; return other hosts unchanged."""
     if ":" in host and not host.startswith("["):
         return f"[{host}]"
     return host
 
 
-def rewrite_origin(headers: dict[str, str], target_url: str) -> dict[str, str]:
-    """Return ``headers`` with ``Origin`` reset to ``target_url``'s origin.
+@dataclass(slots=True, kw_only=True)
+class PendingRequest:
+    """The request to send next; :meth:`follow` turns it into a redirect's target.
 
-    Args:
-      headers: Response headers to rewrite.
-      target_url: New URL after redirect.
-
-    Returns:
-      headers: Modified headers dict with Origin header updated.
-
-    """
-    # A cross-origin redirect must NOT leak the source Origin to the new host (a
-    # real browser sets it to the new origin, never the old). A GET carries no
-    # Origin and passes through. Field names are case-insensitive, so a
-    # caller-supplied "origin" in any case is matched and rewritten in place.
-    origin_key = next((k for k in headers if k.lower() == "origin"), None)
-    if origin_key is None:
-        return headers
-    # The value ANNOUNCED must be the value the hop was JUDGED against:
-    # ``apply_redirect`` decides same-origin with ``origin()``, so building a
-    # second spelling here told the target an origin this module does not
-    # consider equal to the one it compared.
-    return {**headers, origin_key: origin(target_url)}
-
-
-def apply_redirect(
-    current_url: str,
-    headers: dict[str, str],
-    method: str,
-    *,
-    body: bytes | None,
-    status: int,
-    redirect_url: str,
-    origin_bound: frozenset[str] = frozenset(
-        {"cookie", "authorization"}
-        | {name.lower() for name in chrome_client_hints(major=1)},
-    ),
-) -> tuple[dict[str, str], str, bytes | None]:
-    """Compute the (headers, method, body) for the next hop of a redirect.
-
-    The ONE place the per-hop transform lives, called by every transport's
-    redirect loop so the rules cannot drift, mirroring what a real browser does:
-
-    - Rewrite ``Origin`` to the new target.
-    - On 301/302/303 of a non-GET, convert to a bodyless GET dropping
-      Content-Type (browsers downgrade all three; only 307/308 preserve the
-      method -- that is why 307/308 exist).
-    - On a CROSS-ORIGIN hop, drop every origin-bound header (``Cookie``,
-      ``Authorization``, and the extended client hints), since those belong to
-      the source origin and must not leak to the target. Same-origin hops keep
-      them.
-
-    Casing-insensitive throughout.
-
-    Args:
-      current_url: The URL this hop is leaving.
-      headers: The headers the current hop carried.
-      method: The current HTTP method.
-      body: The current request body, if any.
-      status: The redirect status that triggered this hop.
-      redirect_url: The target of the redirect.
-      origin_bound: Lower-cased header names no cross-origin hop may carry.
-        ``authorization`` is a live secret rather than a fingerprint: callers
-        attach API keys and OAuth bearers, and userinfo synthesizes a Basic
-        credential. The browser leg passes the same value, because Chrome
-        follows its own redirects and applies the rule itself.
-
-    Returns:
-      headers: The headers for the next hop.
-      method: The method for the next hop.
-      body: The body for the next hop, or ``None``.
+    Attributes:
+      url: Where the request goes.
+      method: HTTP method.
+      headers: Headers to send.
+      body: Request body.
+      remaining: Redirects still allowed.
 
     """
-    headers = rewrite_origin(headers, redirect_url)
-    if status in (301, 302, 303) and method != "GET":
-        method = "GET"
-        body = None
-        headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-    if origin(current_url) != origin(redirect_url):
-        headers = {k: v for k, v in headers.items() if k.lower() not in origin_bound}
-    return headers, method, body
+
+    url: str
+    method: str
+    headers: dict[str, str]
+    body: bytes
+    remaining: int
+
+    def follow(
+        self,
+        status: int,
+        headers: dict[str, str],
+        *,
+        on_response: Callable[[int, dict[str, str], str], None],
+        on_redirect: Callable[[str], None],
+        cookies_for_host: Callable[[str], Mapping[str, str]],
+    ) -> bool:
+        """Report a response; on a redirect within budget, become the next request.
+
+        The next request is what Chrome sends: ``Origin`` names the new target, a
+        301-303 of a non-GET becomes a bodyless GET, cookies the response set on
+        this host are sent, and a hop to another origin drops
+        :data:`ORIGIN_BOUND` headers and sends that origin's stored cookies.
+
+        Args:
+          status: Response status.
+          headers: Response headers, names lower-case.
+          on_response: Called with ``(status, headers, url)``.
+          on_redirect: Called with the redirect target; raise to stop.
+          cookies_for_host: Returns the stored cookies for a new origin's host.
+
+        Returns:
+          followed: Whether this is now the redirect's request, to send next.
+
+        """
+        on_response(status, headers, self.url)
+        if status not in (301, 302, 303, 307, 308) or self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        target = redirect_target(self.url, status, headers)
+        on_redirect(target)
+        sent = {k: v for k, v in self.headers.items() if k.lower() != "origin"}
+        if len(sent) < len(self.headers):
+            sent["Origin"] = origin(target)
+        if status in (301, 302, 303) and self.method != "GET":
+            self.method = "GET"
+            self.body = b""
+            sent = {k: v for k, v in sent.items() if k.lower() != "content-type"}
+        if origin(self.url) != origin(target):
+            sent = {k: v for k, v in sent.items() if k.lower() not in ORIGIN_BOUND}
+            if stored := cookies_for_host(urlparse(target).hostname or ""):
+                sent["Cookie"] = cookie_header({}, stored)
+        elif set_cookie := headers.get("set-cookie", ""):
+            sent = merge_headers(
+                sent,
+                {"Cookie": cookie_header(sent, parse_set_cookie(set_cookie))},
+            )
+        self.headers = sent
+        self.url = target
+        return True
 
 
-# RFC 7230 says zlib-wrapped, but some servers emit RAW DEFLATE (no header);
-# browsers retry with a negative window. Try zlib first, fall back to raw so a
-# header-less stream still decodes.
-def _inflate(body: bytes) -> bytes:
-    """Decompress a ``deflate`` body, wrapped or raw."""
-    try:
-        return zlib.decompress(body)
-    except zlib.error:
-        return zlib.decompress(body, -zlib.MAX_WBITS)
+def cookie_header(headers: Mapping[str, str], cookies: Mapping[str, str]) -> str:
+    """Return the ``Cookie`` value of ``headers`` with ``cookies`` set over it.
 
+    Args:
+      headers: Request headers, any case.
+      cookies: Cookie names and values that win.
 
-def _decompress_one(body: bytes, enc: str) -> bytes:
-    """Decompress ``body`` under a SINGLE Content-Encoding token."""
-    if enc in ("", "identity"):
-        return body
-    try:
-        if enc == "gzip":
-            return gzip.decompress(body)
-        if enc == "deflate":
-            return _inflate(body)
-        if enc == "br":
-            return brotli.decompress(body)
-        if enc == "zstd":
-            return zstd_compat.decompress(body)
-    except (OSError, ValueError, zlib.error, brotli.error) as e:
-        raise ValueError(f"Decompression failed ({enc}): {e}") from None
-    raise ValueError(f"Unknown Content-Encoding: {enc!r}")
+    Returns:
+      cookie: The merged ``Cookie`` header value.
 
-
-def _netloc(hostname: str, port: int | None) -> str:
-    """Recombine a hostname and optional port into a netloc."""
-    return f"{hostname}:{port}" if port is not None else hostname
+    """
+    sent = [v for k, v in headers.items() if k.lower() == "cookie"][-1:]
+    pairs = (pair.strip().partition("=") for v in sent for pair in v.split(";"))
+    merged = {name: value for name, eq, value in pairs if eq and name} | dict(cookies)
+    return "; ".join(f"{name}={value}" for name, value in merged.items())

@@ -21,7 +21,7 @@ import time
 from treekle import ReadError, from_plain, json_loads, to_plain
 
 from wesearch.lib.userdirs import cache_dir
-from wesearch.search.custom_types import SearchResult
+from wesearch.search.types import SearchResult
 
 
 if TYPE_CHECKING:

@@ -1,24 +1,20 @@
 """Tests for ``wesearch.fetch.transport.zendriver`` (zendriver headless fetch backend).
 
 Hermetic: a fake async browser stands in for zendriver, so the transport logic
-(cookie-domain filtering, challenge detection, redirect callback, pool reuse)
-is exercised with no Chrome and no network.
+(page status, cookie-domain filtering, challenge settling, redirect guard, pool
+reuse) is exercised with no Chrome and no network.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from types import GeneratorType
+from types import GeneratorType, MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast, override
 
-import argparse
 import asyncio
-import atexit
 import contextlib
-import importlib
 import inspect
 import os
 import re
@@ -26,32 +22,38 @@ import selectors
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import warnings
 
 from treekle import from_plain
 from zendriver import Browser, Config, Tab
-from zendriver.cdp import fetch, network, page, target
+from zendriver.cdp import fetch, network, page, security, target
 from zendriver.core.connection import Transaction
 
 import pytest
 
+from wesearch.fetch.session import default_session
 from wesearch.fetch.transport import zendriver
-from wesearch.fetch.transport.zendriver import (
-    BrowserResult,
-    _BrowserPool,
-    _Flags,
-    _navigate,
-)
+from wesearch.fetch.transport.zendriver import BrowserPool, _load
+from wesearch.fetch.types import FetchSession
 from wesearch.lib.userdirs import data_dir
+from wesearch.types.errors import CloudflareChallengeError, FetchError
+from wesearch.types.params import ignore
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
+    from collections.abc import (
+        Awaitable,
+        Callable,
+        Coroutine,
+        Generator,
+        Mapping,
+        Sequence,
+    )
 
-    from wesearch.types.params import Trust
+    from wesearch.fetch.types import Fetch
+    from wesearch.types.params import HttpMethod
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -106,12 +108,12 @@ class _FakeCookie:
 class _FakeCookieJar:
     def __init__(self, cookies: list[_FakeCookie]) -> None:
         self._cookies = cookies
-        self.seeded: list[object] = []
+        self.seeded: list[network.CookieParam] = []
 
     async def get_all(self) -> list[_FakeCookie]:
         return self._cookies
 
-    async def set_all(self, cookies: list[object]) -> None:
+    async def set_all(self, cookies: list[network.CookieParam]) -> None:
         self.seeded = cookies
 
 
@@ -142,6 +144,41 @@ def _main_frame_navigated() -> page.FrameNavigated:
     )
 
 
+# The tab's target id; ``_load`` records only page responses for this frame.
+_TAB_ID = "tab-1"
+
+
+def _document_response(
+    url: str,
+    status: int,
+    headers: dict[str, str] | None = None,
+    *,
+    frame: str = _TAB_ID,
+    kind: network.ResourceType = network.ResourceType.DOCUMENT,
+) -> network.ResponseReceived:
+    """Return a real ``ResponseReceived`` for a page load in ``frame``."""
+    return network.ResponseReceived(
+        request_id=network.RequestId("r"),
+        loader_id=network.LoaderId("l"),
+        timestamp=network.MonotonicTime(0.0),
+        type_=kind,
+        response=network.Response(
+            url=url,
+            status=status,
+            status_text="",
+            headers=network.Headers(headers or {}),
+            mime_type="text/html",
+            charset="utf-8",
+            connection_reused=False,
+            connection_id=0.0,
+            encoded_data_length=0.0,
+            security_state=security.SecurityState.SECURE,
+        ),
+        has_extra_info=False,
+        frame_id=page.FrameId(frame),
+    )
+
+
 class _FakeTab:
     """A tab that replays a scripted document sequence, driven by navigations.
 
@@ -167,18 +204,22 @@ class _FakeTab:
         documents: list[str] | None = None,
         parsing: str | None = None,
         paused_events: list[object] | None = None,
+        responses: list[object] | None = None,
     ) -> None:
         self._documents = documents if documents is not None else [content]
         self._parsing = parsing
         self._href = href
+        self.target_id = _TAB_ID
         self.closed = False
         self.navigations: list[str] = []
         self.commands: list[object] = []
         self.handlers: list[Callable[[object], None]] = []
         self.paused_handlers: list[Callable[[object], None]] = []
+        self.response_handlers: list[Callable[[object], None]] = []
         self.continued_requests: list[str] = []
         self.failed_requests: list[str] = []
         self._paused_events: list[object] = list(paused_events or [])
+        self._responses: list[object] = list(responses or [])
         self.wire_commands: list[dict[str, object]] = []
         self.content_reads = 0
         self._index = 0
@@ -196,6 +237,9 @@ class _FakeTab:
         # other's events, which a single handler list cannot express.
         if event_type is fetch.RequestPaused:
             self.paused_handlers.append(handler)
+            return
+        if event_type is network.ResponseReceived:
+            self.response_handlers.append(handler)
             return
         self.handlers.append(handler)
 
@@ -253,6 +297,10 @@ class _FakeTab:
         for event in self._paused_events:
             self.pause_request(event)
         self._paused_events = []
+        for event in self._responses:
+            for handler in self.response_handlers:
+                handler(event)
+        self._responses = []
         # Drained by yielding, never by sleeping: the guard's reply crosses two
         # scheduler stages (``call_soon_threadsafe``, then the task it creates),
         # and these tests run on a 0.02s budget to prove the settle poll gives
@@ -334,12 +382,14 @@ class _FakeBrowser:
         documents: list[str] | None = None,
         parsing: str | None = None,
         paused_events: list[object] | None = None,
+        responses: list[object] | None = None,
     ) -> None:
         self._content = content
         self._href = href
         self._documents = documents
         self._parsing = parsing
         self._paused_events = paused_events or []
+        self._responses = responses or []
         self.cookies = _FakeCookieJar(cookies or [])
         self.connection = _FakeConnection()
         self.stopped = False
@@ -358,10 +408,9 @@ class _FakeBrowser:
             href=self._href,
             documents=self._documents,
             parsing=self._parsing,
-            # A COPY: the tab drains its list once delivered, and the browser
-            # builds a fresh tab per ``get`` (the blank one, then the real
-            # navigation), so a shared list is empty by the time it matters.
+            # COPIES: the tab drains its lists once delivered.
             paused_events=list(self._paused_events),
+            responses=list(self._responses),
         )
         return self.last_tab
 
@@ -385,6 +434,7 @@ class _StubPool:
 
     def __init__(self, browser: _FakeBrowser) -> None:
         self._browser = browser
+        self.requested: list[tuple[Path, bool]] = []
 
     async def browser(
         self,
@@ -392,445 +442,491 @@ class _StubPool:
         *,
         headless: bool,
     ) -> _FakeBrowser:
-        del profile_dir, headless
+        self.requested.append((profile_dir, headless))
         return self._browser
 
 
-def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> _StubPool:
-    pool = _StubPool(browser)
-    monkeypatch.setattr(zendriver, "_pool", lambda: pool)
-    return pool
+class _RunningPool(_StubPool):
+    """A :class:`_StubPool` that also runs a coroutine and shuts down, as the real one."""
+
+    def __init__(self, browser: _FakeBrowser) -> None:
+        super().__init__(browser)
+        self.waits: list[float] = []
+        self.shutdowns = 0
+
+    def run[T](self, coro: Coroutine[object, object, T], *, timeout_sec: float) -> T:
+        self.waits.append(timeout_sec)
+        return asyncio.run(coro)
+
+    def shutdown(self) -> None:
+        self.shutdowns += 1
 
 
-def test_launch_browser_caps_dead_browser_connect_budget(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    # ``zendriver`` retries the DevTools connection ``browser_connection_max_tries``
-    # times, each bounded by ``browser_connection_timeout``. When Chrome cannot
-    # connect, the launch blocks for their product before raising. A healthy
-    # Chrome exposes DevTools in ~0.3s, so the budget must clear that with margin
-    # yet stay small: an unbounded product turns a transient browser gap into a
-    # multi-second hang that stacks past the live-test timeout instead of
-    # surfacing as a fast skip.
-    captured: dict[str, float] = {}
+def _session(pool: object) -> FetchSession:
+    """Return a session whose browser pool is ``pool``."""
+    return FetchSession(browsers=cast(BrowserPool, pool), profile_dir=_PROFILE)
 
-    async def fake_start(config: Config) -> _FakeBrowser:
-        captured["timeout"] = config.browser_connection_timeout
-        captured["max_tries"] = config.browser_connection_max_tries
-        return _FakeBrowser()
 
-    monkeypatch.setattr("zendriver.start", fake_start)
-    asyncio.run(
-        zendriver._launch_browser(
-            tmp_path,
-            headless=True,
+async def _drive(
+    browser: _FakeBrowser,
+    url: str = "https://example.com/",
+    *,
+    timeout_sec: float = 5.0,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    max_redirects: int = 10,
+    on_redirect: Callable[[str], None] = ignore,
+    on_response: Callable[[int, dict[str, str], str], None] = ignore,
+    allow_private_hosts: bool = False,
+) -> bytes:
+    """Run :func:`_load` on ``browser`` through a stub pool."""
+    return await _load(
+        cast(BrowserPool, _StubPool(browser)),
+        url,
+        profile_dir=_PROFILE,
+        headless=True,
+        headers=headers or {},
+        cookies=cookies or {},
+        timeout_sec=timeout_sec,
+        max_redirects=max_redirects,
+        on_redirect=on_redirect,
+        on_response=on_response,
+        allow_private_hosts=allow_private_hosts,
+    )
+
+
+def _load_page(
+    browser: _FakeBrowser,
+    url: str = "https://example.com/",
+    *,
+    timeout_sec: float = 5.0,
+    cookies: dict[str, str] | None = None,
+    on_response: Callable[[int, dict[str, str], str], None] = ignore,
+) -> bytes:
+    """Run :func:`_drive` to completion."""
+    return asyncio.run(
+        _drive(
+            browser,
+            url,
+            timeout_sec=timeout_sec,
+            cookies=cookies,
+            on_response=on_response,
         ),
     )
 
-    budget = captured["timeout"] * captured["max_tries"]
-    assert captured["timeout"] >= 0.3, "connect timeout must clear healthy startup"
-    assert budget <= 3.0, f"dead-browser connect budget {budget}s too large"
+
+# -- fetch_zendriver: the Fetch contract -------------------------------------
 
 
-def test_launch_browser_uses_vanilla_zendriver_config(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def _send(
+    browser: _FakeBrowser,
+    *,
+    headers: Mapping[str, str | None] = MappingProxyType({}),
+    on_response: Callable[[int, dict[str, str], str], None] = ignore,
+    url: str = "https://a.example/",
+) -> bytes:
+    """Call ``fetch_zendriver`` as a :class:`Fetch` on ``browser``."""
+    transport: Fetch = zendriver.fetch_zendriver
+    return transport(
+        url,
+        headers=headers,
+        timeout_sec=5.0,
+        on_response=on_response,
+        session=_session(_RunningPool(browser)),
+    )
+
+
+@pytest.fixture
+def pooled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let ``fetch_zendriver`` accept a :class:`_RunningPool` as its pool."""
+    monkeypatch.setattr(zendriver, "BrowserPool", _RunningPool)
+
+
+@pytest.mark.usefixtures("pooled")
+def test_fetch_zendriver_returns_the_rendered_body() -> None:
+    assert _send(_FakeBrowser(content="<html>page</html>")) == b"<html>page</html>"
+
+
+@pytest.mark.usefixtures("pooled")
+def test_fetch_zendriver_reports_landed_cookies_like_a_response() -> None:
+    browser = _FakeBrowser(
+        href="https://b.example/landing",
+        cookies=[_FakeCookie(name="SID", value="1", domain="b.example")],
+    )
+    seen: list[tuple[int, dict[str, str], str]] = []
+
+    def observe(status: int, headers: dict[str, str], url: str) -> None:
+        seen.append((status, headers, url))
+
+    _send(browser, on_response=observe, url="https://a.example/start")
+    assert seen == [(200, {"set-cookie": "SID=1"}, "https://b.example/landing")]
+
+
+@pytest.mark.parametrize(
+    ("method", "body"),
+    [("POST", b""), ("GET", b"x")],
+)
+def test_fetch_zendriver_refuses_what_a_navigation_cannot_send(
+    method: str,
+    body: bytes,
 ) -> None:
+    with pytest.raises(ValueError, match="only a bodyless GET"):
+        zendriver.fetch_zendriver(
+            "https://a.example/",
+            method=cast("HttpMethod", method),
+            body=body,
+        )
+
+
+def test_fetch_zendriver_refuses_a_private_host_before_any_browser() -> None:
+    session = FetchSession(profile_dir=_PROFILE)
+    with pytest.raises(ValueError, match="non-public"):
+        zendriver.fetch_zendriver("http://127.0.0.1:1/", session=session)
+    assert session.browsers is None
+
+
+@pytest.mark.usefixtures("pooled")
+def test_fetch_zendriver_seeds_the_cookie_header_into_chrome() -> None:
     browser = _FakeBrowser()
-    browser_args: list[str] = []
+    _send(browser, headers={"Cookie": "a=1; b=2", "X-Key": "k"})
+    assert {(c.name, c.value, c.url) for c in browser.cookies.seeded} == {
+        ("a", "1", "https://a.example/"),
+        ("b", "2", "https://a.example/"),
+    }
 
-    async def fake_start(config: Config) -> _FakeBrowser:
-        browser_args.extend(config())
-        return browser
 
-    monkeypatch.setattr("zendriver.start", fake_start)
-    result = asyncio.run(
-        zendriver._launch_browser(
-            tmp_path,
-            headless=True,
+@pytest.mark.usefixtures("pooled")
+def test_fetch_zendriver_forwards_caller_headers_except_cookie_and_none() -> None:
+    """Caller headers, browser identity included, reach the tab; ``Cookie`` is seeded."""
+    browser = _FakeBrowser()
+    _send(
+        browser,
+        headers={
+            "X-Test": "yes",
+            "User-Agent": "caller",
+            "Cookie": "SID=cookie",
+            "X-Gone": None,
+        },
+    )
+    assert browser.last_tab is not None
+    assert _extra_http_headers(browser.last_tab) == {
+        "x-test": "yes",
+        "user-agent": "caller",
+    }
+
+
+def test_fetch_zendriver_adopts_the_session_pool_and_bounds_its_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer ceiling must exceed ``_load``'s own budget.
+
+    At or below it the outer wait fires first, cancelling a load that was about
+    to report a wall and turning it into an opaque timeout.
+    """
+    monkeypatch.setattr(zendriver, "BrowserPool", _RunningPool)
+    pool = _RunningPool(_FakeBrowser())
+    session = FetchSession(
+        browsers=cast(BrowserPool, pool),
+        profile_dir=_PROFILE,
+        headless=False,
+    )
+    zendriver.fetch_zendriver("https://a.example/", timeout_sec=7.0, session=session)
+
+    assert pool.waits == [37.0]
+    assert pool.requested == [(_PROFILE, False)]
+    assert pool.shutdowns == 0, "a caller's session must stay open"
+
+
+class _OwnedPool(_RunningPool):
+    """A pool ``fetch_zendriver`` builds itself, for a call with no session."""
+
+    made: list[_OwnedPool] = []  # noqa: RUF012 -- per-test record, reset by the test.
+
+    def __init__(self) -> None:
+        super().__init__(_FakeBrowser())
+        _OwnedPool.made.append(self)
+
+
+def test_fetch_zendriver_without_a_session_reuses_the_default_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_OwnedPool, "made", [])
+    monkeypatch.setattr(zendriver, "BrowserPool", _OwnedPool)
+    assert zendriver.fetch_zendriver("https://a.example/") == b"<html>ok</html>"
+    assert zendriver.fetch_zendriver("https://b.example/") == b"<html>ok</html>"
+    [pool] = _OwnedPool.made
+    assert default_session().browsers is pool
+    assert pool.shutdowns == 0
+
+
+def test_fetch_zendriver_reports_a_run_timeout_as_status_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TimingOutPool(_RunningPool):
+        @override
+        def run[T](
+            self,
+            coro: Coroutine[object, object, T],
+            *,
+            timeout_sec: float,
+        ) -> T:
+            coro.close()
+            raise TimeoutError
+
+    monkeypatch.setattr(zendriver, "BrowserPool", _TimingOutPool)
+    with pytest.raises(FetchError) as error:
+        zendriver.fetch_zendriver(
+            "https://a.example/",
+            session=_session(_TimingOutPool(_FakeBrowser())),
+        )
+    assert error.value.status == 0
+    assert isinstance(error.value.__cause__, TimeoutError)
+
+
+def test_fetch_zendriver_defaults_are_the_fetch_contract() -> None:
+    parameters = inspect.signature(zendriver.fetch_zendriver).parameters
+    assert cast(object, parameters["timeout_sec"].default) == 30.0
+    assert cast(object, parameters["max_redirects"].default) == 10
+    assert cast(object, parameters["allow_private_hosts"].default) is False
+    assert cast(object, parameters["session"].default) is None
+
+
+# -- _load: status, cookies, body --------------------------------------------
+
+
+def test_load_raises_on_a_page_status_of_400_or_more() -> None:
+    """Chrome renders an error page; the transport must report its status.
+
+    Without it a 403 block page reads as a successful fetch of its own markup.
+    """
+    browser = _FakeBrowser(
+        content="<html>Forbidden</html>",
+        responses=[_document_response("https://example.com/", 403)],
+    )
+    with pytest.raises(FetchError) as error:
+        _load_page(browser)
+    assert error.value.status == 403
+    assert error.value.body == b"<html>Forbidden</html>"
+
+
+def test_load_classifies_a_challenge_status_page() -> None:
+    browser = _FakeBrowser(
+        content="<html><title>Just a moment...</title></html>",
+        responses=[
+            _document_response(
+                "https://example.com/",
+                403,
+                {"cf-mitigated": "challenge"},
+            ),
+        ],
+    )
+    with pytest.raises(CloudflareChallengeError):
+        _load_page(browser, timeout_sec=0.02)
+
+
+def test_load_reports_every_page_response_and_the_landed_cookies_last() -> None:
+    browser = _FakeBrowser(
+        href="https://b.example/landing",
+        cookies=[_FakeCookie(name="B", value="2", domain="b.example")],
+        responses=[
+            _document_response("https://a.example/", 302, {"Location": "/x"}),
+            _document_response("https://b.example/landing", 200, {"X-Y": "z"}),
+            # Subresources and other frames are not pages.
+            _document_response(
+                "https://cdn.example/a.js",
+                200,
+                kind=network.ResourceType.SCRIPT,
+            ),
+            _document_response("https://ad.example/", 500, frame="iframe"),
+        ],
+    )
+    seen: list[tuple[int, dict[str, str], str]] = []
+
+    def observe(status: int, headers: dict[str, str], url: str) -> None:
+        seen.append((status, headers, url))
+
+    _load_page(browser, "https://a.example/", on_response=observe)
+    assert seen == [
+        (302, {"location": "/x"}, "https://a.example/"),
+        (200, {"x-y": "z", "set-cookie": "B=2"}, "https://b.example/landing"),
+    ]
+
+
+def test_load_returns_body_and_reports_only_domain_cookies() -> None:
+    browser = _FakeBrowser(
+        content="<html>results</html>",
+        cookies=[
+            _FakeCookie(name="SID", value="abc", domain=".gated.example"),
+            _FakeCookie(name="OTHER", value="zzz", domain="example.com"),
+            _FakeCookie(name="EMPTY", value="", domain="gated.example"),
+            _FakeCookie(name="NODOMAIN", value="v", domain=""),
+            _FakeCookie(name="BOUNDARY", value="bad", domain="ated.example"),
+        ],
+    )
+    seen: list[dict[str, str]] = []
+    body = _load_page(
+        browser,
+        "https://gated.example/page?q=x",
+        on_response=lambda _status, headers, _url: seen.append(headers),
+    )
+    assert body == b"<html>results</html>"
+    assert seen == [{"set-cookie": "SID=abc\nEMPTY="}]
+    # The per-fetch tab is closed after harvest -- the memory-teardown contract
+    # (Chrome process stays warm; the scraped page's tab does not).
+    assert browser.last_tab is not None
+    assert browser.last_tab.closed is True
+
+
+def test_load_matches_subdomain_and_exact_host_cookies() -> None:
+    browser = _FakeBrowser(
+        href="https://www.example.com/",
+        cookies=[
+            _FakeCookie(name="PARENT", value="1", domain=".example.com"),
+            _FakeCookie(name="EXACT", value="2", domain="www.example.com"),
+            _FakeCookie(name="PREFIX", value="bad", domain="xwww.example.com"),
+        ],
+    )
+    seen: list[dict[str, str]] = []
+    _load_page(browser, on_response=lambda _s, headers, _u: seen.append(headers))
+    assert seen == [{"set-cookie": "PARENT=1\nEXACT=2"}]
+
+
+def test_load_reports_no_set_cookie_when_chrome_holds_none() -> None:
+    seen: list[dict[str, str]] = []
+    _load_page(_FakeBrowser(), on_response=lambda _s, headers, _u: seen.append(headers))
+    assert seen == [{}]
+
+
+def test_load_reports_the_url_its_cookies_belong_to() -> None:
+    """The landed response must name the origin its cookies were harvested for.
+
+    Cookies are keyed to the FINAL url, because a cross-origin redirect seats
+    the target's. Reporting them under the requested URL filed ``b.example``'s
+    session cookie under ``a.example``.
+    """
+    browser = _FakeBrowser(
+        href="https://b.example/landing",
+        cookies=[_FakeCookie(name="B_SESSION", value="secret", domain="b.example")],
+    )
+    seen: list[tuple[str, dict[str, str]]] = []
+    _load_page(
+        browser,
+        "https://a.example/start",
+        on_response=lambda _s, headers, url: seen.append((url, headers)),
+    )
+    assert seen == [("https://b.example/landing", {"set-cookie": "B_SESSION=secret"})]
+
+
+def test_load_unwraps_chromes_json_viewer() -> None:
+    """A JSON response must come back as JSON, not as Chrome's viewer shell.
+
+    ``get_content`` serializes the DOM, and for a non-HTML body Chrome
+    SYNTHESIZES a document to display it: the payload is re-wrapped in
+    ``<html><head>...</head><body><pre>``. The original bytes are still there,
+    inside the ``<pre>``, HTML-escaped.
+    """
+    payload = '{"query": "x&y", "results": []}'
+    browser = _FakeBrowser(
+        content=(
+            '<html><head><meta name="color-scheme" content="light dark">'
+            '<meta charset="utf-8"></head><body>'
+            '<pre>{"query": "x&amp;y", "results": []}</pre></body></html>'
         ),
     )
-
-    assert result is browser
-    assert not any(argument.startswith("--proxy-server=") for argument in browser_args)
-    assert not any(
-        argument.startswith("--proxy-bypass-list=") for argument in browser_args
-    )
-    assert not any(
-        argument.startswith("--host-resolver-rules=") for argument in browser_args
-    )
+    assert _load_page(browser) == payload.encode()
 
 
-@pytest.mark.parametrize("headless", [True, False])
-def test_launch_browser_uses_the_browser_that_claims_no_url_scheme(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    headless: bool,
-) -> None:
-    """Chrome must come from the build that does not claim ``https``.
+def test_load_unwraps_the_real_chrome_viewer_markup() -> None:
+    """Verbatim shell captured from Chrome, not a hand-written approximation.
 
-    On zendriver's default the launch runs the installed Chrome under
-    ``com.google.Chrome``, which then receives every ``open https://...`` the
-    user's clicks produce and drops them. Headed too: the capture follows the
-    bundle id, not the window count.
+    Chrome mounts its JSON formatter in a ``<div>`` AFTER the ``</pre>``, so
+    the payload is not the last node in the body.
     """
-    captured: dict[str, object] = {}
-
-    async def fake_start(config: Config) -> _FakeBrowser:
-        captured["executable"] = config.browser_executable_path
-        captured["args"] = config()
-        return _FakeBrowser()
-
-    monkeypatch.setattr("zendriver.start", fake_start)
-    monkeypatch.setattr(
-        zendriver,
-        "_fetch_browser",
-        lambda: "/cache/ChromeForTesting",
-    )
-    asyncio.run(
-        zendriver._launch_browser(
-            tmp_path,
-            headless=headless,
+    payload = '{"query": "opensource", "results": []}'
+    browser = _FakeBrowser(
+        content=(
+            '<html><head><meta name="color-scheme" content="light dark">'
+            '<meta charset="utf-8"></head><body>'
+            f"<pre>{payload}</pre>"
+            '<div class="json-formatter-container"></div>'
+            "</body></html>"
         ),
     )
-
-    assert captured["executable"] == "/cache/ChromeForTesting"
-    # Without it Chrome for Testing raises a Safe Storage modal and blocks in
-    # startup: the process is alive, so this surfaces as a browser that
-    # launched and never exposed DevTools.
-    assert "--use-mock-keychain" in cast(list[str], captured["args"])
+    assert _load_page(browser) == payload.encode()
 
 
-def test_launch_browser_falls_back_when_no_reidentified_chrome(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Linux, or a macOS host whose clone failed: launch exactly as before.
-
-    ``Config`` resolves an installed Chrome for a falsy path, so ``""`` is
-    already "find Chrome yourself" and needs no ``or None`` at the call site.
-    Asserted against a default ``Config`` rather than a literal: the point is
-    that the empty path is indistinguishable from passing nothing.
-    """
-    captured: dict[str, object] = {}
-
-    async def fake_start(config: Config) -> _FakeBrowser:
-        captured["executable"] = config.browser_executable_path
-        captured["args"] = config()
-        return _FakeBrowser()
-
-    monkeypatch.setattr("zendriver.start", fake_start)
-    monkeypatch.setattr(
-        zendriver,
-        "_fetch_browser",
-        lambda: "",
-    )
-    asyncio.run(
-        zendriver._launch_browser(
-            tmp_path,
-            headless=True,
-        ),
-    )
-
-    assert captured["executable"] == Config().browser_executable_path
-    # Stock Chrome already holds its Keychain entry, so mocking it here would
-    # cut the operator's own browser off from cookies it legitimately has.
-    assert "--use-mock-keychain" not in cast(list[str], captured["args"])
+def test_load_leaves_real_html_alone() -> None:
+    """A genuine page containing a ``<pre>`` must not be reduced to it."""
+    content = "<html><body><h1>Title</h1><pre>code sample</pre></body></html>"
+    assert _load_page(_FakeBrowser(content=content)) == content.encode()
 
 
-def test_the_pool_leaves_zendriver_spawn_alone(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Launching must NOT patch the vendor's private spawn helper.
-
-    A patch injecting ``preexec_fn=die_with_parent`` lived here, and it armed a
-    parent-death signal that Linux scopes to the LAUNCHING THREAD. Every pooled
-    browser is launched from the pool's disposable loop thread, so the kernel
-    SIGKILLs a live browser the moment that thread exits -- measured on real
-    Chrome as `rc=-9`, against a control where the same launch from a
-    long-lived thread survived.
-
-    Teardown is `atexit` instead: process-scoped, and it fires on the ordinary
-    exit that actually leaked.
-    """
-    util = importlib.import_module("zendriver.core.util")
-    vendor = cast(Callable[..., object], util._start_process)
-
-    async def fake_start(config: Config) -> _FakeBrowser:
-        del config
-        return _FakeBrowser()
-
-    monkeypatch.setattr("zendriver.start", fake_start)
-    asyncio.run(
-        zendriver._launch_browser(
-            tmp_path,
-            headless=True,
-        ),
-    )
-
-    assert cast(Callable[..., object], util._start_process) is vendor, (
-        "the pool patched zendriver's spawn; a thread-scoped parent-death "
-        "signal kills pooled browsers when the pool's loop thread exits"
-    )
+def test_load_seeds_cookies_for_the_requested_url() -> None:
+    browser = _FakeBrowser()
+    _load_page(browser, "https://google.com/search?q=x", cookies={"CONSENT": "YES+"})
+    assert [(c.name, c.value, c.url) for c in browser.cookies.seeded] == [
+        ("CONSENT", "YES+", "https://google.com/search?q=x"),
+    ]
 
 
-def test_creating_the_pool_registers_process_exit_teardown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A pool that can open browsers must also close them at process exit.
-
-    Nothing else ever closes one: an ordinary exit left 378 Chrome processes
-    holding 27.5 GiB, and 225 of those outlived the session that spawned them.
-    Registered on pool CREATION, so a process that never fetches pays nothing.
-    """
-    registered: list[object] = []
-
-    def stub_pool() -> object:
-        """Stand in for the pool, so no loop thread or browser is created."""
-        return object()
-
-    monkeypatch.setattr(atexit, "register", registered.append)
-    monkeypatch.setattr(
-        zendriver,
-        "_pool_singleton",
-        None,
-    )
-    monkeypatch.setattr(
-        zendriver,
-        "_BrowserPool",
-        stub_pool,
-    )
-
-    zendriver._pool()
-
-    assert zendriver.shutdown_browsers in registered
+def test_load_seeds_no_cookies_when_none_given() -> None:
+    browser = _FakeBrowser()
+    _load_page(browser)
+    assert browser.cookies.seeded == []
 
 
-# -- headed/backend navigation parity -----------------------------------------
-
-
-def test_open_instance_uses_blank_tab_before_requested_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_load_opens_the_agent_tab_before_the_requested_url() -> None:
     url = "https://gated.example/page?q=x"
     browser = _FakeBrowser()
-    browser.stopped = True
-
-    async def fake_launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
-        assert profile_dir == _PROFILE
-        assert headless is False
-        return browser
-
-    monkeypatch.setattr(
-        zendriver,
-        "_launch_browser",
-        fake_launch,
-    )
-    asyncio.run(zendriver._open_instance(url, cast(Browser, browser)))
-
-    assert browser.gets == ["about:blank"]
+    _load_page(browser, url)
+    assert browser.gets == ["about:blank#wesearch-agent"]
     assert browser.last_tab is not None
     assert browser.last_tab.navigations == [url]
 
 
-class _RefusingTab(_FakeTab):
-    """A tab whose navigation fails, driving ``_open_instance``'s cleanup."""
+def test_load_settles_on_half_the_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page still walled at half the budget returns its wall, not a timeout."""
+    budgets: list[float] = []
+    real_wait_for = asyncio.wait_for
 
-    @override
-    async def get(self, url: str) -> _FakeTab:
-        del url
-        raise RuntimeError("navigation refused")
+    async def record(
+        awaitable: Awaitable[object],
+        timeout: float | None = None,  # noqa: ASYNC109 -- mirrors asyncio.wait_for.
+    ) -> object:
+        budgets.append(-1.0 if timeout is None else timeout)
+        return await real_wait_for(awaitable, timeout)
 
-
-class _HangingStopBrowser(_FakeBrowser):
-    """A browser whose ``stop`` never returns, as a wedged connection's does.
-
-    ``Browser.stop`` awaits ``connection.send(cdp.browser.close())`` with no
-    ceiling of its own; its ``except Exception`` cannot help, because an await
-    that never returns raises nothing to catch.
-    """
-
-    @override
-    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
-        del new_tab
-        self.gets.append(url)
-        self.last_tab = _RefusingTab(content="<html>ok</html>", href="")
-        return self.last_tab
-
-    @override
-    async def stop(self) -> None:
-        self.stop_calls += 1
-        await asyncio.Event().wait()
-        raise AssertionError("The browser stop was never bounded.")
-
-
-def test_a_wedged_browser_stop_gives_up_at_its_budget() -> None:
-    """``_stopped`` must return on a stop that never does.
-
-    Driven directly on a SMALL budget: the real default matches the pool's 30s
-    ceiling, and asserting against that would make this test cost 30 seconds to
-    prove a bound that a fraction of a second proves just as well.
-    """
-    browser = _HangingStopBrowser()
-
-    async def go() -> float:
-        started = time.monotonic()
-        await zendriver._stopped(
-            cast(Browser, browser),
-            budget_sec=0.01,
-        )
-        return time.monotonic() - started
-
-    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=1.0))
-    assert browser.stop_calls == 1, "the browser was never asked to stop"
-    assert elapsed < 0.5, f"stop outlived its 0.01s budget: {elapsed:.2f}s"
-
-
-def test_open_instance_reports_the_setup_error_a_wedged_stop_would_bury(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Failed setup must report ITS error, not park in the cleanup.
-
-    ``_open_instance`` stops the browser under ``except BaseException`` when
-    navigation fails, and nothing above supplies a ceiling: ``open_instance``
-    calls ``_pool().run`` with no ``timeout_sec``, which waits forever by
-    contract. Unbounded, a wedged stop therefore turns a reportable navigation
-    error into a CLI that hangs having printed nothing.
-
-    The budget is shrunk rather than waited out -- what this asserts is that
-    the cleanup routes through the bounded helper at all, which the 0.01s
-    substitution shows in the same way 30s would.
-    """
-    browser = _HangingStopBrowser()
-
-    async def fake_launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
-        del profile_dir, headless
-        return browser
-
-    monkeypatch.setattr(
-        zendriver,
-        "_launch_browser",
-        fake_launch,
+    monkeypatch.setattr(asyncio, "wait_for", record)
+    browser = _FakeBrowser(
+        documents=["<html><title>Just a moment...</title></html>", "<html>ok</html>"],
     )
-    monkeypatch.setattr(
-        zendriver,
-        "_stopped",
-        partial(zendriver._stopped, budget_sec=0.01),
-    )
-
-    async def go() -> float:
-        started = time.monotonic()
-        with pytest.raises(RuntimeError, match="navigation refused"):
-            await zendriver._open_instance(
-                "https://gated.example/page",
-                cast(Browser, browser),
-            )
-        return time.monotonic() - started
-
-    # The outer ceiling must fail instead of accepting a buried setup error.
-    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=1.0))
-    assert browser.stop_calls == 1, "the browser was never asked to stop"
-    assert elapsed < 0.5, f"cleanup outlived its budget: {elapsed:.2f}s"
+    assert _load_page(browser, timeout_sec=8.0) == b"<html>ok</html>"
+    assert 3.9 < budgets[0] <= 4.0, budgets
 
 
-class _RaisingStopBrowser(_FakeBrowser):
-    """A browser whose ``stop`` fails outright rather than hanging."""
+def test_load_timeout_includes_browser_acquisition() -> None:
+    class _SlowPool:
+        async def browser(self, profile_dir: Path, *, headless: bool) -> _FakeBrowser:
+            del profile_dir, headless
+            await asyncio.Event().wait()
+            raise AssertionError("Browser acquisition escaped the timeout.")
 
-    @override
-    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
-        del new_tab
-        self.gets.append(url)
-        self.last_tab = _RefusingTab(content="<html>ok</html>", href="")
-        return self.last_tab
-
-    @override
-    async def stop(self) -> None:
-        self.stop_calls += 1
-        raise RuntimeError("stop blew up")
-
-
-def test_a_failing_browser_stop_does_not_replace_the_error_it_cleans_up_after(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cleanup must never outrank the failure that triggered it.
-
-    ``_stopped`` bounds a stop that HANGS, but an ordinary exception from it
-    propagates out of the ``except BaseException`` block and replaces the
-    navigation error in flight -- so the operator is told the browser would not
-    close, and never told why the page failed. A cleanup that reports its own
-    trouble instead of the caller's is strictly worse than one that says
-    nothing.
-    """
-    browser = _RaisingStopBrowser()
-
-    async def fake_launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
-        del profile_dir, headless
-        return browser
-
-    monkeypatch.setattr(
-        zendriver,
-        "_launch_browser",
-        fake_launch,
-    )
-
-    with pytest.raises(RuntimeError, match="navigation refused"):
+    with pytest.raises(TimeoutError):
         asyncio.run(
-            zendriver._open_instance(
-                "https://gated.example/page",
-                cast(Browser, browser),
+            _load(
+                cast(BrowserPool, _SlowPool()),
+                "https://example.com/",
+                profile_dir=_PROFILE,
+                headless=True,
+                headers={},
+                cookies={},
+                timeout_sec=0.001,
+                max_redirects=10,
+                on_redirect=ignore,
+                on_response=ignore,
+                allow_private_hosts=False,
             ),
         )
-    assert browser.stop_calls == 1, "the browser was never asked to stop"
-
-
-def test_a_wedged_browser_stop_kills_the_process() -> None:
-    """A stop that never returns must not leave the browser running.
-
-    Abandoning it leaks the whole Chrome tree, and the leaked root holds its
-    profile's ``SingletonLock``, so the next launch on that profile fails with
-    no usable diagnosis.
-    """
-    browser = _HangingStopBrowser()
-    process = _FakeProcess()
-    browser._process = process
-
-    asyncio.run(
-        zendriver._stopped(
-            cast(Browser, browser),
-            budget_sec=0.01,
-        ),
-    )
-
-    assert process.kills == 1, "a wedged browser was abandoned rather than killed"
-
-
-def test_a_failing_browser_stop_kills_the_process() -> None:
-    """A stop that raises leaks exactly as a wedged one does."""
-    browser = _RaisingStopBrowser()
-    process = _FakeProcess()
-    browser._process = process
-
-    asyncio.run(
-        zendriver._stopped(
-            cast(Browser, browser),
-            budget_sec=1.0,
-        ),
-    )
-
-    assert process.kills == 1, "a failed stop abandoned the browser"
-
-
-def test_killing_a_browser_that_was_never_launched_is_a_no_op() -> None:
-    """Cleanup must not raise when there is no process handle.
-
-    It runs with the caller's real error in flight, so anything raised here
-    would replace it.
-    """
-    zendriver._kill_browser_process(
-        cast(Browser, _FakeBrowser()),
-    )
 
 
 class _RaisingCloseTab(_FakeTab):
@@ -856,336 +952,182 @@ class _RaisingCloseBrowser(_FakeBrowser):
         return self.last_tab
 
 
-def test_a_failing_tab_close_does_not_mask_the_fetch_it_cleans_up_after(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same rule for the tab: teardown reports nothing over the caller.
+def test_a_failing_tab_close_does_not_mask_the_fetch_it_cleans_up_after() -> None:
+    """Teardown reports nothing over the caller.
 
-    ``_closed`` runs from ``_navigate``'s ``finally``, so an exception it lets
-    escape replaces whatever the fetch was about to return OR raise -- turning
-    a harvested page into a teardown error the caller cannot act on.
+    The tab close runs in ``_load``'s ``finally``, so an exception it let
+    escape would replace whatever the fetch was about to return OR raise.
     """
-    browser = _RaisingCloseBrowser()
-    _patch_pool(monkeypatch, browser)
-
-    result = asyncio.run(
-        _navigate(
-            "https://example.com/",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert result.body == b"<html><title>Plain</title>ok</html>"
+    assert _load_page(_RaisingCloseBrowser()) == b"<html><title>Plain</title>ok</html>"
 
 
-class _SlowCancelTab(_FakeTab):
-    """A tab whose close hangs, then does real work while cancelling."""
+class _WedgedTab(_FakeTab):
+    """A tab whose navigation AND close both never return.
 
-    def __init__(
-        self,
-        *,
-        content: str = "<html>ok</html>",
-        href: str = "",
-        documents: list[str] | None = None,
-        parsing: str | None = None,
-        paused_events: list[object] | None = None,
-    ) -> None:
-        super().__init__(
-            content=content,
-            href=href,
-            documents=documents,
-            parsing=parsing,
-            paused_events=paused_events,
-        )
-        self.finalized = False
+    Models one wedged CDP connection: ``Tab.get`` waits on a load event that
+    never arrives, and ``Tab.close`` then awaits a reply with no ceiling.
+    """
+
+    @override
+    async def get(self, url: str) -> _FakeTab:
+        self.navigations.append(url)
+        await asyncio.Event().wait()
+        raise AssertionError("The navigation was never cancelled.")
 
     @override
     async def close(self) -> None:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            # A real close releases the target and deregisters its handler;
-            # both are awaits, so cancellation does not finish them instantly.
-            await asyncio.sleep(0)
-            self.finalized = True
-            raise
+        self.closed = True
+        await asyncio.Event().wait()
+        raise AssertionError("The close was never bounded.")
 
 
-def test_an_abandoned_tab_close_is_reaped_before_the_helper_returns() -> None:
-    """A timed-out close must not outlive the call that gave up on it.
+class _WedgedBrowser(_FakeBrowser):
+    """A browser handing out :class:`_WedgedTab`."""
 
-    ``cancel()`` only REQUESTS cancellation; without awaiting the task, the
-    helper returns while it is still pending. Under ``asyncio.run`` the loop
-    dies immediately and hides this, but the pool's loop is persistent
-    (``_BrowserPool._run_loop`` runs forever), so the task survives --
-    finalizing late, or never, and raising into a loop nobody is watching.
+    @override
+    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+        del new_tab
+        self.gets.append(url)
+        self.last_tab = _WedgedTab(content="<html>ok</html>", href="")
+        return self.last_tab
+
+
+def test_load_reports_its_own_timeout_when_teardown_also_wedges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled load must still finish, so the caller sees the budget.
+
+    An ``asyncio.timeout`` scope delivers exactly ONE cancellation. When it
+    lands on the navigation, the tab close runs with that cancellation already
+    spent -- so an unbounded close parks there forever and the coroutine NEVER
+    completes. The close's own 5s ceiling is shrunk to keep this fast.
     """
-    tab = _SlowCancelTab(content="<html>ok</html>", href="")
+    browser = _WedgedBrowser()
+    real_timeout = asyncio.timeout
+    budgets: list[float | None] = []
 
-    async def go() -> tuple[int, bool]:
+    def timeout(delay: float | None) -> asyncio.Timeout:
+        budgets.append(delay)
+        return real_timeout(0.01 if delay == 5.0 else delay)
+
+    monkeypatch.setattr(asyncio, "timeout", timeout)
+
+    async def go() -> float:
         before = asyncio.all_tasks()
-        await zendriver._closed(
-            cast(Tab, tab),
-            budget_sec=0.01,
-        )
-        leaked = [task for task in asyncio.all_tasks() - before if not task.done()]
-        return len(leaked), tab.finalized
+        started = time.monotonic()
+        with pytest.raises(TimeoutError) as error:
+            await _drive(browser, timeout_sec=0.01)
+        assert isinstance(error.value.__cause__, asyncio.CancelledError)
+        assert asyncio.all_tasks() - before == set(), "the close task was not reaped"
+        return time.monotonic() - started
 
-    pending, finalized = asyncio.run(asyncio.wait_for(go(), timeout=10.0))
-    assert pending == 0, (
-        f"{pending} close task(s) still pending after the helper returned"
-    )
-    assert finalized, "the abandoned close never ran its cleanup"
-
-
-def test_devtools_port_falls_back_to_singleton_owner(tmp_path: Path) -> None:
-    profile = tmp_path / "profile"
-    process = tmp_path / "proc" / "123"
-    profile.mkdir()
-    process.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("host-123")
-    (process / "cmdline").write_bytes(
-        b"/opt/google/chrome/chrome\0"
-        + f"--user-data-dir={profile}\0".encode()
-        + b"--remote-debugging-port=4567\0"
-        + b"about:blank\0",
-    )
-
-    assert (
-        zendriver._devtools_port(
-            profile,
-            proc_root=tmp_path / "proc",
-        )
-        == 4567
-    )
+    # Outside ``raises``: an unbounded close must fail on the outer deadline.
+    elapsed = asyncio.run(real_timeout_wait(go(), 1.0))
+    assert elapsed < 0.5, f"teardown outlived its budget: {elapsed:.2f}s"
+    assert budgets == [0.01, 5.0]
+    assert browser.last_tab is not None
+    assert browser.last_tab.navigations == ["https://example.com/"]
+    assert browser.last_tab.closed
 
 
-def test_devtools_port_reads_the_macos_profile_owner(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    (profile / "SingletonLock").symlink_to("host-123")
-
-    def fake_run(
-        args: list[str],
-        *,
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[str]:
-        assert args == ["/bin/ps", "-p", "123", "-o", "command="]
-        assert capture_output
-        assert text
-        assert not check
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout=(
-                "/opt/google/chrome/chrome "
-                f"--user-data-dir={profile} "
-                "--remote-debugging-port=4567 about:blank\n"
-            ),
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    assert (
-        zendriver._devtools_port(
-            profile,
-            proc_root=tmp_path / "proc",
-            platform="darwin",
-        )
-        == 4567
-    )
+async def real_timeout_wait[T](coro: Coroutine[object, object, T], delay: float) -> T:
+    """Await ``coro`` under ``asyncio.wait_for``, untouched by a patched timeout."""
+    return await asyncio.wait_for(coro, timeout=delay)
 
 
-def test_devtools_port_rejects_different_profile_with_shared_prefix(
-    tmp_path: Path,
-) -> None:
-    profile = tmp_path / "profile"
-    process = tmp_path / "proc" / "123"
-    profile.mkdir()
-    process.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("host-123")
-    (process / "cmdline").write_text(
-        "/opt/google/chrome/chrome "
-        f"--user-data-dir={profile}-other "
-        "--remote-debugging-port=4567",
-    )
+def test_load_uses_one_overall_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every step wait must shrink against ONE deadline, never restart it.
 
-    assert (
-        zendriver._devtools_port(
-            profile,
-            proc_root=tmp_path / "proc",
-        )
-        is None
-    )
-
-
-def test_devtools_port_rejects_stale_marker_without_profile_owner(
-    tmp_path: Path,
-) -> None:
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    (profile / "DevToolsActivePort").write_text("4567\n/devtools/browser/id\n")
-
-    assert (
-        zendriver._devtools_port(
-            profile,
-            proc_root=tmp_path / "proc",
-        )
-        is None
-    )
-
-
-# -- _navigate: body + cookie harvest ----------------------------------------
-
-
-def test_navigate_returns_body_and_domain_cookies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
+    A CHALLENGE page, not a clear one: the settle loop returns on its first
+    read when the document is already clear, so a clear page never reaches the
+    two step waits and the assertion below has nothing to observe.
+    """
     browser = _FakeBrowser(
-        content="<html>results</html>",
-        cookies=[
-            _FakeCookie(name="SID", value="abc", domain=".gated.example"),
-            _FakeCookie(name="OTHER", value="zzz", domain="example.com"),
-        ],
+        documents=["<html><title>Just a moment...</title></html>", "<html>ok</html>"],
     )
-    _patch_pool(monkeypatch, browser)
-    result = asyncio.run(
-        _navigate(
-            "https://gated.example/page?q=x",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
+    budgets: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def record_budget(
+        awaitable: Awaitable[object],
+        timeout: float | None = None,  # noqa: ASYNC109 -- The browser test timeout bounds polling across an awaited operation.
+    ) -> object:
+        budgets.append(-1.0 if timeout is None else timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", record_budget)
+    _load_page(browser, timeout_sec=5.0)
+
+    assert len(budgets) >= 2, f"the settle path never reached its step waits: {budgets}"
+    assert all(timeout >= 0.0 for timeout in budgets), (
+        f"a step wait was left unbounded: {budgets}"
     )
-    assert result.body == b"<html>results</html>"
-    # Only the domain-matching cookie is harvested; the foreign one is dropped.
-    assert result.cookies == {"SID": "abc"}
-    # The per-fetch tab is closed after harvest -- the memory-teardown contract
-    # (Chrome process stays warm; the scraped page's tab does not).
+    assert budgets == sorted(budgets, reverse=True), (
+        f"step waits did not shrink against one deadline: {budgets}"
+    )
+    assert max(budgets) <= 5.0 / 2, f"a step wait exceeded the settle budget: {budgets}"
+
+
+def test_load_returns_a_rendered_widget_page_without_classifying_it() -> None:
+    body = '<html><div id="cf_chl_widget"></div></html>'
+    # Small: this body IS challenge markup, so the settle poll waits out its
+    # budget before giving up.
+    assert _load_page(_FakeBrowser(content=body), timeout_sec=0.02) == body.encode()
+
+
+def test_load_waits_out_a_cloudflare_interstitial() -> None:
+    # The interstitial reaches readyState "complete" on its own -- it IS a loaded
+    # document -- and only then does its JS navigate to the real page (measured
+    # live: 5516 bytes at complete, 380404 bytes after the handoff).
+    real = "<html><title>Real Page</title>body</html>"
+    browser = _FakeBrowser(
+        documents=["<html><title>Just a moment...</title></html>", real],
+    )
+    assert _load_page(browser, "https://walled.example/", timeout_sec=30.0) == (
+        real.encode()
+    ), "browser transport returned the Cloudflare interstitial"
+
+
+def test_load_waits_for_the_new_document_to_parse() -> None:
+    # A main-frame navigation COMMITS the new document before it parses, so a
+    # read right after the event sees a bare <head>: right title, no body.
+    real = "<html><title>Real Page</title>the whole body</html>"
+    browser = _FakeBrowser(
+        documents=["<html><title>Just a moment...</title></html>", real],
+        parsing="<html><title>Real Page</title></html>",
+    )
+    assert _load_page(browser, "https://walled.example/", timeout_sec=30.0) == (
+        real.encode()
+    ), "harvested the document mid-parse: right title, empty body"
+
+
+def test_load_returns_promptly_when_no_challenge() -> None:
+    # A plain document is harvested on the FIRST read, with no re-poll.
+    browser = _FakeBrowser(content="<html><title>Plain</title>ok</html>")
+    assert _load_page(browser, timeout_sec=30.0) == (
+        b"<html><title>Plain</title>ok</html>"
+    )
+    assert browser.last_tab is not None
+    assert browser.last_tab.content_reads == 1
+
+
+def test_load_gives_up_on_an_unclearable_challenge() -> None:
+    # A challenge that never clears must return what Chrome rendered, never hang.
+    walled = "<html><title>Just a moment...</title></html>"
+    browser = _FakeBrowser(content=walled)
+    assert _load_page(browser, "https://walled.example/", timeout_sec=0.02) == (
+        walled.encode()
+    )
     assert browser.last_tab is not None
     assert browser.last_tab.closed is True
 
 
-def test_navigate_reports_the_url_its_cookies_belong_to(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The result must name the origin its cookies were harvested for.
-
-    Cookies are keyed to the FINAL url, because a cross-origin redirect seats
-    the target's. Returning them without saying so left the caller filing
-    ``b.example``'s session cookie under ``a.example`` -- and sending it back
-    to ``a.example`` on the next fetch.
-    """
-    browser = _FakeBrowser(
-        href="https://b.example/landing",
-        cookies=[_FakeCookie(name="B_SESSION", value="secret", domain="b.example")],
-    )
-    _patch_pool(monkeypatch, browser)
-    result = asyncio.run(
-        _navigate(
-            "https://a.example/start",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert result.cookies == {"B_SESSION": "secret"}
-    assert result.final_url == "https://b.example/landing"
+def test_load_allows_embedded_captcha_on_rendered_page() -> None:
+    body = '<html><div class="g-recaptcha"></div></html>'
+    assert _load_page(_FakeBrowser(content=body)) == body.encode()
 
 
-def test_navigate_unwraps_chromes_json_viewer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A JSON response must come back as JSON, not as Chrome's viewer shell.
-
-    ``get_content`` serializes the DOM, and for a non-HTML body Chrome
-    SYNTHESIZES a document to display it: the payload is re-wrapped in
-    ``<html><head>...</head><body><pre>``. A caller that asked a JSON endpoint
-    for JSON then gets markup around valid data and fails to parse it. The
-    original bytes are still there, inside the ``<pre>``.
-    """
-    payload = '{"query": "x", "results": []}'
-    browser = _FakeBrowser(
-        content=(
-            '<html><head><meta name="color-scheme" content="light dark">'
-            '<meta charset="utf-8"></head><body>'
-            f"<pre>{payload}</pre></body></html>"
-        ),
-    )
-    _patch_pool(monkeypatch, browser)
-    result = asyncio.run(
-        _navigate(
-            "https://search.example/search?format=json",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert result.body == payload.encode()
-
-
-def test_navigate_unwraps_the_real_chrome_viewer_markup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verbatim shell captured from Chrome, not a hand-written approximation.
-
-    Chrome mounts its JSON formatter in a ``<div>`` AFTER the ``</pre>``, so
-    the payload is not the last node in the body. A pattern requiring
-    ``</pre></body>`` adjacency matched an invented fixture and missed every
-    real response -- the fixture agreed with the code because the same
-    assumption wrote both.
-    """
-    payload = '{"query": "opensource", "results": []}'
-    browser = _FakeBrowser(
-        content=(
-            '<html><head><meta name="color-scheme" content="light dark">'
-            '<meta charset="utf-8"></head><body>'
-            f"<pre>{payload}</pre>"
-            '<div class="json-formatter-container"></div>'
-            "</body></html>"
-        ),
-    )
-    _patch_pool(monkeypatch, browser)
-    result = asyncio.run(
-        _navigate(
-            "https://search.example/search?format=json",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert result.body == payload.encode()
-
-
-def test_navigate_leaves_real_html_alone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A genuine page containing a ``<pre>`` must not be reduced to it."""
-    content = "<html><body><h1>Title</h1><pre>code sample</pre></body></html>"
-    browser = _FakeBrowser(content=content)
-    _patch_pool(monkeypatch, browser)
-    result = asyncio.run(
-        _navigate(
-            "https://example.com/article",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert result.body == content.encode()
+# -- _load page guard: redirect hops, pinning, credentials -------------------
 
 
 def _continued_headers(tab: _FakeTab) -> dict[str, str]:
@@ -1218,12 +1160,8 @@ def _continued_headers(tab: _FakeTab) -> dict[str, str]:
     }
 
 
-# Distinct from :func:`_continued_headers`, which reports what the override said: the
-# question here is whether an override was sent AT ALL. That is the property under test,
-# because an override is unreliable whatever it carries -- ``Cookie`` applies
-# intermittently and no override survives a redirect hop (see
-# :func:`~wesearch.fetch.transport.zendriver._continue`) -- so sending one at all
-# is the hazard, not any value inside it.
+# Whether an override was sent AT ALL: ``Cookie`` applies intermittently under one and
+# no override survives a redirect hop, so sending one is the hazard.
 def _continue_override(tab: _FakeTab) -> dict[str, str] | None:
     """Return the header OVERRIDE the guard sent, or ``None`` if it sent none."""
     payload = next(
@@ -1262,13 +1200,8 @@ def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
     return {name.lower(): from_plain(value, str) for name, value in installed.items()}
 
 
-# The genuine CDP dataclass, not a look-alike: the guard filters on ``isinstance``, so a
-# stand-in would satisfy the fake and be ignored in production -- the direction a test
-# must never fail in.
-#
 # ``headers`` are the ones Chrome reports ALREADY on the paused request, which include
-# whatever ``set_extra_http_headers`` installed on the tab -- the replay this guard
-# exists to trim.
+# whatever ``set_extra_http_headers`` installed on the tab.
 def _request_paused(
     url: str,
     headers: dict[str, str] | None = None,
@@ -1297,27 +1230,13 @@ def _request_paused(
     )
 
 
-class TestBrowserHonorsTrustPerHop:
+class TestBrowserHonorsPrivateHostsPerHop:
     """Chrome follows redirects itself, so each hop must be checked before it runs.
 
-    The header transports re-validate every hop (both call ``pinned_host`` per
-    hop) because ``common.py`` states the rule: "A redirect target is a URL like
-    any other and must be re-checked; skipping that is the classic SSRF
-    bypass." The browser leg reached the same rule through a different
-    door -- it validated the URL the CALLER passed and then handed navigation to
-    Chrome, which fetched every subsequent hop with nothing watching.
+    The header transports re-validate every hop; the browser leg once validated
+    only the URL the CALLER passed and then handed navigation to Chrome, which
+    fetched every subsequent hop with nothing watching.
     """
-
-    def test_fetch_zendriver_accepts_trust(self) -> None:
-        # The signature IS the enforcement: a transport that cannot express the
-        # policy cannot be held to it, and no reviewer of the call site sees the
-        # gap because that line does call ``pinned_host``.
-        assert (
-            "trust"
-            in inspect.signature(
-                zendriver.fetch_zendriver,
-            ).parameters
-        )
 
     @classmethod
     def _run(
@@ -1325,160 +1244,88 @@ class TestBrowserHonorsTrustPerHop:
         browser: _FakeBrowser,
         *,
         url: str = "https://public.example/start",
-        trust: Trust = "untrusted",
-        on_redirect: Callable[[str], None] | None = None,
+        allow_private_hosts: bool = False,
+        on_redirect: Callable[[str], None] = ignore,
         headers: dict[str, str] | None = None,
+        max_redirects: int = 10,
     ) -> _FakeTab:
-        """Drive one navigation and return the tab that served it."""
+        """Drive one load and return the tab that served it."""
         asyncio.run(
-            _navigate(
+            _drive(
+                browser,
                 url,
-                profile_dir=_PROFILE,
-                timeout_sec=5.0,
-                headless=True,
-                trust=trust,
                 headers=headers,
+                allow_private_hosts=allow_private_hosts,
                 on_redirect=on_redirect,
+                max_redirects=max_redirects,
             ),
         )
         assert browser.last_tab is not None
         return browser.last_tab
 
-    def test_a_hop_adding_no_header_keeps_chromes_own_header_set(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_a_hop_adding_no_header_keeps_chromes_own_header_set(self) -> None:
         """A guard that adds nothing must not rewrite the request's headers.
 
-        An override on ``Fetch.continueRequest`` is unreliable by documented
-        behavior, so echoing headers back can only subtract:
-
-        - ``Cookie`` is overridden INTERMITTENTLY (crbug 40762053: "only 3 of
-          21 requests ... have the cookie override"), and a clearance cookie
-          that rides only sometimes reads as an unsolved challenge.
-        - Overrides "do not extend to subsequent redirect hops" (CDP ``Fetch``
-          docs), and the clear IS a redirect chain -- measured GET, POST, GET.
-
-        Measured against one live Cloudflare-fronted URL, interleaved with the
-        no-override control on a fresh egress, same browser and profile, the
-        only difference being the continue verb::
-
-            continue_request(id, headers=[echo of request.headers])
-                ->  5619 / 5696 bytes, "Just a moment..."
-            continue_request(id)
-                -> 405954 / 405978 bytes, the real page
-
-        Interleaving is load-bearing: Cloudflare scores the EGRESS, so a
-        sequential A-then-B run degrades under its own probing and the control
-        stops clearing -- which reads as an arm effect and is not one.
+        An override on ``Fetch.continueRequest`` is unreliable: ``Cookie`` is
+        overridden INTERMITTENTLY (crbug 40762053), and overrides do not extend
+        to later redirect hops. Measured live, an echo override got Cloudflare's
+        wall where the no-override control got the page.
         """
         browser = _FakeBrowser(
             paused_events=[
                 _request_paused("https://public.example/next", {"accept": "text/html"}),
             ],
         )
-        _patch_pool(monkeypatch, browser)
         tab = self._run(browser)
         assert tab.continued_requests == ["req-1"]
         assert _continue_override(tab) is None
 
-    def test_a_cross_origin_hop_drops_the_credential_without_rewriting(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Withholding a header is not a reason to replace Chrome's set.
-
-        The credential is dropped by never installing it tab-wide (see
-        ``test_origin_bound_headers_are_never_installed_tab_wide``), so Chrome
-        never had it on this hop to begin with. Overriding here would add the
-        bot-detection tell above while removing nothing.
-        """
-        browser = _FakeBrowser(
-            paused_events=[
-                _request_paused("https://evil.example/steal", {"accept": "text/html"}),
-            ],
-        )
-        _patch_pool(monkeypatch, browser)
-        tab = self._run(
-            browser,
-            headers={"Authorization": "Bearer secret", "Accept": "text/html"},
-        )
-        assert _continue_override(tab) is None
-
-    def test_caller_headers_do_not_cross_an_origin_boundary(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_caller_headers_do_not_cross_an_origin_boundary(self) -> None:
         """A caller credential must not follow a redirect to another origin.
 
         ``set_extra_http_headers`` is TAB-scoped, so Chrome re-sends whatever
-        was installed on every hop that tab makes. An ``Authorization`` seeded
-        for the requested origin therefore reached a redirect target the caller
-        never chose. The header transports already refuse this: ``common.py``
-        rewrites ``Origin`` cross-origin for the same reason.
+        was installed on every hop that tab makes. The credential is withheld
+        from it and the cross-origin hop continues without an override.
         """
-        # Chrome reports only what was installed tab-wide, which is the
-        # origin-free subset; the credential is attached by the guard, per hop.
         browser = _FakeBrowser(
             paused_events=[
                 _request_paused("https://evil.example/steal", {"accept": "text/html"}),
             ],
         )
-        _patch_pool(monkeypatch, browser)
         tab = self._run(
             browser,
             headers={"Authorization": "Bearer secret", "Accept": "text/html"},
         )
-        # Asserted on what the hop CARRIES, not on how it was assembled: the
-        # request continues without an override, so it carries exactly Chrome's
-        # own set, and the credential is absent from that set because it was
-        # never installed tab-wide.
         assert _continue_override(tab) is None
         assert "authorization" not in _extra_http_headers(tab)
         # A non-credential header is not the hazard and must still travel.
         assert _extra_http_headers(tab).get("accept") == "text/html"
 
-    def test_caller_headers_survive_a_same_origin_hop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Same origin is what the header was seeded FOR; stripping there would
-        # break every authenticated fetch that redirects internally.
+    def test_caller_headers_survive_a_same_origin_hop(self) -> None:
+        # Same origin is what the header was seeded FOR.
         browser = _FakeBrowser(
             paused_events=[_request_paused("https://public.example/next")],
         )
-        _patch_pool(monkeypatch, browser)
         tab = self._run(browser, headers={"Authorization": "Bearer secret"})
-        assert "authorization" in _continued_headers(tab)
+        assert _continued_headers(tab)["authorization"] == "Bearer secret"
 
     def test_an_entitled_header_replaces_chromes_row_rather_than_adding_one(
         self,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """One header name must yield ONE row, whatever case the caller used.
 
-        HTTP field names are case-insensitive, but a dict merge is not: Chrome
-        reports the paused request's headers Title-Cased (measured:
-        ``['Accept', 'Cookie', 'Upgrade-Insecure-Requests', 'User-Agent']``),
-        so a caller spelling one lower-case produced BOTH keys and the override
-        emitted two rows for it. ``fetch.py`` collapses exactly this on the curl
-        leg and names the cost: "Two dict keys ... would emit two Cookie lines
-        on the wire -- a bot tell."
-
-        ``Cookie`` is the case that can actually collide, because unlike
-        ``Authorization`` it is not withheld from the tab-wide install, so
-        Chrome holds one of its own.
+        Chrome reports the paused request's headers Title-Cased, so a caller
+        spelling one lower-case produced BOTH keys and two rows on the wire.
         """
         browser = _FakeBrowser(
             paused_events=[
                 _request_paused(
                     "https://public.example/next",
-                    {"Cookie": "chrome=own"},
+                    {"Authorization": "chrome-own", "Accept": "text/html"},
                 ),
             ],
         )
-        _patch_pool(monkeypatch, browser)
-        tab = self._run(browser, headers={"cookie": "caller=seeded"})
+        tab = self._run(browser, headers={"authorization": "caller"})
         payload = next(
             c
             for c in tab.wire_commands
@@ -1499,28 +1346,19 @@ class TestBrowserHonorsTrustPerHop:
             ).lower()
             for e in entries
         ]
-        assert names.count("cookie") == 1, f"duplicate Cookie row: {names}"
-        # The caller's value is the one that must survive: a per-call cookie is
-        # an explicit override, matching ``set_session_cookies`` on the curl leg.
-        assert _continued_headers(tab)["cookie"] == "caller=seeded"
+        assert names.count("authorization") == 1, f"duplicate row: {names}"
+        assert _continued_headers(tab) == {
+            "authorization": "caller",
+            "accept": "text/html",
+        }
 
-    def test_origin_bound_headers_are_never_installed_tab_wide(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_origin_bound_headers_are_never_installed_tab_wide(self) -> None:
         """An origin-bound header must be attached per hop, never tab-wide.
 
-        ``set_extra_http_headers`` applies to EVERY request the tab makes --
-        subresources included, and those are not intercepted (interception is
-        document-scoped, because pausing each subresource for a DNS resolution
-        stalled the page). Trimming at the guard therefore protected redirect
-        hops and nothing else: a cross-origin image or XHR still carried the
-        caller's ``Authorization``. Installing only the origin-free headers
-        removes the leak at its source; the guard re-attaches the rest to the
-        document hops entitled to them.
+        ``set_extra_http_headers`` applies to EVERY request the tab makes,
+        subresources included, and those are not intercepted.
         """
         browser = _FakeBrowser()
-        _patch_pool(monkeypatch, browser)
         tab = self._run(
             browser,
             headers={"Authorization": "Bearer secret", "Accept": "text/html"},
@@ -1529,91 +1367,70 @@ class TestBrowserHonorsTrustPerHop:
         assert "authorization" not in installed
         assert installed.get("accept") == "text/html"
 
-    def test_origin_bound_headers_use_the_shared_redirect_contract(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The browser leg must drop what the header transports drop.
+    def test_origin_bound_headers_use_the_shared_redirect_contract(self) -> None:
+        """The browser leg must withhold what the header transports drop.
 
-        ``common.apply_redirect`` drops every origin-bound header cross-origin,
-        and that set includes the extended client hints -- not just credentials.
-        A browser leg with its own shorter list leaks the source origin's
-        fingerprint to a redirect target that the curl leg would never tell.
+        ``ORIGIN_BOUND`` includes the extended client hints, not just
+        credentials; a hint treated as origin-free would be installed tab-wide.
         """
-        seeded = {"Sec-CH-UA-Model": "Pixel", "Accept": "text/html"}
-        # Asserted on the SAME-origin hop, which is where the two candidate
-        # sets differ observably: a hint treated as origin-free is installed
-        # tab-wide (so it reaches every origin and never appears here), while
-        # one treated as origin-bound is withheld and re-attached exactly here.
         browser = _FakeBrowser(
             paused_events=[
                 _request_paused("https://public.example/next", {"accept": "text/html"}),
             ],
         )
-        _patch_pool(monkeypatch, browser)
-        tab = self._run(browser, headers=seeded)
+        tab = self._run(
+            browser,
+            headers={"Sec-CH-UA-Model": "Pixel", "Accept": "text/html"},
+        )
         assert _extra_http_headers(tab).get("sec-ch-ua-model") is None
         assert _continued_headers(tab).get("sec-ch-ua-model") == "Pixel"
 
-    def test_private_redirect_target_is_refused_before_it_is_fetched(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_no_extra_headers_are_installed_without_ambient_headers(self) -> None:
+        tab = self._run(_FakeBrowser(), headers={"Authorization": "x"})
+        methods = [c["method"] for c in tab.wire_commands]
+        assert methods == ["Fetch.enable", "Network.enable"]
+
+    def test_private_redirect_target_is_refused_before_it_is_fetched(self) -> None:
         browser = _FakeBrowser(
             paused_events=[_request_paused("http://127.0.0.1:1/secret")],
         )
-        _patch_pool(monkeypatch, browser)
         tab = self._run(browser)
         # Failed, not continued: the loopback hop must never reach the socket.
         assert tab.failed_requests == ["req-1"]
         assert tab.continued_requests == []
 
-    def test_public_redirect_target_is_allowed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_public_redirect_target_is_allowed(self) -> None:
         browser = _FakeBrowser(
             paused_events=[_request_paused("https://example.com/next")],
         )
-        _patch_pool(monkeypatch, browser)
         tab = self._run(browser)
         assert tab.continued_requests == ["req-1"]
         assert tab.failed_requests == []
 
-    def test_internal_trust_permits_a_private_target(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # ``internal`` is the caller's statement that it authored the URL, so a
-        # loopback SearXNG instance must still be reachable through the browser.
+    def test_allow_private_hosts_permits_a_private_target(self) -> None:
+        # The caller's statement that it authored the URL: a loopback SearXNG
+        # instance must still be reachable through the browser.
         browser = _FakeBrowser(
             paused_events=[_request_paused("http://127.0.0.1:8888/next")],
         )
-        _patch_pool(monkeypatch, browser)
-        tab = self._run(browser, url="http://127.0.0.1:8888/search", trust="internal")
+        tab = self._run(
+            browser,
+            url="http://127.0.0.1:8888/search",
+            allow_private_hosts=True,
+        )
         assert tab.continued_requests == ["req-1"]
         assert tab.failed_requests == []
 
-    def test_on_redirect_fires_before_the_hop_is_followed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # ObserveParams documents on_redirect as "called with the redirect target
-        # URL before following; raise to abort". Firing it after the load makes
-        # the abort unreachable.
+    def test_on_redirect_fires_before_the_hop_is_followed(self) -> None:
         browser = _FakeBrowser(
             paused_events=[_request_paused("https://example.com/next")],
         )
-        _patch_pool(monkeypatch, browser)
         seen: list[str] = []
         tab = self._run(browser, on_redirect=seen.append)
         assert seen == ["https://example.com/next"]
         assert tab.continued_requests == ["req-1"]
 
-    def test_on_redirect_raising_aborts_the_hop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_on_redirect_raising_aborts_the_hop(self) -> None:
         def refuse(url: str) -> None:
             del url
             raise RuntimeError("caller refused the hop")
@@ -1621,43 +1438,35 @@ class TestBrowserHonorsTrustPerHop:
         browser = _FakeBrowser(
             paused_events=[_request_paused("https://example.com/next")],
         )
-        _patch_pool(monkeypatch, browser)
         tab = self._run(browser, on_redirect=refuse)
         assert tab.failed_requests == ["req-1"]
         assert tab.continued_requests == []
 
-    def test_a_canonicalized_initial_request_is_not_a_hop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Chrome normalizes the URL it was given; that is not a redirect.
-
-        A bare host acquires the empty path before it reaches the wire, so
-        comparing the paused target against the caller's SPELLING reports the
-        very first request as a hop. ``on_redirect`` is raise-to-abort and
-        Google's raises on ``/sorry``, so a false hop can abort an ordinary
-        fetch -- the same hazard the fragment case already guards.
-        """
+    def test_a_canonicalized_initial_request_is_not_a_hop(self) -> None:
+        """Chrome normalizes the URL it was given; that is not a redirect."""
         browser = _FakeBrowser(
             href="https://example.com/",
             paused_events=[_request_paused("https://example.com/")],
         )
-        _patch_pool(monkeypatch, browser)
         seen: list[str] = []
         self._run(browser, url="https://example.com", on_redirect=seen.append)
         assert seen == []
 
-    def test_a_hop_back_to_the_starting_url_is_still_a_hop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``A -> B -> A`` must report both hops, including the return.
+    def test_a_fragment_only_difference_is_not_a_hop(self) -> None:
+        """A fragment is never sent, so its absence on the wire is not a hop."""
+        browser = _FakeBrowser(
+            paused_events=[_request_paused("https://example.com/page")],
+        )
+        seen: list[str] = []
+        self._run(
+            browser,
+            url="https://example.com/page#section",
+            on_redirect=seen.append,
+        )
+        assert seen == []
 
-        Comparing each target against the ORIGIN url rather than the previous
-        one makes the second real navigation invisible: a redirect chain that
-        lands back where it started is exactly how a login bounce behaves, and
-        the caller's guard never sees it.
-        """
+    def test_a_hop_back_to_the_starting_url_is_still_a_hop(self) -> None:
+        """``A -> B -> A`` must report both hops, including the return."""
         browser = _FakeBrowser(
             href="https://a.example/start",
             paused_events=[
@@ -1665,45 +1474,29 @@ class TestBrowserHonorsTrustPerHop:
                 _request_paused("https://a.example/start"),
             ],
         )
-        _patch_pool(monkeypatch, browser)
         seen: list[str] = []
         self._run(browser, url="https://a.example/start", on_redirect=seen.append)
         assert seen == ["https://b.example/next", "https://a.example/start"]
 
-    def test_a_redirect_budget_of_zero_refuses_the_hop(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """``max_redirects=0`` must stop the browser leg too.
+    def test_no_hop_reports_nothing(self) -> None:
+        seen: list[str] = []
+        self._run(
+            _FakeBrowser(href="https://example.com/x"),
+            url="https://example.com/x",
+            on_redirect=seen.append,
+        )
+        assert seen == []
 
-        ``RetryParams`` documents the knob as "Maximum redirects to follow; 0
-        disables" and both header transports honor it (each threads it into its
-        own redirect loop). The browser leg cannot even express it, so a caller
-        that disabled redirects still had Chrome follow them -- a silently
-        weaker contract on the one transport that follows hops itself.
-        """
+    def test_a_redirect_budget_of_zero_refuses_the_hop(self) -> None:
+        """``max_redirects=0`` must stop the browser leg too."""
         browser = _FakeBrowser(
             paused_events=[_request_paused("https://public.example/next")],
         )
-        _patch_pool(monkeypatch, browser)
-        asyncio.run(
-            _navigate(
-                "https://public.example/start",
-                profile_dir=_PROFILE,
-                timeout_sec=5.0,
-                headless=True,
-                max_redirects=0,
-                on_redirect=None,
-            ),
-        )
-        assert browser.last_tab is not None
-        assert browser.last_tab.failed_requests == ["req-1"]
-        assert browser.last_tab.continued_requests == []
+        tab = self._run(browser, max_redirects=0)
+        assert tab.failed_requests == ["req-1"]
+        assert tab.continued_requests == []
 
-    def test_a_redirect_budget_bounds_the_chain(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_a_redirect_budget_bounds_the_chain(self) -> None:
         """One hop is allowed at ``max_redirects=1``; the second is refused."""
         browser = _FakeBrowser(
             paused_events=[
@@ -1711,476 +1504,115 @@ class TestBrowserHonorsTrustPerHop:
                 _request_paused("https://public.example/two", request_id="hop-2"),
             ],
         )
-        _patch_pool(monkeypatch, browser)
-        asyncio.run(
-            _navigate(
-                "https://public.example/start",
-                profile_dir=_PROFILE,
-                timeout_sec=5.0,
-                headless=True,
-                max_redirects=1,
-                on_redirect=None,
-            ),
-        )
-        assert browser.last_tab is not None
-        assert browser.last_tab.continued_requests == ["hop-1"]
-        assert browser.last_tab.failed_requests == ["hop-2"]
+        tab = self._run(browser, max_redirects=1)
+        assert tab.continued_requests == ["hop-1"]
+        assert tab.failed_requests == ["hop-2"]
 
-    def test_interception_is_scoped_to_documents(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_interception_is_scoped_to_documents(self) -> None:
         """Only navigations are paused, and that scoping is load-bearing.
 
         Intercepting every request pauses each subresource until the handler
-        answers, and answering costs a DNS resolution on zendriver's connection
-        thread; measured against live Google, the page never reached
-        ``readyState == "complete"`` and the fetch timed out. Documents are also
-        the entire SSRF surface -- a redirect chain is documents, and a
-        subresource cannot redirect the navigation anywhere.
+        answers; measured against live Google, the page never reached
+        ``readyState == "complete"``.
         """
-        browser = _FakeBrowser()
-        _patch_pool(monkeypatch, browser)
-        tab = self._run(browser)
-        enable = next(
-            (
-                c
-                for c in tab.wire_commands
-                if from_plain(c.get("method"), str, default="") == "Fetch.enable"
-            ),
-            None,
-        )
-        assert enable is not None
-        patterns = from_plain(
-            from_plain(enable.get("params"), dict[str, object], default={}).get(
-                "patterns",
-            ),
-            list[object],
-            default=[],
-        )
-        shapes = [from_plain(p, dict[str, object]) for p in patterns]
-        assert [from_plain(s.get("resourceType"), str, default="") for s in shapes] == [
-            "Document",
-        ]
-        assert [from_plain(s.get("requestStage"), str, default="") for s in shapes] == [
-            "Request",
-        ]
+        tab = self._run(_FakeBrowser())
+        assert tab.wire_commands[0] == {
+            "method": "Fetch.enable",
+            "params": {
+                "patterns": [
+                    {
+                        "requestStage": "Request",
+                        "resourceType": "Document",
+                        "urlPattern": "*",
+                    },
+                ],
+            },
+        }
 
 
-def test_navigate_seeds_request_identity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser()
-    _patch_pool(monkeypatch, browser)
-    asyncio.run(
-        _navigate(
-            "https://google.com/search?q=x",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            headers={"X-Test": "yes"},
-            cookies={"CONSENT": "YES+"},
-        ),
-    )
-    assert len(browser.cookies.seeded) == 1
-    seeded = browser.cookies.seeded[0]
-    assert isinstance(seeded, network.CookieParam)
-    assert seeded.name == "CONSENT"
-    assert seeded.value == "YES+"
+def test_guard_ignores_events_other_than_paused_requests() -> None:
+    browser = _FakeBrowser(paused_events=[object()], responses=[object()])
+    _load_page(browser)
     assert browser.last_tab is not None
-    # Three: the request guard's ``Fetch.enable`` precedes the two header
-    # commands, because every tab is guarded whether or not headers are set.
-    assert len(browser.last_tab.commands) == 3
+    assert browser.last_tab.continued_requests == []
+    assert browser.last_tab.failed_requests == []
 
 
-def test_navigate_timeout_includes_browser_acquisition(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _SlowPool:
-        async def browser(
-            self,
-            profile_dir: Path,
-            *,
-            headless: bool,
-        ) -> _FakeBrowser:
-            del profile_dir, headless
-            await asyncio.Event().wait()
-            raise AssertionError("Browser acquisition escaped the timeout.")
+def test_load_closes_the_tab_when_loading_fails() -> None:
+    class _RefusingTab(_FakeTab):
+        @override
+        async def get(self, url: str) -> _FakeTab:
+            del url
+            raise RuntimeError("navigation refused")
 
-    slow_pool = _SlowPool()
-    monkeypatch.setattr(
-        zendriver,
-        "_pool",
-        lambda: slow_pool,
-    )
-    with pytest.raises(TimeoutError):
-        asyncio.run(
-            _navigate(
-                "https://example.com/",
-                profile_dir=_PROFILE,
-                timeout_sec=0.001,
-                headless=True,
-                on_redirect=None,
-            ),
-        )
+    class _Browser(_FakeBrowser):
+        @override
+        async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+            del new_tab
+            self.last_tab = _RefusingTab(content="", href="")
+            return self.last_tab
 
-
-class _WedgedTab(_FakeTab):
-    """A tab whose navigation AND close both never return.
-
-    Models one wedged CDP connection: ``Tab.get`` waits on a load event that
-    never arrives, and ``Tab.close`` then sends ``Target.closeTarget`` and
-    awaits a reply with no ceiling of its own (only the ``TargetDestroyed``
-    wait AFTER it is bounded, at 10s).
-    """
-
-    @override
-    async def get(self, url: str) -> _FakeTab:
-        self.navigations.append(url)
-        await asyncio.Event().wait()
-        raise AssertionError("The navigation was never cancelled.")
-
-    @override
-    async def close(self) -> None:
-        self.closed = True
-        await asyncio.Event().wait()
-        raise AssertionError("The close was never bounded.")
-
-
-class _WedgedBrowser(_FakeBrowser):
-    """A browser handing out :class:`_WedgedTab`."""
-
-    @override
-    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
-        del new_tab
-        self.gets.append(url)
-        self.last_tab = _WedgedTab(content="<html>ok</html>", href="")
-        return self.last_tab
-
-
-def test_navigate_reports_its_own_timeout_when_teardown_also_wedges(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cancelled navigation must still finish, so the caller sees the budget.
-
-    An ``asyncio.timeout`` scope delivers exactly ONE cancellation. When it
-    lands on the navigation, ``_navigate_tab``'s ``except BaseException: await
-    tab.close()`` runs with that cancellation already spent -- so an unbounded
-    close parks there forever and the coroutine NEVER completes. Its
-    ``TimeoutError`` is therefore never raised, and the caller instead waits out
-    ``fetch_zendriver``'s ``timeout_sec + 30`` before ``future.result`` raises a
-    bare, wall-less ``TimeoutError``.
-
-    That is the CI shape: the traceback ended at ``concurrent.futures``'
-    ``Future.result`` raising a bare ``TimeoutError()`` rather than at
-    ``asyncio.timeouts``' ``__aexit__``, which is what a coroutine reporting
-    its own deadline produces.
-    """
-    browser = _WedgedBrowser()
-    _patch_pool(monkeypatch, browser)
-    monkeypatch.setattr(
-        zendriver,
-        "_closed",
-        partial(zendriver._closed, budget_sec=0.01),
-    )
-
-    async def go() -> float:
-        before = asyncio.all_tasks()
-        started = time.monotonic()
-        with pytest.raises(TimeoutError) as error:
-            await _navigate(
-                "https://example.com/",
-                profile_dir=_PROFILE,
-                timeout_sec=0.01,
-                headless=True,
-                on_redirect=None,
-            )
-        assert isinstance(error.value.__cause__, asyncio.CancelledError)
-        assert asyncio.all_tasks() - before == set(), "the close task was not reaped"
-        return time.monotonic() - started
-
-    # Outside ``raises``: an unbounded close must fail on the outer deadline.
-    elapsed = asyncio.run(asyncio.wait_for(go(), timeout=1.0))
-    assert elapsed < 0.5, f"teardown outlived its budget: {elapsed:.2f}s"
+    browser = _Browser()
+    with pytest.raises(RuntimeError, match="navigation refused"):
+        _load_page(browser)
     assert browser.last_tab is not None
-    assert browser.last_tab.navigations == ["https://example.com/"]
     assert browser.last_tab.closed
 
 
-def test_navigate_uses_one_overall_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every step wait must shrink against ONE deadline, never restart it.
-
-    A CHALLENGE page, not a clear one: ``_settled_content`` returns on its
-    first read when the document is already clear, so a clear page never
-    reaches the two step waits and the assertion below has nothing to observe.
-    Measured on the previous fixture: zero ``wait_for`` calls, i.e. the test
-    passed without exercising the invariant it names.
-    """
-    browser = _FakeBrowser(
-        documents=["<html><title>Just a moment...</title></html>", "<html>ok</html>"],
-    )
-    _patch_pool(monkeypatch, browser)
-
-    budgets: list[float] = []
-    real_wait_for = asyncio.wait_for
-
-    async def record_budget(
-        awaitable: Awaitable[object],
-        timeout: float | None = None,  # noqa: ASYNC109 -- The browser test timeout bounds polling across an awaited operation.
-    ) -> object:
-        # A per-step timeout that RESET the budget would hand out a constant;
-        # one overall deadline yields a strictly shrinking remainder.
-        budgets.append(-1.0 if timeout is None else timeout)
-        return await real_wait_for(awaitable, timeout)
-
-    monkeypatch.setattr(asyncio, "wait_for", record_budget)
-    asyncio.run(
-        _navigate(
-            "https://example.com/",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-
-    assert len(budgets) >= 2, f"the settle path never reached its step waits: {budgets}"
-    assert all(timeout >= 0.0 for timeout in budgets), (
-        f"a step wait was left unbounded: {budgets}"
-    )
-    assert budgets == sorted(budgets, reverse=True), (
-        f"step waits did not shrink against one deadline: {budgets}"
-    )
-    assert max(budgets) <= 5.0 / 2, f"a step wait exceeded the settle budget: {budgets}"
+def test_wire_url_removes_fragment_and_supplies_root_path() -> None:
+    assert zendriver._wire_url("https://example.com#frag") == "https://example.com/"
+    assert zendriver._wire_url("https://example.com/a#frag") == "https://example.com/a"
 
 
-def test_navigate_opens_blank_tab_before_requested_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    url = "https://gated.example/page?q=x"
-    browser = _FakeBrowser()
-    _patch_pool(monkeypatch, browser)
+def test_send_on_a_closed_loop_drops_the_command() -> None:
+    loop = asyncio.new_event_loop()
+    loop.close()
+    sent: list[object] = []
 
-    asyncio.run(
-        _navigate(
-            url,
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
+    async def send(command: object) -> None:
+        sent.append(command)
 
-    assert browser.gets == [zendriver._AGENT_TAB]
-    assert browser.last_tab is not None
-    assert browser.last_tab.navigations == [url]
+    class SendingTab:
+        def send(self, command: object) -> Coroutine[object, object, None]:
+            return send(command)
+
+    zendriver._send(loop, cast(Tab, SendingTab()), object())
+    assert sent == []
 
 
-def test_navigate_returns_rendered_page_without_semantic_classification(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    body = '<html><div id="cf_chl_widget"></div></html>'
-    browser = _FakeBrowser(content=body)
-    _patch_pool(monkeypatch, browser)
-
-    result = asyncio.run(
-        _navigate(
-            "https://example.com/",
-            profile_dir=_PROFILE,
-            # Small: this body IS challenge markup, so the settle poll waits out
-            # its whole budget (half the timeout) before giving up. The exact
-            # budget is irrelevant to what this asserts -- that the transport
-            # returns the page rather than classifying it -- so keep it cheap.
-            timeout_sec=0.02,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-
-    assert result.body == body.encode()
+# -- _load settle loop --------------------------------------------------------
 
 
-def test_navigate_waits_out_a_cloudflare_interstitial(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The whole point of the browser transport is clearing a JS challenge, and
-    # it captured the challenge instead. The interstitial reaches readyState
-    # "complete" on its own -- it IS a loaded document -- and only then does its
-    # JS navigate to the real page. Harvesting at the first "complete" returns
-    # the 5KB "Just a moment..." wall every time, so every Cloudflare-walled
-    # site failed through the one transport meant to clear it (measured live:
-    # 5516 bytes at complete, 380404 bytes after the handoff).
-    real = "<html><title>Real Page</title>body</html>"
-    browser = _FakeBrowser(
-        documents=["<html><title>Just a moment...</title></html>", real],
-    )
-    _patch_pool(monkeypatch, browser)
+class _ScriptedTab(_FakeTab):
+    """A :class:`_FakeTab` whose content, handlers, and ready state a test scripts."""
 
-    result = asyncio.run(
-        _navigate(
-            "https://walled.example/",
-            profile_dir=_PROFILE,
-            timeout_sec=30.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-
-    assert result.body == real.encode(), (
-        "browser transport returned the Cloudflare interstitial, not the page "
-        "it exists to unwrap"
-    )
+    def __init__(self) -> None:
+        super().__init__(content="", href="https://example.com/")
 
 
-def test_navigate_waits_for_the_new_document_to_parse(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The second trap, and the subtler one. A main-frame navigation COMMITS the
-    # new document before it parses, so a read taken right after the event sees
-    # a bare <head>: challenge markup gone, correct <title>, no body. Live that
-    # was 386 bytes between the 5516-byte wall and the 380404-byte page -- and
-    # it looks like success, which is exactly why it needs its own test.
-    real = "<html><title>Real Page</title>the whole body</html>"
-    browser = _FakeBrowser(
-        documents=["<html><title>Just a moment...</title></html>", real],
-        parsing="<html><title>Real Page</title></html>",
-    )
-    _patch_pool(monkeypatch, browser)
+def _browser_with(tab: _FakeTab) -> _FakeBrowser:
+    """Return a browser whose every ``get`` hands out ``tab``."""
 
-    result = asyncio.run(
-        _navigate(
-            "https://walled.example/",
-            profile_dir=_PROFILE,
-            timeout_sec=30.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
+    class _Browser(_FakeBrowser):
+        @override
+        async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+            del new_tab
+            self.gets.append(url)
+            self.last_tab = tab
+            return tab
 
-    assert result.body == real.encode(), (
-        "harvested the document mid-parse: right title, empty body"
-    )
+    return _Browser()
 
 
-def test_navigate_returns_promptly_when_no_challenge(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The settle wait must cost an unchallenged page nothing: a plain document
-    # is harvested on the FIRST read, with no re-poll. Otherwise every fetch
-    # pays the challenge budget.
-    browser = _FakeBrowser(content="<html><title>Plain</title>ok</html>")
-    _patch_pool(monkeypatch, browser)
-
-    result = asyncio.run(
-        _navigate(
-            "https://example.com/",
-            profile_dir=_PROFILE,
-            timeout_sec=30.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-
-    assert result.body == b"<html><title>Plain</title>ok</html>"
-    assert browser.last_tab is not None
-    assert browser.last_tab.content_reads == 1
-
-
-def test_navigate_gives_up_on_an_unclearable_challenge(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A challenge that never clears (a real block, not an interstitial) must
-    # return what Chrome rendered so the caller's classifier raises its specific
-    # BotDetectionError -- never hang until the fetch timeout.
-    walled = "<html><title>Just a moment...</title></html>"
-    browser = _FakeBrowser(content=walled)
-    _patch_pool(monkeypatch, browser)
-
-    result = asyncio.run(
-        _navigate(
-            "https://walled.example/",
-            profile_dir=_PROFILE,
-            # Deliberately small: giving up is what this asserts, and the budget
-            # is real time. A production-sized 30s would sleep 15s per run.
-            timeout_sec=0.02,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-
-    assert result.body == walled.encode()
-
-
-def test_navigate_allows_embedded_captcha_on_rendered_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser(content='<html><div class="g-recaptcha"></div></html>')
-    _patch_pool(monkeypatch, browser)
-
-    result = asyncio.run(
-        _navigate(
-            "https://example.com/login",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-
-    assert result.body == b'<html><div class="g-recaptcha"></div></html>'
-
-
-def test_navigate_closes_tab_after_returning_rendered_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser(content="<html><title>Just a moment...</title></html>")
-    _patch_pool(monkeypatch, browser)
-    asyncio.run(
-        _navigate(
-            "https://walled.example/",
-            profile_dir=_PROFILE,
-            timeout_sec=0.02,  # An unclearable wall; see the note above.
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert browser.last_tab is not None
-    assert browser.last_tab.closed is True
-
-
-def test_navigate_matches_exact_host_cookie(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    browser = _FakeBrowser(
-        cookies=[_FakeCookie(name="H", value="1", domain="example.com")],
-    )
-    _patch_pool(monkeypatch, browser)
-    result = asyncio.run(
-        _navigate(
-            "https://example.com/",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=None,
-        ),
-    )
-    assert result.cookies == {"H": "1"}
-
-
-def test_settled_content_returns_promptly_when_the_wall_clears_off_loop(
+def test_load_returns_promptly_when_the_wall_clears_off_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A challenge that clears must be observed then, not at the deadline.
 
     zendriver dispatches sync handlers off-loop, and a cross-thread
-    ``Event.set()`` does not wake the selector. Asserted on elapsed time: the
-    body is identical either way.
+    ``Event.set()`` does not wake the selector.
     """
     wall = "<html><title>Just a moment...</title></html>"
-    handlers: list[Callable[..., None]] = []
     cleared = threading.Event()
     waiting = threading.Event()
     selector = selectors.DefaultSelector()
@@ -2194,44 +1626,32 @@ def test_settled_content_returns_promptly_when_the_wall_clears_off_loop(
     # Signal only once the loop commits to blocking, so a bare set cannot pass.
     monkeypatch.setattr(selector, "select", select)
 
-    class _ClearsOffLoopTab:
+    class _ClearsOffLoopTab(_ScriptedTab):
         """Serves the wall until an off-loop navigation event says otherwise.
 
-        Deliberately not ``_FakeTab``: that one advances its document from
-        inside ``get_content``, on the loop thread, which is the arrangement
-        that hides a wakeup delivered from anywhere else.
+        Its content never advances on the loop thread, which is the arrangement
+        that would hide a wakeup delivered from anywhere else.
         """
 
-        def add_handler(
-            self,
-            event_type: type[object],
-            handler: Callable[..., None],
-        ) -> None:
-            del event_type
-            handlers.append(handler)
-
+        @override
         async def get_content(self) -> str:
             return "<html>ok</html>" if cleared.is_set() else wall
 
-        async def wait_for_ready_state(self, until: str = "complete") -> bool:
-            del until
-            return True
+    tab = _ClearsOffLoopTab()
 
     def clear_from_another_thread() -> None:
         assert waiting.wait(timeout=1.0), "the settle wait never blocked"
         cleared.set()
-        handlers[0](_main_frame_navigated())
+        for handler in tab.handlers:
+            handler(_main_frame_navigated())
 
     async def go() -> float:
         started = time.monotonic()
         thread = threading.Thread(target=clear_from_another_thread)
         thread.start()
         try:
-            body = await zendriver._settled_content(
-                cast(Tab, _ClearsOffLoopTab()),
-                budget_sec=1.0,
-            )
-            assert body == "<html>ok</html>"
+            body = await _drive(_browser_with(tab), timeout_sec=2.0)
+            assert body == b"<html>ok</html>"
             return time.monotonic() - started
         finally:
             thread.join(timeout=1.0)
@@ -2243,1111 +1663,57 @@ def test_settled_content_returns_promptly_when_the_wall_clears_off_loop(
         assert runner.run(go()) < 0.5
 
 
-def test_settled_content_bounds_a_stalled_document_parse() -> None:
-    """``budget_sec`` must bound the whole settle, parse included.
-
-    A document that commits near the deadline and then stalls would otherwise
-    spend the caller's entire request timeout in ``wait_for_ready_state``.
-    """
+def test_load_bounds_a_stalled_document_parse() -> None:
+    """The settle budget must bound the whole settle, parse included."""
     wall = "<html><title>Just a moment...</title></html>"
 
-    class _StalledParseTab:
-        def add_handler(
-            self,
-            event_type: object,
-            handler: Callable[[object], None],
-        ) -> None:
-            del event_type
-            # Commit a navigation immediately, so the settle loop always
-            # advances to the ready-state wait that has no ceiling.
-            handler(_main_frame_navigated())
+    class _StalledParseTab(_ScriptedTab):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loaded = False
 
+        @override
         async def get_content(self) -> str:
+            # Commit a navigation on every read, so the loop always advances to
+            # the ready-state wait that has no ceiling of its own.
+            for handler in self.handlers:
+                handler(_main_frame_navigated())
             return wall
 
-        async def wait_for_ready_state(self, until: str = "complete") -> bool:
-            del until
+        @override
+        async def wait_for_ready_state(
+            self,
+            until: str = "interactive",
+            timeout: int = 10,
+        ) -> bool:
+            del until, timeout
+            if not self.loaded:
+                self.loaded = True  # The first wait is the initial load.
+                return True
             await asyncio.Event().wait()  # Parses forever.
             raise AssertionError("unreachable")
 
     async def go() -> float:
         started = time.monotonic()
-        body = await zendriver._settled_content(
-            cast(Tab, _StalledParseTab()),
-            budget_sec=0.01,
-        )
-        assert body == wall
+        body = await _drive(_browser_with(_StalledParseTab()), timeout_sec=0.04)
+        assert body == wall.encode()
         return time.monotonic() - started
 
-    # Generous multiple of the budget: this must fail on an UNBOUNDED wait, not
-    # on scheduler jitter around a bound that is working.
     assert asyncio.run(asyncio.wait_for(go(), timeout=1.0)) < 0.5
 
 
-# -- _navigate: redirect callback --------------------------------------------
+def test_load_settle_ignores_child_frame_and_foreign_events() -> None:
+    wall = "<html><title>Just a moment...</title></html>"
 
-
-def test_navigate_fires_on_redirect_per_hop_not_on_the_landing_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The callback reports each hop BEFORE it is followed, not the final URL.
-
-    Reading ``document.location.href`` after the load could only ever report
-    where the page ENDED UP -- one notification, after every hop had already
-    been fetched, which is unusable for the abort ``ObserveParams`` promises.
-    The hops themselves are now observed, so a fetch that merely lands
-    elsewhere without an intercepted document request reports nothing.
-    """
-    browser = _FakeBrowser(
-        href="https://example.com/landing",
-        paused_events=[_request_paused("https://example.com/landing")],
-    )
-    _patch_pool(monkeypatch, browser)
-    seen: list[str] = []
-    asyncio.run(
-        _navigate(
-            "https://example.com/start",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=seen.append,
-        ),
-    )
-    assert seen == ["https://example.com/landing"]
-
-
-def test_navigate_treats_fragment_only_difference_as_no_redirect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A fragment is never sent, so its absence on the wire is not a hop.
-
-    ``on_redirect`` is documented raise-to-abort, and Google's callback raises
-    on ``/sorry`` -- so a false hop on the initial navigation aborts an ordinary
-    fetch.
-    """
-    url = "https://example.com/page#section"
-    browser = _FakeBrowser(
-        href=url,
-        paused_events=[_request_paused("https://example.com/page")],
-    )
-    _patch_pool(monkeypatch, browser)
-    seen: list[str] = []
-    asyncio.run(
-        _navigate(
-            url,
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=seen.append,
-        ),
-    )
-    assert seen == []
-
-
-def test_navigate_no_redirect_when_url_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    url = "https://example.com/x"
-    browser = _FakeBrowser(href=url)
-    _patch_pool(monkeypatch, browser)
-    seen: list[str] = []
-    asyncio.run(
-        _navigate(
-            url,
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            on_redirect=seen.append,
-        ),
-    )
-    assert seen == []
-
-
-# -- _BrowserPool: reuse + replacement ---------------------------------------
-
-
-def test_pool_reuses_browser_per_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    launched: list[_FakeBrowser] = []
-
-    async def fake_launch(
-        self: _BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> _FakeBrowser:
-        del self, profile_dir, headless
-        b = _FakeBrowser()
-        launched.append(b)
-        return b
-
-    monkeypatch.setattr(_BrowserPool, "_connect", fake_launch)
-    pool = _BrowserPool()
-    try:
-
-        async def go() -> bool:
-            a = await pool.browser(_PROFILE, headless=True)
-            b = await pool.browser(_PROFILE, headless=True)
-            return a is b
-
-        assert pool.run(go())
-        assert len(launched) == 1
-    finally:
-        pool.shutdown()
-
-
-def test_pool_rejects_mode_change_for_live_profile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    launched: list[_FakeBrowser] = []
-
-    async def fake_launch(
-        self: _BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> _FakeBrowser:
-        del self, profile_dir, headless
-        browser = _FakeBrowser()
-        launched.append(browser)
-        return browser
-
-    monkeypatch.setattr(_BrowserPool, "_connect", fake_launch)
-    pool = _BrowserPool()
-    try:
-
-        async def go() -> None:
-            await pool.browser(_PROFILE, headless=True)
-            with pytest.raises(
-                RuntimeError,
-                match=(
-                    r"^"
-                    + re.escape(
-                        "Cannot change Zendriver launch mode for a live profile.",
-                    )
-                    + r"$"
-                ),
-            ):
-                await pool.browser(_PROFILE, headless=False)
-
-        pool.run(go())
-        assert len(launched) == 1
-    finally:
-        pool.shutdown()
-
-
-def test_pool_serializes_concurrent_mode_changes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    launched: list[_FakeBrowser] = []
-
-    async def fake_launch(
-        self: _BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> _FakeBrowser:
-        del self, profile_dir, headless
-        await asyncio.sleep(0)
-        browser = _FakeBrowser()
-        launched.append(browser)
-        return browser
-
-    monkeypatch.setattr(_BrowserPool, "_connect", fake_launch)
-    pool = _BrowserPool()
-    try:
-
-        async def go() -> tuple[object, object]:
-            return await asyncio.gather(
-                pool.browser(_PROFILE, headless=True),
-                pool.browser(_PROFILE, headless=False),
-                return_exceptions=True,
-            )
-
-        results = pool.run(go())
-        assert len(launched) == 1
-        assert sum(isinstance(result, RuntimeError) for result in results) == 1
-    finally:
-        pool.shutdown()
-
-
-def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    launched: list[_FakeBrowser] = []
-
-    async def fake_launch(
-        self: _BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> _FakeBrowser:
-        del self, profile_dir, headless
-        b = _FakeBrowser()
-        launched.append(b)
-        return b
-
-    monkeypatch.setattr(_BrowserPool, "_connect", fake_launch)
-    pool = _BrowserPool()
-    try:
-
-        async def go() -> None:
-            first = await pool.browser(_PROFILE, headless=True)
-            cast(_FakeBrowser, first).connection.closed = True  # Chrome exited.
-            second = await pool.browser(_PROFILE, headless=True)
-            assert second is not first
-
-        pool.run(go())
-        assert len(launched) == 2
-    finally:
-        pool.shutdown()
-
-
-def test_pool_run_gives_up_when_its_loop_stopped() -> None:
-    """A stopped loop must surface a timeout, never an unbounded wait.
-
-    The coroutine's own ``asyncio.timeout`` bounds the fetch only while the loop
-    is running it; a stopped loop never schedules it, so nothing arms.
-    """
-    pool = _BrowserPool()
-    try:
-        pool._loop.call_soon_threadsafe(pool._loop.stop)
-        # Joining the thread is what proves the loop is DONE running, rather
-        # than sampling ``is_running`` in a spin that can observe the gap
-        # between the callback firing and the loop actually stopping.
-        pool._thread.join(timeout=5)
-        assert not pool._thread.is_alive()
-
-        async def never_scheduled() -> str:
-            raise AssertionError("A stopped loop must not run the coroutine.")
-
-        with pytest.raises(TimeoutError):
-            pool.run(never_scheduled(), timeout_sec=0.05)
-    finally:
-        pool.shutdown()
-
-
-def test_fetch_zendriver_bounds_its_wait_above_the_navigate_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The outer ceiling must exceed the coroutine's own budget.
-
-    At or below it the outer wait fires first, cancelling a ``_navigate`` that
-    was about to report a wall and turning it into an opaque timeout.
-    """
-    waits: list[float] = []
-
-    class _RecordingPool:
-        def run(
-            self,
-            coro: Coroutine[object, object, object],
-            *,
-            timeout_sec: float = 0,
-        ) -> BrowserResult:
-            coro.close()
-            waits.append(timeout_sec)
-            return BrowserResult(body=b"", cookies={}, final_url="")
-
-    pool = _RecordingPool()
-    monkeypatch.setattr(zendriver, "_pool", lambda: pool)
-    zendriver.fetch_zendriver(
-        "https://example.com/",
-        profile_dir=_PROFILE,
-        timeout_sec=30.0,
-    )
-
-    assert waits == [pytest.approx(60.0)]
-    close_budget = cast(
-        object,
-        inspect.signature(zendriver._closed).parameters["budget_sec"].default,
-    )
-    assert isinstance(close_budget, float)
-    assert 0 < close_budget < waits[0] - 30.0
-
-
-def test_launch_survives_a_reply_to_a_cancelled_cdp_transaction(tmp_path: Path) -> None:
-    """A CDP reply arriving after its transaction was cancelled must be dropped.
-
-    ``Transaction.__call__`` sets the result unconditionally, so a reply landing
-    on a cancelled future raises ``InvalidStateError`` inside
-    ``Listener.listener_loop`` and kills the listener for the whole connection.
-    Every fetch here is cancellable (``_navigate`` wraps the navigation in
-    ``asyncio.timeout``) and Chrome answers the in-flight ``Page.navigate``
-    afterwards, so a timed-out fetch leaves the pooled browser deaf to every
-    later one.
-
-    Driven through ``_launch_browser`` rather than by calling the patcher
-    directly: arming it on the launch path is the contract -- a fetch must never
-    reach live CDP traffic with the vendor's unguarded ``__call__`` in place.
-    """
-
-    async def fake_start(config: object) -> _FakeBrowser:
-        del config
-        return _FakeBrowser()
-
-    async def go() -> None:
-        with pytest.MonkeyPatch.context() as patcher:
-            patcher.setattr("zendriver.start", fake_start)
-            # Restored to the VENDOR's own ``__call__``, undoing any arming an
-            # earlier test in this process did: the guard is installed
-            # class-wide, so without this the assertions below pass vacuously.
-            patcher.setattr(Transaction, "__call__", _VENDOR_TRANSACTION_CALL)
-            await zendriver._launch_browser(
-                tmp_path,
-                headless=True,
-            )
-
-            # ``result`` alone, though the listener splats the whole message:
-            # the vendor reads only ``error`` and ``result``, and its
-            # ``**response: dict[str, object]`` annotation rejects the integer
-            # ``id`` a real reply also carries.
-            cancelled = Transaction(page.navigate("about:blank"))
-            cancelled.cancel()
-            cancelled(result={"frameId": "F", "loaderId": "L"})
-            assert cancelled.cancelled()
-
-            # The guard must drop only what is already settled: a reply to a
-            # LIVE transaction still has to reach the caller awaiting it.
-            live = Transaction(page.navigate("about:blank"))
-            live(result={"frameId": "F", "loaderId": "L"})
-            assert (live.result())[0] == (page.FrameId("F"))
-
-    asyncio.run(go())
-
-
-def test_pool_shutdown_joins_thread_and_closes_loop() -> None:
-    pool = _BrowserPool()
-    pool.shutdown()
-
-    assert not pool._thread.is_alive()
-    assert pool._loop.is_closed()
-
-
-def _fetch_browser_install(
-    root: Path,
-    build: str,
-    *,
-    name: str = "Google Chrome for Testing",
-    arch: str = "chrome-mac-arm64",
-) -> Path:
-    """Write a stub browser where the download roots put a real one."""
-    binary = root / build / arch / f"{name}.app" / "Contents" / "MacOS"
-    binary.mkdir(parents=True, exist_ok=True)
-    executable = binary / name
-    _ = executable.write_text("#!/bin/sh\n")
-    return executable
-
-
-@pytest.fixture
-def roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
-    """Redirect both download roots, as ``(puppeteer, playwright)``."""
-    puppeteer = tmp_path / "home" / ".cache" / "puppeteer" / "chrome"
-    playwright = tmp_path / "cache" / "ms-playwright"
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr(
-        zendriver,
-        "cache_dir",
-        lambda: tmp_path / "cache",
-    )
-    return puppeteer, playwright
-
-
-def test_non_macos_hosts_need_no_separate_browser() -> None:
-    """Linux and Windows keep the ordinary browser -- there is no capture.
-
-    A URL there reaches a browser through ``xdg-open`` and the desktop file
-    rather than a running process, and a headless server has only the stock
-    Chrome installed anyway.
-    """
-    assert zendriver._fetch_browser(platform="linux") == ""
-    assert zendriver._fetch_browser(platform="win32") == ""
-
-
-def test_non_macos_hosts_launch_with_no_extra_flags() -> None:
-    # Chrome on a headless server has no keychain to mock, so a flag leaking
-    # onto that path would break the only browser it has.
-    assert (
-        zendriver._fetch_browser_args(
-            zendriver._fetch_browser(platform="linux"),
-        )
-        == []
-    )
-
-
-def test_no_install_falls_back_to_zendriver(roots: tuple[Path, Path]) -> None:
-    # A miss must cost click capture, never the fetch: "" means "let zendriver
-    # find Chrome".
-    del roots
-
-    assert zendriver._fetch_browser(platform="darwin") == ""
-
-
-def test_a_puppeteer_install_is_found(roots: tuple[Path, Path]) -> None:
-    expected = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
-
-    assert zendriver._fetch_browser(
-        platform="darwin",
-    ) == str(expected)
-
-
-def test_a_playwright_install_is_found(roots: tuple[Path, Path]) -> None:
-    expected = _fetch_browser_install(roots[1], "chromium-1217")
-
-    assert zendriver._fetch_browser(
-        platform="darwin",
-    ) == str(expected)
-
-
-def test_the_newest_build_wins(roots: tuple[Path, Path]) -> None:
-    # Builds accumulate across upgrades; a stale one eventually cannot read a
-    # profile the current browser wrote.
-    _ = _fetch_browser_install(roots[0], "mac_arm-131.0.6778.85")
-    newest = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
-
-    assert zendriver._fetch_browser(
-        platform="darwin",
-    ) == str(newest)
-
-
-@pytest.mark.parametrize(
-    ("older", "newer"),
-    [
-        ("mac_arm-99.0.4844.51", "mac_arm-100.0.4896.60"),
-        ("chromium-999", "chromium-1000"),
-    ],
-)
-def test_build_order_is_numeric_not_lexical(
-    roots: tuple[Path, Path],
-    older: str,
-    newer: str,
-) -> None:
-    # Text comparison ranks "99" above "100", which silently pins fetches to
-    # the older browser at every version rollover past a digit boundary.
-    _ = _fetch_browser_install(roots[0], older)
-    expected = _fetch_browser_install(roots[0], newer)
-
-    assert zendriver._fetch_browser(
-        platform="darwin",
-    ) == str(expected)
-
-
-def test_unversioned_build_directories_still_order_deterministically() -> None:
-    # Filesystem iteration order is arbitrary, so names carrying no digits
-    # must not leave the choice to it. Ranked directly rather than through a
-    # fixture: a fixture would have to observe the very order in question.
-    unversioned = [Path("beta"), Path("alpha"), Path("dev")]
-
-    ranked = sorted(
-        unversioned,
-        key=zendriver._build_order,
-        reverse=True,
-    )
-
-    assert [path.name for path in ranked] == ["dev", "beta", "alpha"]
-
-
-def test_a_directory_without_the_binary_is_skipped(roots: tuple[Path, Path]) -> None:
-    # Playwright's roots include ``ffmpeg-*`` and other non-browser payloads,
-    # and an interrupted download leaves a build directory with no binary.
-    (roots[1] / "ffmpeg-1011").mkdir(parents=True)
-    expected = _fetch_browser_install(roots[1], "chromium-1217")
-
-    assert zendriver._fetch_browser(
-        platform="darwin",
-    ) == str(expected)
-
-
-def test_an_intel_download_is_found(roots: tuple[Path, Path]) -> None:
-    # The only build on an Intel Mac, and runnable under Rosetta on Apple
-    # silicon, so keying discovery to the host arch would skip a usable one.
-    expected = _fetch_browser_install(
-        roots[0],
-        "mac-147.0.7727.57",
-        arch="chrome-mac-x64",
-    )
-
-    assert zendriver._fetch_browser(
-        platform="darwin",
-    ) == str(expected)
-
-
-def test_chrome_for_testing_gets_the_mock_keychain_flag() -> None:
-    """Pinned verbatim: a typo yields a silent hang, not an error.
-
-    Chrome ignores an unknown flag rather than rejecting it, so a misspelling
-    restores the keychain prompt and the launch blocks behind it.
-    """
-    assert zendriver._fetch_browser_args(
-        "/cache/ChromeForTesting",
-    ) == ["--use-mock-keychain"]
-
-
-def test_stock_chrome_keeps_its_own_keychain() -> None:
-    # It owns a real keychain entry, and mocking that cuts it off from cookies
-    # it legitimately has.
-    assert zendriver._fetch_browser_args("") == []
-
-
-def test_no_prose_cites_a_line_number_in_this_package() -> None:
-    """A ``file:NNN`` citation in prose rots the moment anything shifts.
-
-    Measured twice. First, four files cited one line of this module for the
-    pool's ``timeout_sec + 30``; inserting the browser-discovery helpers above
-    it moved that code down ~100 lines and left the cited line BLANK. Then a
-    narrower version of THIS guard -- matching only Python files -- passed while
-    two ``pyproject`` citations stayed wrong in the files it had just swept: one
-    claimed ``addopts`` and landed on a GitHub marker, the other claimed
-    ``--dist=worksteal`` and landed on the ``real_llm`` marker.
-
-    A line number is correct for exactly one commit and nothing re-checks it,
-    so name the SYMBOL or the setting instead -- those survive every edit that
-    does not rename them.
-
-    Matched on the repo's OWN file kinds rather than any ``word.word:digits``,
-    which would sweep in ``example.com:443`` and every ``127.0.0.1:8888``: a
-    host and port is not a citation and does not rot. The extension list is the
-    thing that must stay honest -- it is what let the two ``.toml`` citations
-    through -- so it names every kind this repo actually cites.
-
-    Scoped to wesearch, where the drift happened and the convention is being
-    established; the repo-wide sweep is a separate change.
-    """
-    package = _CWD.parent.parent
-    citation = re.compile(
-        r"\b[\w./-]+\.(?:py|pyi|toml|ya?ml|cfg|ini|txt|md|sh|json|lock):\d+",
-    )
-    offenders = [
-        f"{path.relative_to(package)}:{number}: {match.group(0)}"
-        for path in sorted(package.rglob("*.py"))
-        for number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(),
-            start=1,
-        )
-        for match in [citation.search(line)]
-        if match is not None
-    ]
-
-    assert offenders == [], (
-        "prose cites a line number, which silently rots -- name the symbol "
-        f"instead: {offenders}"
-    )
-
-
-def test_add_arguments_registers_optional_url() -> None:
-    parser = argparse.ArgumentParser()
-    zendriver._add_arguments(parser)
-    default_flags = cast(_Flags, parser.parse_args([]))
-    explicit_flags = cast(
-        _Flags,
-        parser.parse_args(["https://example.com/"]),
-    )
-    assert default_flags.url == "about:blank"
-    assert explicit_flags.url == "https://example.com/"
-
-
-def test_main_prints_lifecycle_and_opens_url(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    opened: list[str] = []
-    monkeypatch.setattr(zendriver, "open_instance", opened.append)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["zendriver", "https://example.com/"],
-    )
-    assert zendriver.main() == 0
-    assert opened == ["https://example.com/"]
-    assert capsys.readouterr().out == (
-        "Opening https://example.com/ in Chrome on "
-        f"{data_dir() / 'rekursiv-ai' / 'wesearch' / 'fetch-zendriver'}"
-        " -- close the window when done.\nWindow closed.\n"
-    )
-
-
-@pytest.mark.parametrize("platform", ["linux", "win32"])
-def test_fetch_browser_candidates_skip_non_macos(platform: str) -> None:
-    assert zendriver._fetch_browser(platform=platform) == ""
-
-
-def test_close_browser_on_port_starts_and_stops_browser(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    created: list[_FakeBrowser] = []
-
-    async def start(
-        *,
-        host: str,
-        port: int,
-    ) -> _FakeBrowser:
-        assert host == "127.0.0.1"
-        assert port == 9222
-        browser = _FakeBrowser()
-        created.append(browser)
-        return browser
-
-    monkeypatch.setattr("zendriver.start", start)
-    asyncio.run(zendriver._close_browser_on_port(9222))
-    assert len(created) == 1
-    assert created[0].stop_calls == 1
-
-
-def test_command_flag_uses_first_marker_and_stops_at_next_flag() -> None:
-    command = "--user-data-dir=/first --user-data-dir=/second --remote-debugging-port=9"
-    assert zendriver._command_flag(command, "--user-data-dir=") == "/first"
-    assert zendriver._command_flag(command, "--missing=") == ""
-
-
-def test_command_flag_preserves_values_containing_single_dashes() -> None:
-    assert (
-        zendriver._command_flag(
-            "--flag=value-with-dash --other=x",
-            "--flag=",
-        )
-        == "value-with-dash"
-    )
-
-
-def test_process_command_reads_proc_bytes_and_flattens_nuls(tmp_path: Path) -> None:
-    command = tmp_path / "proc" / "12" / "cmdline"
-    command.parent.mkdir(parents=True)
-    command.write_bytes(b"chrome\x00--flag=x\x00")
-    assert (
-        zendriver._process_command(
-            12,
-            proc_root=tmp_path / "proc",
-            platform="linux",
-        )
-        == "chrome --flag=x "
-    )
-
-
-def test_process_command_reports_failed_macos_ps(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    def run(
-        args: list[str],
-        *,
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[str]:
-        del args, capture_output, text, check
-        return subprocess.CompletedProcess([], 1, stdout="")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(OSError, match="Could not inspect process 12"):
-        zendriver._process_command(
-            12,
-            proc_root=tmp_path / "proc",
-            platform="darwin",
-        )
-
-
-def test_devtools_port_parses_owner_and_command_port_exactly(tmp_path: Path) -> None:
-    profile = tmp_path / "my-profile"
-    proc = tmp_path / "proc" / "123"
-    profile.mkdir()
-    proc.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("host-owner-123")
-    (proc / "cmdline").write_text(
-        f"chrome --user-data-dir={profile} "
-        "--remote-debugging-port=4567 extra-token another-token",
-    )
-    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
-
-
-def test_devtools_port_reads_active_port_when_command_has_no_port(
-    tmp_path: Path,
-) -> None:
-    profile = tmp_path / "profile"
-    proc = tmp_path / "proc" / "123"
-    profile.mkdir()
-    proc.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("host-123")
-    (proc / "cmdline").write_text(
-        f"chrome --user-data-dir={profile} --remote-debugging-port=0",
-    )
-    (profile / "DevToolsActivePort").write_text("4567\n/devtools/browser/id\n")
-    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
-
-
-def test_domain_cookies_handles_empty_host_domain_and_value() -> None:
-    browser = _FakeBrowser(
-        cookies=[
-            _FakeCookie(name="EMPTY", value="", domain="example.com"),
-            _FakeCookie(name="NONE", value="v", domain=""),
-            _FakeCookie(name="BOUNDARY", value="bad", domain="ample.com"),
-        ],
-    )
-    assert asyncio.run(
-        zendriver._domain_cookies(cast(Browser, browser), "https://example.com/"),
-    ) == {
-        "EMPTY": "",
-    }
-    assert (
-        asyncio.run(zendriver._domain_cookies(cast(Browser, browser), "about:blank"))
-        == {}
-    )
-
-
-def test_fetch_browser_logs_when_no_candidate(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setattr(zendriver, "_fetch_browser_candidates", lambda: iter(()))
-    with caplog.at_level("DEBUG", logger=zendriver.logger.name):
-        assert zendriver._fetch_browser(platform="darwin") == ""
-    assert caplog.records[-1].message == (
-        "no Chrome for Testing found; falling back to zendriver's Chrome"
-    )
-
-
-def test_fetch_browser_candidates_yields_all_supported_app_shapes(
-    roots: tuple[Path, Path],
-) -> None:
-    _fetch_browser_install(
-        roots[0],
-        "build",
-        name="Chromium",
-        arch="chrome-mac-x64",
-    )
-    candidates = list(zendriver._fetch_browser_candidates())
-    assert (
-        roots[0]
-        / "build"
-        / "chrome-mac-x64"
-        / "Chromium.app"
-        / "Contents"
-        / "MacOS"
-        / "Chromium"
-        in candidates
-    )
-
-
-def test_kill_browser_process_handles_browser_without_process_attribute() -> None:
-    class BrowserWithoutProcess:
-        pass
-
-    zendriver._kill_browser_process(cast(Browser, BrowserWithoutProcess()))
-
-
-def test_kill_browser_process_swallows_process_oserror() -> None:
-    class RaisingProcess(_FakeProcess):
+    class _NoisyTab(_ScriptedTab):
         @override
-        def kill(self) -> None:
-            raise OSError("already gone")
-
-    browser = _FakeBrowser()
-    browser._process = RaisingProcess()
-    zendriver._kill_browser_process(cast(Browser, browser))
-
-
-def test_main_frame_navigations_ignores_child_and_foreign_events() -> None:
-    class FakeNavigationTab:
-        def __init__(self) -> None:
-            self.registered: Callable[[object], None] | None = None
-
-        def add_handler(
-            self,
-            event_type: object,
-            handler: Callable[[object], None],
-        ) -> None:
-            assert event_type is page.FrameNavigated
-            self.registered = handler
-
-    async def go() -> bool:
-        tab = FakeNavigationTab()
-        event = zendriver._main_frame_navigations(cast(Tab, tab))
-        assert tab.registered is not None
-        tab.registered(object())
-        child_frame = _main_frame_navigated()
-        child_frame.frame.parent_id = page.FrameId("parent")
-        tab.registered(child_frame)
-        assert not event.is_set()
-        tab.registered(_main_frame_navigated())
-        await asyncio.sleep(0)
-        return event.is_set()
-
-    assert asyncio.run(go())
-
-
-def test_wire_url_removes_fragment_and_supplies_root_path() -> None:
-    assert zendriver._wire_url("https://example.com#frag") == "https://example.com/"
-    assert zendriver._wire_url("https://example.com/a#frag") == "https://example.com/a"
-
-
-def test_close_shared_browser_returns_when_no_devtools_port(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def no_port(profile: Path) -> int | None:
-        del profile
-        return None
-
-    monkeypatch.setattr(zendriver, "_devtools_port", no_port)
-    zendriver._close_shared_browser(_PROFILE)
-
-
-def test_close_shared_browser_closes_a_reachable_browser(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Connection:
-        def close(self) -> None:
-            pass
-
-    calls = iter([Connection(), OSError("closed")])
-
-    def port(profile: Path) -> int:
-        del profile
-        return 9222
-
-    def create_connection(
-        address: tuple[str, int],
-        timeout: float,
-    ) -> Connection | OSError:
-        del address, timeout
-        connection = next(calls)
-        if isinstance(connection, OSError):
-            raise connection
-        return connection
-
-    async def close_browser(port: int) -> None:
-        closed.append(port)
-
-    monkeypatch.setattr(zendriver, "_devtools_port", port)
-    monkeypatch.setattr(socket, "create_connection", create_connection)
-    closed: list[int] = []
-    monkeypatch.setattr(zendriver, "_close_browser_on_port", close_browser)
-    zendriver._close_shared_browser(_PROFILE)
-    assert closed == [9222]
-
-
-def test_shutdown_browsers_is_noop_without_a_pool(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(zendriver, "_pool_singleton", None)
-    zendriver.shutdown_browsers()
-    assert zendriver._pool_singleton is None
-
-
-def test_shutdown_browsers_clears_and_stops_existing_pool(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Pool:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def shutdown(self) -> None:
-            self.calls += 1
-
-    pool = Pool()
-    monkeypatch.setattr(zendriver, "_pool_singleton", pool)
-    zendriver.shutdown_browsers()
-    assert pool.calls == 1
-    assert zendriver._pool_singleton is None
-
-
-def test_pool_keys_separate_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
-    launched: list[_FakeBrowser] = []
-
-    async def fake_launch(
-        self: _BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> _FakeBrowser:
-        del self, profile_dir, headless
-        browser = _FakeBrowser()
-        launched.append(browser)
-        return browser
-
-    monkeypatch.setattr(_BrowserPool, "_connect", fake_launch)
-    pool = _BrowserPool()
-    try:
-
-        async def go() -> None:
-            await pool.browser(_PROFILE / "one", headless=True)
-            await pool.browser(_PROFILE / "two", headless=True)
-
-        pool.run(go())
-    finally:
-        pool.shutdown()
-    assert len(launched) == 2
-
-
-def test_command_flag_preserves_spaces_before_next_flag() -> None:
-    assert (
-        zendriver._command_flag(
-            "--flag=value with spaces --other=x",
-            "--flag=",
-        )
-        == "value with spaces"
-    )
-
-
-def test_domain_cookies_does_not_invent_a_host_for_invalid_urls() -> None:
-    browser = _FakeBrowser(
-        cookies=[
-            _FakeCookie(name="INVENTED", value="bad", domain="XXXX"),
-            _FakeCookie(name="PREFIX", value="bad", domain="xexample.com"),
-        ],
-    )
-    assert (
-        asyncio.run(
-            zendriver._domain_cookies(cast(Browser, browser), "about:blank"),
-        )
-        == {}
-    )
-
-
-def test_domain_cookies_strips_only_leading_cookie_dots() -> None:
-    browser = _FakeBrowser(
-        cookies=[_FakeCookie(name="COOKIE", value="ok", domain=".example.com")],
-    )
-    assert asyncio.run(
-        zendriver._domain_cookies(cast(Browser, browser), "https://example.com/"),
-    ) == {"COOKIE": "ok"}
-
-
-def test_launch_browser_passes_every_profile_config_field(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    captured: dict[str, object] = {}
-
-    async def start(config: Config) -> _FakeBrowser:
-        captured.update(
-            {
-                "headless": config.headless,
-                "profile": config.user_data_dir,
-                "sandbox": config.sandbox,
-                "executable": config.browser_executable_path,
-                "args": config(),
-                "timeout": config.browser_connection_timeout,
-                "tries": config.browser_connection_max_tries,
-            },
-        )
-        return _FakeBrowser()
-
-    monkeypatch.setattr("zendriver.start", start)
-    monkeypatch.setattr(zendriver, "_fetch_browser", lambda: "/cache/testing")
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
-    asyncio.run(
-        zendriver._launch_browser(tmp_path / "nested" / "profile", headless=True),
-    )
-
-    assert captured["headless"] is True
-    assert captured["profile"] == str(tmp_path / "nested" / "profile")
-    assert captured["sandbox"] is False
-    assert captured["executable"] == "/cache/testing"
-    assert captured["timeout"] == 0.5
-    assert captured["tries"] == 6
-    assert "--use-mock-keychain" in cast(list[str], captured["args"])
-
-
-def test_launch_browser_wraps_start_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    async def start(config: Config) -> _FakeBrowser:
-        del config
-        raise RuntimeError("connection refused")
-
-    monkeypatch.setattr("zendriver.start", start)
-    with pytest.raises(
-        zendriver.BrowserUnavailableError,
-        match=r"^Could not launch Chrome: connection refused$",
-    ):
-        asyncio.run(zendriver._launch_browser(tmp_path, headless=True))
-
-
-def test_fetch_zendriver_forwards_all_arguments(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    async def navigate(
-        url: str,
-        *,
-        profile_dir: Path,
-        timeout_sec: float,
-        headless: bool,
-        headers: dict[str, str] | None,
-        cookies: dict[str, str] | None,
-        trust: Trust,
-        max_redirects: int,
-        on_redirect: Callable[[str], None] | None,
-    ) -> BrowserResult:
-        captured.update(
-            {
-                "url": url,
-                "profile_dir": profile_dir,
-                "timeout_sec": timeout_sec,
-                "headless": headless,
-                "headers": headers,
-                "cookies": cookies,
-                "trust": trust,
-                "max_redirects": max_redirects,
-                "on_redirect": on_redirect,
-            },
-        )
-        return BrowserResult(body=b"body", cookies={}, final_url=url)
-
-    class Pool:
-        def run(
-            self,
-            coro: Coroutine[object, object, BrowserResult],
-            *,
-            timeout_sec: float = 0,
-        ) -> BrowserResult:
-            captured["outer_timeout"] = timeout_sec
-            return asyncio.run(coro)
-
-    def callback(target: str) -> None:
-        del target
-
-    def pool() -> Pool:
-        return Pool()
-
-    monkeypatch.setattr(zendriver, "_navigate", navigate)
-    monkeypatch.setattr(zendriver, "_pool", pool)
-    result = zendriver.fetch_zendriver(
-        "https://example.com/start",
-        profile_dir=_PROFILE,
-        timeout_sec=7.0,
-        headless=False,
-        headers={"X-Test": "yes"},
-        cookies={"SID": "cookie"},
-        trust="internal",
-        max_redirects=2,
-        on_redirect=callback,
-    )
-
-    assert result == BrowserResult(
-        body=b"body",
-        cookies={},
-        final_url="https://example.com/start",
-    )
-    assert captured == {
-        "url": "https://example.com/start",
-        "profile_dir": _PROFILE,
-        "timeout_sec": 7.0,
-        "headless": False,
-        "headers": {"X-Test": "yes"},
-        "cookies": {"SID": "cookie"},
-        "trust": "internal",
-        "max_redirects": 2,
-        "on_redirect": callback,
-        "outer_timeout": 37.0,
-    }
-
-
-def test_navigate_tab_opens_new_tab_and_waits_for_complete(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class TabDouble(_FakeTab):
-        def __init__(self) -> None:
-            super().__init__(content="<html>ok</html>", href="")
-            self.ready_states: list[str] = []
+        async def get_content(self) -> str:
+            for handler in self.handlers:
+                handler(object())
+                child = _main_frame_navigated()
+                child.frame.parent_id = page.FrameId("parent")
+                handler(child)
+            return wall
 
         @override
         async def wait_for_ready_state(
@@ -3359,179 +1725,20 @@ def test_navigate_tab_opens_new_tab_and_waits_for_complete(
             self.ready_states.append(until)
             return True
 
-    class BrowserDouble:
-        def __init__(self) -> None:
-            self.tab = TabDouble()
-            self.calls: list[tuple[str, bool]] = []
+        ready_states: list[str] = []  # noqa: RUF012 -- per-class record.
 
-        async def get(self, url: str, new_tab: bool = False) -> TabDouble:
-            self.calls.append((url, new_tab))
-            return self.tab
-
-    browser = BrowserDouble()
-
-    async def guard(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(zendriver, "_guard_requests", guard)
-    tab = asyncio.run(
-        zendriver._navigate_tab(
-            cast(Browser, browser),
-            "https://example.com/",
-        ),
-    )
-    assert tab is browser.tab
-    assert browser.calls == [(zendriver._AGENT_TAB, True)]
-    assert browser.tab.ready_states == ["complete"]
+    tab = _NoisyTab()
+    _NoisyTab.ready_states = []
+    assert _load_page(_browser_with(tab), timeout_sec=0.04) == wall.encode()
+    # Only the initial load: no main-frame navigation reached the settle wait.
+    assert _NoisyTab.ready_states == ["complete"]
 
 
-def test_closed_reports_timeout_and_failure_exactly(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class HangingTab(_FakeTab):
-        @override
-        async def close(self) -> None:
-            await asyncio.Event().wait()
-
-    class FailingTab(_FakeTab):
-        @override
-        async def close(self) -> None:
-            raise RuntimeError("close failed")
-
-    caplog.set_level("DEBUG", logger=zendriver.__name__)
-    asyncio.run(
-        zendriver._closed(cast(Tab, HangingTab(content="", href="")), budget_sec=0.001),
-    )
-    asyncio.run(
-        zendriver._closed(cast(Tab, FailingTab(content="", href="")), budget_sec=1.0),
-    )
-    assert [record.getMessage() for record in caplog.records] == [
-        "tab close timed out; abandoning the tab",
-        "tab close failed; abandoning the tab",
-    ]
-    default = cast(
-        object,
-        inspect.signature(zendriver._closed).parameters["budget_sec"].default,
-    )
-    assert default == 5.0
-
-
-def test_close_shared_browser_uses_bounded_probe_and_reports_stuck_port(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Connection:
-        def close(self) -> None:
-            pass
-
-    connections = [Connection(), Connection()]
-    calls: list[tuple[tuple[str, int], float | None]] = []
-    clock = iter([0.0, 0.0, 10.0])
-    sleeps: list[float] = []
-
-    def create_connection(
-        address: tuple[str, int],
-        timeout: float | None,
-    ) -> Connection:
-        calls.append((address, timeout))
-        return connections.pop()
-
-    def port(profile: Path) -> int:
-        del profile
-        return 9222
-
-    async def close_browser(port: int) -> None:
-        del port
-
-    def run(coro: Coroutine[object, object, object]) -> None:
-        coro.close()
-
-    monkeypatch.setattr(zendriver, "_devtools_port", port)
-    monkeypatch.setattr(socket, "create_connection", create_connection)
-    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(time, "sleep", sleeps.append)
-    monkeypatch.setattr(zendriver, "_close_browser_on_port", close_browser)
-    monkeypatch.setattr(asyncio, "run", run)
-    with pytest.raises(
-        zendriver.BrowserUnavailableError,
-        match=r"^Chrome on DevTools port 9222 did not close\.$",
-    ):
-        zendriver._close_shared_browser(_PROFILE)
-    assert calls == [
-        (("127.0.0.1", 9222), 0.2),
-        (("127.0.0.1", 9222), 0.1),
-    ]
-    assert sleeps == [0.05]
-
-
-def test_open_instance_polls_until_browser_stops(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser()
-    sleeps: list[float] = []
-
-    async def launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
-        assert profile_dir == _PROFILE
-        assert headless is False
-        return browser
-
-    async def navigate(browser_arg: Browser, url: str, *, blank: str) -> Tab:
-        assert browser_arg is browser
-        assert url == "https://example.com/"
-        assert blank == "about:blank"
-        return cast(Tab, browser.last_tab)
-
-    async def sleep(delay: float) -> None:
-        sleeps.append(delay)
-        browser.stopped = True
-
-    monkeypatch.setattr(zendriver, "_launch_browser", launch)
-    monkeypatch.setattr(zendriver, "_navigate_tab", navigate)
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-    asyncio.run(
-        zendriver._open_instance("https://example.com/", cast(Browser, browser)),
-    )
-    assert sleeps == [0.5]
-
-
-def test_stopped_logs_and_kills_on_timeout_and_failure(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class HangingBrowser(_FakeBrowser):
-        @override
-        async def stop(self) -> None:
-            await asyncio.Event().wait()
-
-    class FailingBrowser(_FakeBrowser):
-        @override
-        async def stop(self) -> None:
-            raise RuntimeError("stop failed")
-
-    timed_out = HangingBrowser()
-    failed = FailingBrowser()
-    timed_out_process = _FakeProcess()
-    failed_process = _FakeProcess()
-    timed_out._process = timed_out_process
-    failed._process = failed_process
-    caplog.set_level("WARNING", logger=zendriver.__name__)
-    asyncio.run(
-        zendriver._stopped(cast(Browser, timed_out), budget_sec=0.001),
-    )
-    asyncio.run(zendriver._stopped(cast(Browser, failed), budget_sec=1.0))
-    assert [record.getMessage() for record in caplog.records] == [
-        "browser stop timed out; killing the browser process",
-        "browser stop failed; killing the browser process",
-    ]
-    assert caplog.records[0].exc_info is None
-    assert caplog.records[1].exc_info is not None
-    assert timed_out_process.kills == 1
-    assert failed_process.kills == 1
-
-
-def test_settled_content_waits_for_complete_after_navigation() -> None:
+def test_load_waits_for_complete_after_a_navigation() -> None:
     class RecordingTab(_FakeTab):
         def __init__(self) -> None:
             super().__init__(
-                content="<html><title>Just a moment...</title></html>",
+                content="",
                 href="https://example.com/",
                 documents=[
                     "<html><title>Just a moment...</title></html>",
@@ -3551,149 +1758,12 @@ def test_settled_content_waits_for_complete_after_navigation() -> None:
             return await super().wait_for_ready_state(until)
 
     tab = RecordingTab()
-    assert asyncio.run(zendriver._settled_content(cast(Tab, tab), budget_sec=1.0)) == (
-        "<html>clear</html>"
-    )
-    assert tab.ready_states == ["complete"]
+    assert _load_page(_browser_with(tab), timeout_sec=2.0) == b"<html>clear</html>"
+    # The initial load, then the page the challenge navigated to.
+    assert tab.ready_states == ["complete", "complete"]
 
 
-def test_pool_returns_the_same_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Pool:
-        pass
-
-    created: list[Pool] = []
-
-    def make_pool() -> Pool:
-        pool = Pool()
-        created.append(pool)
-        return pool
-
-    monkeypatch.setattr(zendriver, "_pool_singleton", None)
-    monkeypatch.setattr(zendriver, "_BrowserPool", make_pool)
-    first = zendriver._pool()
-    second = zendriver._pool()
-    assert first is second
-    assert created == [first]
-
-
-def test_main_help_is_exact(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(sys, "argv", ["zendriver", "--help"])
-    with pytest.raises(SystemExit) as error:
-        zendriver.main()
-    assert error.value.code == 0
-    assert capsys.readouterr().out == (
-        "usage: zendriver [-h] [url]\n\n"
-        "Open a URL in a headed Chrome on the zendriver backend's dedicated profile -- "
-        "the same profile the headless RequestParams(policy=PolicyParams(transport="
-        '"zendriver")) fetch uses. Use it to debug a fetch that errored: you see '
-        "exactly what Chrome renders (a challenge, a login wall, a broken page), and "
-        "any cookies you seat while there (e.g. by logging in) persist for later "
-        "headless fetches. Close the window when done.\n\n"
-        "positional arguments:\n"
-        "  url         The URL to open (typically the one whose headless fetch failed).\n"
-        "              Omit to open a blank page and navigate by hand.\n\n"
-        "options:\n"
-        "  -h, --help  show this help message and exit\n\n"
-        "Examples:\n"
-        "  zendriver https://the-site-that-failed.example/\n"
-        "  zendriver https://login.example/  # seat a session cookie\n"
-        "  zendriver # opens blank; navigate by hand\n"
-    )
-
-
-def test_fetch_zendriver_defaults_are_stable() -> None:
-    parameters = inspect.signature(zendriver.fetch_zendriver).parameters
-    assert cast(object, parameters["timeout_sec"].default) == 30.0
-    assert cast(object, parameters["headless"].default) is True
-    assert cast(object, parameters["trust"].default) == "untrusted"
-    assert cast(object, parameters["max_redirects"].default) == 10
-
-
-def test_closed_logs_traceback_for_failed_close(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class FailingTab(_FakeTab):
-        @override
-        async def close(self) -> None:
-            raise RuntimeError("close failed")
-
-    caplog.set_level("DEBUG", logger=zendriver.__name__)
-    asyncio.run(
-        zendriver._closed(cast(Tab, FailingTab(content="", href=""))),
-    )
-    assert len(caplog.records) == 1
-    assert caplog.records[0].getMessage() == "tab close failed; abandoning the tab"
-    assert caplog.records[0].exc_info is not None
-
-
-def test_domain_cookies_strips_one_cookie_domain_prefix() -> None:
-    browser = _FakeBrowser(
-        cookies=[_FakeCookie(name="COOKIE", value="ok", domain=".example.com")],
-    )
-    assert asyncio.run(
-        zendriver._domain_cookies(cast(Browser, browser), "https://example.com/"),
-    ) == {"COOKIE": "ok"}
-
-
-def test_guard_logs_exact_redirect_budget(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    browser = _FakeBrowser(
-        paused_events=[_request_paused("https://public.example/next")],
-    )
-    _patch_pool(monkeypatch, browser)
-    caplog.set_level("DEBUG", logger=zendriver.__name__)
-    asyncio.run(
-        _navigate(
-            "https://public.example/start",
-            profile_dir=_PROFILE,
-            timeout_sec=5.0,
-            headless=True,
-            max_redirects=0,
-            on_redirect=None,
-        ),
-    )
-    assert [record.getMessage() for record in caplog.records] == [
-        "redirect budget of 0 exhausted at 'https://public.example/next'",
-    ]
-
-
-def test_domain_cookies_rejects_nonmatching_prefix_domains() -> None:
-    browser = _FakeBrowser(
-        cookies=[
-            _FakeCookie(name="PREFIX", value="bad", domain="XX.example.com"),
-            _FakeCookie(name="MATCH", value="ok", domain="example.com"),
-        ],
-    )
-    assert asyncio.run(
-        zendriver._domain_cookies(cast(Browser, browser), "https://example.com/"),
-    ) == {"MATCH": "ok"}
-
-
-def test_closed_preserves_failure_traceback_and_default_budget(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class FailingTab(_FakeTab):
-        @override
-        async def close(self) -> None:
-            raise RuntimeError("close failed")
-
-    caplog.set_level("DEBUG", logger=zendriver.__name__)
-    asyncio.run(
-        zendriver._closed(cast(Tab, FailingTab(content="", href="")), budget_sec=1.0),
-    )
-    record = caplog.records[-1]
-    assert record.getMessage() == "tab close failed; abandoning the tab"
-    assert record.exc_info is not None
-
-
-def test_settled_content_marks_success_body(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_load_settle_marks_success_body(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[bool] = []
 
     def classify(body: str, *, on_success_body: bool = False) -> None:
@@ -3701,225 +1771,503 @@ def test_settled_content_marks_success_body(
         calls.append(on_success_body)
 
     monkeypatch.setattr(zendriver, "classify_challenge", classify)
-    tab = _FakeTab(content="<html>ok</html>", href="https://example.com/")
-    assert asyncio.run(zendriver._settled_content(cast(Tab, tab), budget_sec=0.0)) == (
-        "<html>ok</html>"
-    )
+    assert _load_page(_FakeBrowser()) == b"<html>ok</html>"
     assert calls == [True]
 
 
-def test_navigate_signature_defaults_and_settle_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser(href="https://example.com/final")
-    pool = _StubPool(browser)
-    budgets: list[float] = []
-
-    async def settle(tab: Tab, *, budget_sec: float) -> str:
-        del tab
-        budgets.append(budget_sec)
-        return "<html>ok</html>"
-
-    monkeypatch.setattr(zendriver, "_pool", lambda: pool)
-    monkeypatch.setattr(zendriver, "_settled_content", settle)
-    result = asyncio.run(
-        zendriver._navigate(
-            "https://example.com/",
-            profile_dir=_PROFILE,
-            timeout_sec=8.0,
-            headless=True,
-        ),
-    )
-    assert result == BrowserResult(
-        body=b"<html>ok</html>",
-        cookies={},
-        final_url="https://example.com/final",
-    )
-    assert budgets == [4.0]
+# -- _load tab close ----------------------------------------------------------
 
 
-def test_navigate_tab_uses_exact_defaults_and_enables_network_for_ambient_headers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser()
+class _SlowCancelTab(_FakeTab):
+    """A tab whose close hangs, then does real work while cancelling."""
 
-    async def guard(*args: object, **kwargs: object) -> None:
-        del args, kwargs
+    def __init__(self) -> None:
+        super().__init__(content="<html>ok</html>", href="")
+        self.finalized = False
 
-    monkeypatch.setattr(zendriver, "_guard_requests", guard)
-    asyncio.run(
-        zendriver._navigate_tab(
-            cast(Browser, browser),
-            "https://example.com/",
-            headers={"X-Test": "yes"},
-        ),
-    )
-    assert browser.last_tab is not None
-    assert [command["method"] for command in browser.last_tab.wire_commands] == [
-        "Network.enable",
-        "Network.setExtraHTTPHeaders",
-    ]
+    @override
+    async def close(self) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A real close releases the target and deregisters its handler;
+            # both are awaits, so cancellation does not finish them instantly.
+            await asyncio.sleep(0)
+            self.finalized = True
+            raise
 
 
-def test_guard_uses_exact_document_pattern() -> None:
-    tab = _FakeTab(content="", href="")
-    asyncio.run(
-        zendriver._guard_requests(
-            cast(Tab, tab),
-            "https://example.com/start#fragment",
-            trust="internal",
-            on_redirect=None,
-            max_redirects=0,
-        ),
-    )
-    assert tab.wire_commands == [
-        {
-            "method": "Fetch.enable",
-            "params": {
-                "patterns": [
-                    {
-                        "requestStage": "Request",
-                        "resourceType": "Document",
-                        "urlPattern": "*",
-                    },
-                ],
-            },
-        },
-    ]
-
-
-def test_main_uses_fixed_program_name(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(sys, "argv", ["different-name", "--help"])
-    with pytest.raises(SystemExit):
-        zendriver.main()
-    assert capsys.readouterr().out.startswith("usage: zendriver [-h] [url]\n")
-
-
-def test_process_command_requires_false_check_flag(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    seen: list[bool] = []
-
-    def run(
-        args: list[str],
-        *,
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[str]:
-        del args, capture_output, text
-        seen.append(check)
-        return subprocess.CompletedProcess([], 0, stdout="command")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert (
-        zendriver._process_command(
-            1,
-            proc_root=tmp_path / "missing",
-            platform="darwin",
-        )
-        == "command"
-    )
-    assert seen == [False]
-
-
-def test_process_command_does_not_switch_linux_to_ps(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        del args, kwargs
-        raise AssertionError("Linux proc lookup must not invoke ps")
-
-    monkeypatch.setattr(subprocess, "run", run)
-    with pytest.raises(FileNotFoundError):
-        zendriver._process_command(
-            1,
-            proc_root=tmp_path / "missing",
-            platform="linux",
-        )
-
-
-def test_domain_cookies_does_not_match_empty_domain_to_placeholder_host() -> None:
-    browser = _FakeBrowser(
-        cookies=[_FakeCookie(name="EMPTY", value="bad", domain="")],
-    )
-    assert (
-        asyncio.run(
-            zendriver._domain_cookies(cast(Browser, browser), "https://XXXX/"),
-        )
-        == {}
-    )
-
-
-def test_close_shared_browser_passes_the_profile_to_port_lookup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: list[Path] = []
-
-    def no_port(profile: Path) -> int | None:
-        seen.append(profile)
-        return None
-
-    monkeypatch.setattr(zendriver, "_devtools_port", no_port)
-    zendriver._close_shared_browser(_PROFILE)
-    assert seen == [_PROFILE]
-
-
-def test_cleanup_defaults_are_passed_to_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    budgets: list[float] = []
+def _shrink_close_budget(monkeypatch: pytest.MonkeyPatch) -> list[float | None]:
+    """Shrink ``_load``'s 5s tab-close ceiling to 0.01s; return every budget seen."""
     real_timeout = asyncio.timeout
+    budgets: list[float | None] = []
 
-    def timeout(budget: float):
-        budgets.append(budget)
-        return real_timeout(0.0)
+    def timeout(delay: float | None) -> asyncio.Timeout:
+        budgets.append(delay)
+        return real_timeout(0.01 if delay == 5.0 else delay)
 
     monkeypatch.setattr(asyncio, "timeout", timeout)
-    asyncio.run(zendriver._closed(cast(Tab, _FakeTab(content="", href=""))))
-    asyncio.run(zendriver._stopped(cast(Browser, _FakeBrowser())))
-    assert budgets == [5.0, 30.0]
+    return budgets
 
 
-def test_browser_pool_thread_is_named_and_daemonized() -> None:
-    pool = _BrowserPool()
+def test_an_abandoned_tab_close_is_reaped_before_load_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out close must not outlive the call that gave up on it.
+
+    ``cancel()`` only REQUESTS cancellation; the pool's loop is persistent, so
+    an unawaited task survives and raises into a loop nobody is watching.
+    """
+    tab = _SlowCancelTab()
+    budgets = _shrink_close_budget(monkeypatch)
+
+    async def go() -> int:
+        before = asyncio.all_tasks()
+        assert await _drive(_browser_with(tab), timeout_sec=2.0) == b"<html>ok</html>"
+        return len([t for t in asyncio.all_tasks() - before if not t.done()])
+
+    assert asyncio.run(asyncio.wait_for(go(), timeout=10.0)) == 0
+    assert tab.finalized, "the abandoned close never ran its cleanup"
+    assert budgets == [2.0, 5.0]
+
+
+def test_tab_close_logs_timeout_and_failure_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class HangingTab(_FakeTab):
+        @override
+        async def close(self) -> None:
+            await asyncio.Event().wait()
+
+    _shrink_close_budget(monkeypatch)
+    caplog.set_level("DEBUG", logger=zendriver.__name__)
+    _load_page(
+        _browser_with(HangingTab(content="<html>ok</html>", href="")),
+        timeout_sec=2.0,
+    )
+    _load_page(_RaisingCloseBrowser(), timeout_sec=2.0)
+    assert [record.getMessage() for record in caplog.records] == [
+        "tab close timed out; abandoning the tab",
+        "tab close failed; abandoning the tab",
+    ]
+    assert caplog.records[0].exc_info is None
+    assert caplog.records[1].exc_info is not None
+
+
+# -- BrowserPool --------------------------------------------------------------
+
+
+@dataclass(slots=True, kw_only=True)
+class _Connects:
+    """Fakes for ``_shared_chrome`` and ``zendriver.start`` in ``BrowserPool.browser``."""
+
+    shared: list[tuple[Path, bool]]
+    started: list[int]
+    browsers: list[_FakeBrowser]
+
+
+@pytest.fixture
+def connects(monkeypatch: pytest.MonkeyPatch) -> _Connects:
+    """Stub the launch and attach steps; record each."""
+    record = _Connects(shared=[], started=[], browsers=[])
+
+    def shared(profile_dir: Path, *, headless: bool) -> int:
+        record.shared.append((profile_dir, headless))
+        return 7777
+
+    async def start(**kwargs: object) -> _FakeBrowser:
+        record.started.append(from_plain(kwargs["port"], int))
+        assert kwargs["host"] == "127.0.0.1"
+        # 3s to give up on a dead Chrome; a live one answers in 0.3s.
+        assert kwargs["browser_connection_timeout"] == 0.5
+        assert kwargs["browser_connection_max_tries"] == 6
+        await asyncio.sleep(0)
+        browser = _FakeBrowser()
+        record.browsers.append(browser)
+        return browser
+
+    monkeypatch.setattr(zendriver, "_shared_chrome", shared)
+    monkeypatch.setattr("zendriver.start", start)
+    return record
+
+
+def test_pool_attaches_to_the_port_the_shared_chrome_reports(
+    connects: _Connects,
+) -> None:
+    pool = BrowserPool()
     try:
-        assert pool._thread.name == "loop-web-browser"
-        assert pool._thread.daemon is True
+        browser = pool.run(pool.browser(_PROFILE, headless=True))
+    finally:
+        pool.shutdown()
+    assert browser is connects.browsers[0]
+    assert connects.shared == [(_PROFILE, True)]
+    assert connects.started == [7777]
+
+
+def test_pool_reuses_browser_per_profile(connects: _Connects) -> None:
+    pool = BrowserPool()
+    try:
+
+        async def go() -> bool:
+            a = await pool.browser(_PROFILE, headless=True)
+            b = await pool.browser(_PROFILE, headless=True)
+            return a is b
+
+        assert pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 1
+
+
+def test_pool_keys_separate_profiles(connects: _Connects) -> None:
+    pool = BrowserPool()
+    try:
+
+        async def go() -> None:
+            await pool.browser(_PROFILE / "one", headless=True)
+            await pool.browser(_PROFILE / "two", headless=True)
+
+        pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 2
+
+
+def test_pool_rejects_mode_change_for_live_profile(connects: _Connects) -> None:
+    pool = BrowserPool()
+    try:
+
+        async def go() -> None:
+            await pool.browser(_PROFILE, headless=True)
+            with pytest.raises(
+                RuntimeError,
+                match=(
+                    r"^"
+                    + re.escape(
+                        "Cannot change Zendriver launch mode for a live profile.",
+                    )
+                    + r"$"
+                ),
+            ):
+                await pool.browser(_PROFILE, headless=False)
+
+        pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 1
+
+
+def test_pool_serializes_concurrent_mode_changes(connects: _Connects) -> None:
+    pool = BrowserPool()
+    try:
+
+        async def go() -> list[object]:
+            return list(
+                await asyncio.gather(
+                    pool.browser(_PROFILE, headless=True),
+                    pool.browser(_PROFILE, headless=False),
+                    return_exceptions=True,
+                ),
+            )
+
+        results = pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 1
+    assert sum(isinstance(result, RuntimeError) for result in results) == 1
+
+
+def test_pool_reconnects_a_dead_connection(connects: _Connects) -> None:
+    pool = BrowserPool()
+    try:
+
+        async def go() -> None:
+            first = await pool.browser(_PROFILE, headless=True)
+            cast(_FakeBrowser, first).connection.closed = True  # Chrome exited.
+            second = await pool.browser(_PROFILE, headless=True)
+            assert second is not first
+
+        pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 2
+
+
+def test_pool_reports_an_unreachable_devtools_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def start(**kwargs: object) -> _FakeBrowser:
+        del kwargs
+        raise RuntimeError("Failed to connect to browser")
+
+    def shared(profile_dir: Path, *, headless: bool) -> int:
+        del profile_dir, headless
+        return 9
+
+    monkeypatch.setattr(zendriver, "_shared_chrome", shared)
+    monkeypatch.setattr("zendriver.start", start)
+    pool = BrowserPool()
+    try:
+        with pytest.raises(
+            zendriver.BrowserUnavailableError,
+            match=r"^Could not attach to Chrome on DevTools port 9: ",
+        ):
+            pool.run(pool.browser(_PROFILE, headless=True))
     finally:
         pool.shutdown()
 
 
-@pytest.fixture
-def socket_dir() -> Iterator[Path]:
-    """Yield a directory shallow enough to bind a Unix socket in.
+@pytest.mark.parametrize("death", ["closed", "listener_stopped", "no_listener"])
+def test_pool_reconnects_every_dead_connection_shape(
+    connects: _Connects,
+    death: str,
+) -> None:
+    pool = BrowserPool()
+    try:
 
-    AF_UNIX caps a socket path at 108 bytes, and ``tmp_path`` nests several levels
-    under ``TMPDIR``: past the cap wherever TMPDIR is itself long. Production binds
-    directly under ``tempfile.gettempdir()`` for the same reason.
+        async def go() -> None:
+            first = cast(_FakeBrowser, await pool.browser(_PROFILE, headless=True))
+            if death == "closed":
+                first.connection.closed = True
+            elif death == "listener_stopped":
+                assert first.connection.listener is not None
+                first.connection.listener.running = False
+            else:
+                first.connection.listener = None
+            assert await pool.browser(_PROFILE, headless=True) is not first
+
+        pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 2
+
+
+def test_pool_reconnects_a_browser_without_a_connection(connects: _Connects) -> None:
+    pool = BrowserPool()
+    key = str(_PROFILE.resolve())
+    try:
+
+        async def go() -> None:
+            first = await pool.browser(_PROFILE, headless=True)
+            pool._browsers[key] = (True, cast(Browser, _ConnectionlessBrowser()))
+            assert await pool.browser(_PROFILE, headless=True) is not first
+
+        pool.run(go())
+    finally:
+        pool.shutdown()
+    assert len(connects.browsers) == 2
+
+
+class _ConnectionlessBrowser:
+    """A browser whose connection never opened."""
+
+    connection = None
+
+
+def test_pool_run_gives_up_when_its_loop_stopped() -> None:
+    """A stopped loop must surface a timeout, never an unbounded wait."""
+    pool = BrowserPool()
+    try:
+        pool._loop.call_soon_threadsafe(pool._loop.stop)
+        pool._thread.join(timeout=5)
+        assert not pool._thread.is_alive()
+
+        async def never_scheduled() -> str:
+            raise AssertionError("A stopped loop must not run the coroutine.")
+
+        with pytest.raises(TimeoutError):
+            pool.run(never_scheduled(), timeout_sec=0.05)
+    finally:
+        pool.shutdown()
+
+
+def test_pool_run_default_timeout_waits_without_a_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float | None] = []
+
+    class Future:
+        def result(self, timeout: float | None) -> int:
+            timeouts.append(timeout)
+            return 1
+
+    def submit(
+        coroutine: Coroutine[object, object, int],
+        loop: asyncio.AbstractEventLoop,
+    ) -> Future:
+        del loop
+        coroutine.close()
+        return Future()
+
+    pool = BrowserPool()
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", submit)
+    try:
+
+        async def value() -> int:
+            return 1
+
+        assert pool.run(value()) == 1
+        assert timeouts == [None]
+    finally:
+        pool.shutdown()
+
+
+def test_pool_shutdown_joins_thread_and_closes_loop() -> None:
+    pool = BrowserPool()
+    assert pool._thread.name == "loop-web-browser"
+    assert pool._thread.daemon is True
+    pool.shutdown()
+    assert not pool._thread.is_alive()
+    assert pool._loop.is_closed()
+
+
+def test_pool_shutdown_twice_is_a_noop() -> None:
+    pool = BrowserPool()
+    pool.shutdown()
+    pool.shutdown()
+    assert pool._loop.is_closed()
+
+
+def test_pool_shutdown_disconnects_without_stopping_the_shared_chrome() -> None:
+    """Closing this process's pool must leave Chrome up for every other process.
+
+    ``Browser.stop`` sends ``Browser.close``, which shuts Chrome down for every
+    process attached to it.
     """
-    with tempfile.TemporaryDirectory(prefix="zd-") as root:
-        yield Path(root)
+    pool = BrowserPool()
+    browser = _FakeBrowser()
+    pool._browsers["profile"] = (True, cast(Browser, browser))
+
+    pool.shutdown()
+
+    assert browser.connection.closed, "the websocket was left open"
+    assert browser.stop_calls == 0, "shutdown stopped the shared Chrome"
 
 
-def test_browser_pool_run_defaults_to_no_timeout() -> None:
-    default = cast(
-        object,
-        inspect.signature(_BrowserPool.run).parameters["timeout_sec"].default,
-    )
-    assert default == 0
+def test_pool_shutdown_skips_a_browser_without_a_connection() -> None:
+    pool = BrowserPool()
+    pool._browsers["profile"] = (True, cast(Browser, _ConnectionlessBrowser()))
+    pool.shutdown()
+    assert pool._loop.is_closed()
 
 
-def test_browser_pool_run_loop_installs_exact_warning_filters(
+def test_pool_shutdown_logs_a_failed_disconnect_and_still_stops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FailingConnection(_FakeConnection):
+        @override
+        async def aclose(self) -> None:
+            raise RuntimeError("socket gone")
+
+    browser = _FakeBrowser()
+    browser.connection = _FailingConnection()
+    pool = BrowserPool()
+    pool._browsers["profile"] = (True, cast(Browser, browser))
+    caplog.set_level("WARNING", logger=zendriver.__name__)
+
+    pool.shutdown()
+
+    assert [r.getMessage() for r in caplog.records] == [
+        "browser disconnect failed during shutdown",
+    ]
+    assert pool._loop.is_closed()
+
+
+def test_pool_shutdown_uses_its_literal_default_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = BrowserPool()
+    pool._browsers["profile"] = (True, cast(Browser, _FakeBrowser()))
+    timeouts: list[float] = []
+
+    def run(
+        coroutine: Coroutine[object, object, object],
+        *,
+        timeout_sec: float,
+    ) -> object:
+        timeouts.append(timeout_sec)
+        coroutine.close()
+        return object()
+
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(pool, "run", run)
+    pool.shutdown()
+
+    assert timeouts == [5.0]
+
+
+def test_pool_shutdown_spends_one_budget_across_every_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = BrowserPool()
+    browsers = [_FakeBrowser() for _ in range(3)]
+    for index, browser in enumerate(browsers):
+        pool._browsers[f"profile-{index}"] = (True, cast(Browser, browser))
+    # The loop thread reads the clock too, so this one never runs dry: the first
+    # two reads (deadline, first browser) are 0, every later read is past it.
+    reads = [0]
+
+    def monotonic() -> float:
+        reads[0] += 1
+        return 0.0 if reads[0] <= 2 else 10.0
+
+    monkeypatch.setattr(time, "monotonic", monotonic)
+
+    pool.shutdown(budget_sec=5.0)
+
+    assert [browser.connection.closed for browser in browsers] == [True, False, False]
+
+
+class _Launched:
+    """Stands in for a launched Chrome's ``Popen`` in ``_launched``."""
+
+    def __init__(self, *, stuck: bool) -> None:
+        self.stuck = stuck
+        self.calls: list[str] = []
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.calls.append(f"wait:{timeout}")
+        if self.stuck and timeout is not None:
+            raise subprocess.TimeoutExpired("chrome", timeout)
+        return 0
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+
+
+def test_pool_shutdown_stop_launched_terminates_then_kills_a_stuck_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    polite, stuck = _Launched(stuck=False), _Launched(stuck=True)
+    monkeypatch.setattr(zendriver, "_launched", [polite, stuck])
+
+    BrowserPool().shutdown(stop_launched=True)
+
+    assert polite.calls == ["terminate", "wait:5"]
+    assert stuck.calls == ["terminate", "wait:5", "kill", "wait:None"]
+    assert zendriver._launched == []
+
+
+def test_pool_shutdown_leaves_launched_chromes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched = _Launched(stuck=False)
+    monkeypatch.setattr(zendriver, "_launched", [launched])
+
+    BrowserPool().shutdown()
+
+    assert launched.calls == []
+
+
+def test_pool_run_loop_installs_exact_warning_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loop = asyncio.new_event_loop()
-    pool = object.__new__(_BrowserPool)
+    pool = object.__new__(BrowserPool)
     pool._loop = loop
     calls: list[tuple[object, ...]] = []
     event_loops: list[object] = []
@@ -3947,372 +2295,59 @@ def test_browser_pool_run_loop_installs_exact_warning_filters(
     ]
 
 
-def test_browser_pool_shutdown_default_budget_is_five_seconds() -> None:
-    default = cast(
-        object,
-        inspect.signature(_BrowserPool.shutdown).parameters["budget_sec"].default,
-    )
-    assert default == 5.0
-
-
-def test_navigate_tab_default_policy_values_reach_guard(
+def test_attach_survives_a_reply_to_a_cancelled_cdp_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    browser = _FakeBrowser()
-    captured: dict[str, object] = {}
+    """A CDP reply arriving after its transaction was cancelled must be dropped.
 
-    async def guard(*args: object, **kwargs: object) -> None:
-        del args
-        captured.update(kwargs)
+    ``Transaction.__call__`` sets the result unconditionally, so a reply landing
+    on a cancelled future raises ``InvalidStateError`` inside the listener and
+    kills it for the whole connection.
 
-    monkeypatch.setattr(zendriver, "_guard_requests", guard)
-    asyncio.run(
-        zendriver._navigate_tab(
-            cast(Browser, browser),
-            "https://example.com/",
-        ),
-    )
-    assert captured["trust"] == "untrusted"
-    assert captured["max_redirects"] == 10
+    Driven through ``BrowserPool.browser`` rather than by calling the patcher
+    directly: arming it on the attach path is the contract.
+    """
 
+    def shared(profile_dir: Path, *, headless: bool) -> int:
+        del profile_dir, headless
+        return 1
 
-def test_guard_strips_fragment_from_initial_wire_url() -> None:
-    seen: list[str] = []
-    browser = _FakeBrowser(
-        paused_events=[_request_paused("https://example.com/")],
-    )
-    asyncio.run(
-        zendriver._navigate_tab(
-            cast(Browser, browser),
-            "https://example.com/#fragment",
-            trust="internal",
-            on_redirect=seen.append,
-        ),
-    )
-    assert seen == []
+    async def start(**kwargs: object) -> _FakeBrowser:
+        del kwargs
+        return _FakeBrowser()
 
-
-def test_settled_content_returns_at_exact_deadline_without_waiting(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class NoWait:
-        def clear(self) -> None:
-            pass
-
-        async def wait(self) -> None:
-            raise AssertionError("wait crossed an exact deadline")
-
-    def navigation_watcher(tab: Tab) -> NoWait:
-        del tab
-        return NoWait()
-
-    monkeypatch.setattr(zendriver, "_main_frame_navigations", navigation_watcher)
-    tab = _FakeTab(
-        content="<html><title>Just a moment...</title></html>",
-        href="https://example.com/",
-    )
-
-    async def go() -> str:
-        loop = asyncio.get_running_loop()
-        calls = 0
-
-        def time() -> float:
-            nonlocal calls
-            calls += 1
-            return 100.0
-
-        monkeypatch.setattr(loop, "time", time)
-        return await zendriver._settled_content(cast(Tab, tab), budget_sec=0.0)
-
-    assert asyncio.run(go()) == "<html><title>Just a moment...</title></html>"
-
-
-def test_domain_cookies_never_invents_a_domain_for_empty_cookie_domain() -> None:
-    browser = _FakeBrowser(
-        cookies=[_FakeCookie(name="EMPTY", value="bad", domain="")],
-    )
-    assert (
-        asyncio.run(
-            zendriver._domain_cookies(cast(Browser, browser), "https://XXXX/"),
-        )
-        == {}
-    )
-
-
-def test_settled_content_does_not_wait_at_exact_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fail_wait(*args: object, **kwargs: object) -> str:
-        del args, kwargs
-        raise AssertionError("wait_for crossed an exact deadline")
-
-    monkeypatch.setattr(asyncio, "wait_for", fail_wait)
-    tab = _FakeTab(
-        content="<html><title>Just a moment...</title></html>",
-        href="https://example.com/",
-    )
-
-    async def go() -> str:
-        loop = asyncio.get_running_loop()
-        monkeypatch.setattr(loop, "time", lambda: 100.0)
-        return await zendriver._settled_content(cast(Tab, tab), budget_sec=0.0)
-
-    assert asyncio.run(go()) == "<html><title>Just a moment...</title></html>"
-
-
-def test_navigate_forwards_every_argument_and_harvests_final_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    browser = _FakeBrowser(href="https://example.com/final")
-
-    class RecordingTab(_FakeTab):
-        def __init__(self) -> None:
-            super().__init__(content="", href="https://example.com/final")
-            self.evaluations: list[str] = []
-
-        @override
-        async def evaluate(self, expr: str) -> str:
-            self.evaluations.append(expr)
-            return await super().evaluate(expr)
-
-    tab = RecordingTab()
-    captured: dict[str, object] = {}
-    default_calls: list[dict[str, object]] = []
-
-    def callback(target: str) -> None:
-        del target
-
-    class Pool:
-        async def browser(
-            self,
-            profile_dir: Path,
-            *,
-            headless: bool,
-        ) -> _FakeBrowser:
-            captured["browser"] = (profile_dir, headless)
-            return browser
-
-    async def navigate_tab(
-        browser_arg: Browser,
-        url: str,
-        **kwargs: object,
-    ) -> Tab:
-        captured["tab"] = (browser_arg, url, kwargs)
-        if kwargs.get("trust") == "untrusted":
-            default_calls.append(kwargs)
-        return cast(Tab, tab)
-
-    async def settle(tab_arg: Tab, *, budget_sec: float) -> str:
-        captured["settle"] = (tab_arg, budget_sec)
-        return "<html>body</html>"
-
-    async def cookies(browser_arg: Browser, url: str) -> dict[str, str]:
-        captured["cookies"] = (browser_arg, url)
-        return {"SID": "value"}
-
-    async def close(tab_arg: Tab) -> None:
-        captured["close"] = tab_arg
-
-    def pool() -> Pool:
-        return Pool()
-
-    monkeypatch.setattr(zendriver, "_pool", pool)
-    monkeypatch.setattr(zendriver, "_navigate_tab", navigate_tab)
-    monkeypatch.setattr(zendriver, "_settled_content", settle)
-    monkeypatch.setattr(zendriver, "_domain_cookies", cookies)
-    monkeypatch.setattr(zendriver, "_closed", close)
-    result = asyncio.run(
-        zendriver._navigate(
-            "https://example.com/start",
-            profile_dir=_PROFILE,
-            timeout_sec=8.0,
-            headless=False,
-            headers={"X-Test": "yes"},
-            cookies={"OLD": "cookie"},
-            trust="internal",
-            max_redirects=2,
-            on_redirect=callback,
-        ),
-    )
-    assert result == BrowserResult(
-        body=b"<html>body</html>",
-        cookies={"SID": "value"},
-        final_url="https://example.com/final",
-    )
-    assert len(browser.cookies.seeded) == 1
-    seeded = browser.cookies.seeded[0]
-    assert isinstance(seeded, network.CookieParam)
-    assert seeded.name == "OLD"
-    assert seeded.value == "cookie"
-    assert seeded.url == "https://example.com/start"
-    assert tab.evaluations == ["document.location.href"]
-    assert captured == {
-        "browser": (_PROFILE, False),
-        "tab": (
-            browser,
-            "https://example.com/start",
-            {
-                "headers": {"X-Test": "yes"},
-                "trust": "internal",
-                "max_redirects": 2,
-                "on_redirect": callback,
-            },
-        ),
-        "settle": (tab, 4.0),
-        "cookies": (browser, "https://example.com/final"),
-        "close": tab,
-    }
-    asyncio.run(
-        zendriver._navigate(
-            "https://example.com/start",
-            profile_dir=_PROFILE,
-            timeout_sec=8.0,
-            headless=False,
-        ),
-    )
-    assert default_calls == [
-        {
-            "headers": None,
-            "trust": "untrusted",
-            "max_redirects": 10,
-            "on_redirect": None,
-        },
-    ]
-
-
-def test_fetch_zendriver_forwards_all_literal_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    async def navigate(
-        url: str,
-        *,
-        profile_dir: Path,
-        timeout_sec: float,
-        headless: bool,
-        headers: dict[str, str] | None,
-        cookies: dict[str, str] | None,
-        trust: Trust,
-        max_redirects: int,
-        on_redirect: Callable[[str], None] | None,
-    ) -> BrowserResult:
-        captured.update(
-            {
-                "url": url,
-                "profile_dir": profile_dir,
-                "timeout_sec": timeout_sec,
-                "headless": headless,
-                "headers": headers,
-                "cookies": cookies,
-                "trust": trust,
-                "max_redirects": max_redirects,
-                "on_redirect": on_redirect,
-            },
-        )
-        return BrowserResult(body=b"body", cookies={}, final_url=url)
-
-    class Pool:
-        def run(
-            self,
-            coroutine: Coroutine[object, object, BrowserResult],
-            *,
-            timeout_sec: float,
-        ) -> BrowserResult:
-            captured["run_timeout_sec"] = timeout_sec
-            return asyncio.run(coroutine)
-
-    def pool() -> Pool:
-        return Pool()
-
-    monkeypatch.setattr(zendriver, "_navigate", navigate)
-    monkeypatch.setattr(zendriver, "_pool", pool)
-    result = zendriver.fetch_zendriver(
-        "https://example.com/",
-        profile_dir=_PROFILE,
-    )
-
-    assert result == BrowserResult(
-        body=b"body",
-        cookies={},
-        final_url="https://example.com/",
-    )
-    assert captured == {
-        "url": "https://example.com/",
-        "profile_dir": _PROFILE,
-        "timeout_sec": 30.0,
-        "headless": True,
-        "headers": None,
-        "cookies": None,
-        "trust": "untrusted",
-        "max_redirects": 10,
-        "on_redirect": None,
-        "run_timeout_sec": 60.0,
-    }
-
-
-def test_pool_run_default_timeout_waits_without_a_ceiling(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    timeouts: list[float | None] = []
-
-    class Future:
-        def result(self, timeout: float | None) -> int:
-            timeouts.append(timeout)
-            return 1
-
-        def cancel(self) -> bool:
-            return False
-
-    def submit(
-        coroutine: Coroutine[object, object, int],
-        loop: asyncio.AbstractEventLoop,
-    ) -> Future:
-        del loop
-        coroutine.close()
-        return Future()
-
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", submit)
-    pool = _BrowserPool()
+    monkeypatch.setattr(zendriver, "_shared_chrome", shared)
+    monkeypatch.setattr("zendriver.start", start)
+    # Restored to the VENDOR's own ``__call__``, undoing any arming an earlier
+    # test in this process did, so the assertions below cannot pass vacuously.
+    monkeypatch.setattr(Transaction, "__call__", _VENDOR_TRANSACTION_CALL)
+    pool = BrowserPool()
     try:
-
-        async def value() -> int:
-            return 1
-
-        assert pool.run(value()) == 1
-        assert timeouts == [None]
+        pool.run(pool.browser(_PROFILE, headless=True))
     finally:
         pool.shutdown()
 
+    async def replies() -> None:
+        # ``result`` alone: the vendor reads only ``error`` and ``result``.
+        cancelled = Transaction(page.navigate("about:blank"))
+        cancelled.cancel()
+        cancelled(result={"frameId": "F", "loaderId": "L"})
+        assert cancelled.cancelled()
 
-def test_pool_shutdown_uses_its_literal_default_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pool = _BrowserPool()
-    browser = _FakeBrowser()
-    pool._browsers["profile"] = (True, cast(Browser, browser))
-    timeouts: list[float] = []
+        # A reply to a LIVE transaction still has to reach the caller awaiting it.
+        live = Transaction(page.navigate("about:blank"))
+        live(result={"frameId": "F", "loaderId": "L"})
+        assert (live.result())[0] == (page.FrameId("F"))
 
-    def monotonic() -> float:
-        return 100.0
+    asyncio.run(replies())
 
-    def run(
-        coroutine: Coroutine[object, object, object],
-        *,
-        timeout_sec: float,
-    ) -> object:
-        timeouts.append(timeout_sec)
-        coroutine.close()
-        return object()
-
-    monkeypatch.setattr(time, "monotonic", monotonic)
-    monkeypatch.setattr(pool, "run", run)
-    pool.shutdown()
-
-    assert timeouts == [5.0]
+    # Idempotent: arming twice must not wrap the guard in itself.
+    armed = cast(object, Transaction[object].__call__)
+    zendriver._tolerate_late_cdp_replies()
+    assert cast(object, Transaction[object].__call__) is armed
 
 
-# -- shared Chrome: attach, never evict ----------------------------------------
+# -- _shared_chrome, _launch_lock, _devtools_port ------------------------------
 
 
 def _port_4242(profile_dir: Path) -> int:
@@ -4329,69 +2364,217 @@ def _answers_nowhere(port: int) -> bool:
     return False
 
 
-def test_pool_shutdown_disconnects_without_stopping_the_shared_chrome() -> None:
-    """Closing this process's pool must leave Chrome up for every other process.
-
-    ``Browser.stop`` sends ``Browser.close``, which shuts Chrome down for every
-    process attached to it -- the eviction the shared design exists to end.
-    """
-    pool = _BrowserPool()
-    browser = _FakeBrowser()
-    pool._browsers["profile"] = (True, cast(Browser, browser))
-
-    pool.shutdown()
-
-    assert browser.connection.closed, "the websocket was left open"
-    assert browser.stop_calls == 0, "shutdown stopped the shared Chrome"
+def _answers_everywhere(port: int) -> bool:
+    del port
+    return True
 
 
-def test_a_dead_connection_is_reconnected_not_reused() -> None:
-    browser = _FakeBrowser()
-    assert zendriver._is_live(cast(Browser, browser))
-    browser.connection.closed = True
-    assert not zendriver._is_live(cast(Browser, browser))
-    browser.connection.closed = False
-    assert browser.connection.listener is not None
-    browser.connection.listener.running = False
-    assert not zendriver._is_live(cast(Browser, browser))
+def _no_port(profile_dir: Path) -> int | None:
+    del profile_dir
+    return None
 
 
-def test_connect_attaches_to_a_running_chrome_instead_of_launching(
+def _no_sleep(seconds: float) -> None:
+    del seconds
+
+
+def _popen[T](process: T, *args: object, **kwargs: object) -> T:
+    del args, kwargs
+    return process
+
+
+def _failed_ps(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    del args, kwargs
+    return subprocess.CompletedProcess([], 1, stdout="")
+
+
+class _ChromeProcess:
+    """Stands in for the launched Chrome's ``Popen``."""
+
+    def __init__(self, *, returncode: int | None = None) -> None:
+        self.returncode = returncode
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self) -> int:
+        return -9
+
+
+def test_shared_chrome_attaches_to_a_running_chrome_instead_of_launching(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A second process must attach to the first one's Chrome, not replace it."""
-    launched: list[Path] = []
+    asked: list[Path] = []
 
-    def launch(profile_dir: Path, *, headless: bool) -> int:
-        del headless
-        launched.append(profile_dir)
-        return 1111
+    def port(profile_dir: Path) -> int:
+        asked.append(profile_dir)
+        return 4242
+
+    def popen(*args: object, **kwargs: object) -> object:
+        raise AssertionError(f"launched despite a live Chrome: {args} {kwargs}")
+
+    monkeypatch.setattr(zendriver, "_devtools_port", port)
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    assert zendriver._shared_chrome(tmp_path / "profile", headless=True) == 4242
+    assert asked == [tmp_path / "profile"]
+
+
+@pytest.mark.parametrize("headless", [True, False])
+def test_shared_chrome_launches_detached_when_no_chrome_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    headless: bool,
+) -> None:
+    """The shared Chrome must survive its launcher's exit and Ctrl-C."""
+    profile = tmp_path / "profile"
+    captured: dict[str, object] = {}
+    (profile).mkdir()
+    (profile / "DevToolsActivePort").write_text("1\n/stale\n")
+
+    def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
+        captured["args"] = args
+        captured.update(kwargs)
+        (profile / "DevToolsActivePort").write_text("6789\n/devtools/browser/x\n")
+        return _ChromeProcess()
+
+    def answers(port: int) -> bool:
+        return port == 6789
 
     monkeypatch.setattr(zendriver, "_devtools_port", _port_4242)
-    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
-    monkeypatch.setattr(zendriver, "_launch_detached", launch)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(zendriver, "_port_answers", answers)
+    monkeypatch.setattr(zendriver, "_launched", [])
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
 
-    assert zendriver._shared_browser(tmp_path / "profile", headless=True) == 4242
-    assert launched == []
+    assert zendriver._shared_chrome(profile, headless=headless) == 6789
+    assert captured["start_new_session"] is True
+    args = cast(list[str], captured["args"])
+    assert args[0] == "/fake/chrome"
+    assert args[-2:] == ["--remote-debugging-port=0", "about:blank"]
+    assert f"--user-data-dir={profile}" in args
+    assert ("--headless=new" in args) is headless
+    # Chrome's sandbox refuses to run as root.
+    assert "--no-sandbox" in args
+    assert "--remote-debugging-host=127.0.0.1" in args
+    assert "--use-mock-keychain" not in args
+    assert not any(
+        a.startswith(("--proxy-server=", "--host-resolver-rules=")) for a in args
+    )
+    assert len(zendriver._launched) == 1
 
 
-def test_connect_launches_when_no_chrome_answers(
+def test_shared_chrome_launches_chrome_for_testing_with_a_mock_keychain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    launched: list[tuple[Path, bool]] = []
+    """Chrome must come from the build that does not claim ``https``.
 
-    def launch(profile_dir: Path, *, headless: bool) -> int:
-        launched.append((profile_dir, headless))
-        return 5151
+    Without ``--use-mock-keychain`` Chrome for Testing raises a Safe Storage
+    modal and blocks in startup; stock Chrome keeps its own keychain.
+    """
+    profile = tmp_path / "profile"
+    captured: list[list[str]] = []
+
+    def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
+        del kwargs
+        captured.append(args)
+        (profile / "DevToolsActivePort").write_text("6789\n/x\n")
+        return _ChromeProcess()
 
     monkeypatch.setattr(zendriver, "_devtools_port", _port_4242)
-    monkeypatch.setattr(zendriver, "_port_answers", _answers_nowhere)
-    monkeypatch.setattr(zendriver, "_launch_detached", launch)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(zendriver, "_port_answers", partial(int.__eq__, 6789))
+    monkeypatch.setattr(zendriver, "_launched", [])
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "/cache/CfT")
 
-    assert zendriver._shared_browser(tmp_path / "profile", headless=True) == 5151
-    assert launched == [(tmp_path / "profile", True)]
+    zendriver._shared_chrome(profile, headless=True)
+    assert captured[0][0] == "/cache/CfT"
+    assert "--use-mock-keychain" in captured[0]
+
+
+def test_shared_chrome_waits_for_a_reported_port_to_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+
+    def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
+        del args, kwargs
+        (profile / "DevToolsActivePort").write_text("4242\n/devtools/browser/x\n")
+        return _ChromeProcess()
+
+    answers = iter([False, True])
+    sleeps: list[float] = []
+    monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(zendriver, "_launched", [])
+
+    def port_answers(port: int) -> bool:
+        del port
+        return next(answers)
+
+    monkeypatch.setattr(zendriver, "_port_answers", port_answers)
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert zendriver._shared_chrome(profile, headless=True) == 4242
+    assert sleeps == [0.05]
+
+
+def test_shared_chrome_reports_a_chrome_that_exits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        partial(_popen, _ChromeProcess(returncode=21)),
+    )
+    monkeypatch.setattr(zendriver, "_launched", [])
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    with pytest.raises(zendriver.BrowserUnavailableError, match="exited with code 21"):
+        zendriver._shared_chrome(tmp_path / "profile", headless=True)
+
+
+def test_shared_chrome_kills_a_chrome_that_never_reports_a_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _ChromeProcess()
+    clock = iter([0.0, 0.0, 10.0])
+    monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
+    monkeypatch.setattr(subprocess, "Popen", partial(_popen, process))
+    monkeypatch.setattr(zendriver, "_launched", [])
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(time, "sleep", _no_sleep)
+    with pytest.raises(zendriver.BrowserUnavailableError, match="did not come up"):
+        zendriver._shared_chrome(tmp_path / "profile", headless=True)
+    assert process.killed
+
+
+def test_shared_chrome_reports_a_missing_chrome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def popen(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise FileNotFoundError("no chrome")
+
+    monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    with pytest.raises(zendriver.BrowserUnavailableError, match="no chrome"):
+        zendriver._shared_chrome(tmp_path / "profile", headless=True)
 
 
 @pytest.mark.cli_python_subprocess
@@ -4421,92 +2604,480 @@ def test_the_launch_lock_serializes_processes(tmp_path: Path) -> None:
     assert waited > 0.3, f"the lock was not exclusive across processes ({waited:.2f}s)"
 
 
-def test_launch_detached_starts_chrome_in_its_own_session(
+def test_port_answers_reports_whether_the_port_accepts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Connection:
+        def close(self) -> None:
+            pass
+
+    def connect(address: tuple[str, int], timeout: float) -> Connection:
+        assert address[0] == "127.0.0.1"
+        assert timeout == 0.2
+        if address[1] != 4242:
+            raise ConnectionRefusedError
+        return Connection()
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    assert zendriver._port_answers(4242)
+    assert not zendriver._port_answers(4243)
+
+
+def _owned_profile(tmp_path: Path, command: str) -> Path:
+    """Make ``tmp_path/profile`` owned by pid 123 running ``command``."""
+    profile = tmp_path / "profile"
+    proc = tmp_path / "proc" / "123"
+    profile.mkdir()
+    proc.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("host-123")
+    (proc / "cmdline").write_text(command.format(profile=profile))
+    return profile
+
+
+def test_devtools_port_reads_the_singleton_owner_command(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    process = tmp_path / "proc" / "123"
+    profile.mkdir()
+    process.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("host-123")
+    (process / "cmdline").write_bytes(
+        b"/opt/google/chrome/chrome\0"
+        + f"--user-data-dir={profile}\0".encode()
+        + b"--remote-debugging-port=4567\0"
+        + b"about:blank\0",
+    )
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
+
+
+def test_devtools_port_parses_owner_and_command_port_exactly(tmp_path: Path) -> None:
+    profile = _owned_profile(
+        tmp_path,
+        "chrome --user-data-dir={profile} "
+        "--remote-debugging-port=4567 extra-token another-token",
+    )
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
+
+
+def test_devtools_port_uses_the_first_profile_flag(tmp_path: Path) -> None:
+    profile = _owned_profile(
+        tmp_path,
+        "chrome --user-data-dir={profile} --user-data-dir=/second "
+        "--remote-debugging-port=9",
+    )
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 9
+
+
+def test_devtools_port_keeps_spaces_and_dashes_in_the_profile_path(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "my profile-with-dash"
+    proc = tmp_path / "proc" / "123"
+    profile.mkdir()
+    proc.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("host-123")
+    (proc / "cmdline").write_text(
+        f"chrome --user-data-dir={profile} --remote-debugging-port=7",
+    )
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 7
+
+
+def test_devtools_port_reads_the_macos_profile_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The shared Chrome must survive its launcher's exit and Ctrl-C."""
     profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").symlink_to("host-123")
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert args == ["/bin/ps", "-p", "123", "-o", "command="]
+        assert capture_output
+        assert text
+        assert not check
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=(
+                "/opt/google/chrome/chrome "
+                f"--user-data-dir={profile} "
+                "--remote-debugging-port=4567 about:blank\n"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert (
+        zendriver._devtools_port(
+            profile,
+            proc_root=tmp_path / "proc",
+            platform="darwin",
+        )
+        == 4567
+    )
+
+
+def test_devtools_port_reports_a_failed_macos_ps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").symlink_to("host-123")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _failed_ps,
+    )
+    assert (
+        zendriver._devtools_port(
+            profile,
+            proc_root=tmp_path / "proc",
+            platform="darwin",
+        )
+        is None
+    )
+
+
+def test_devtools_port_never_runs_ps_on_linux(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").symlink_to("host-123")
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        raise AssertionError("Linux proc lookup must not invoke ps")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert (
+        zendriver._devtools_port(profile, proc_root=tmp_path / "proc", platform="linux")
+        is None
+    )
+
+
+def test_devtools_port_rejects_different_profile_with_shared_prefix(
+    tmp_path: Path,
+) -> None:
+    profile = _owned_profile(
+        tmp_path,
+        "/opt/google/chrome/chrome --user-data-dir={profile}-other "
+        "--remote-debugging-port=4567",
+    )
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") is None
+
+
+def test_devtools_port_rejects_stale_marker_without_profile_owner(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("4567\n/devtools/browser/id\n")
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") is None
+
+
+def test_devtools_port_reads_active_port_when_command_has_no_port(
+    tmp_path: Path,
+) -> None:
+    profile = _owned_profile(
+        tmp_path,
+        "chrome --user-data-dir={profile} --remote-debugging-port=0",
+    )
+    (profile / "DevToolsActivePort").write_text("4567\n/devtools/browser/id\n")
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
+
+
+def test_devtools_port_needs_a_debugging_port_flag(tmp_path: Path) -> None:
+    profile = _owned_profile(tmp_path, "chrome --user-data-dir={profile}")
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") is None
+
+
+@pytest.mark.parametrize("active", [None, "not-a-port\n"])
+def test_devtools_port_without_a_readable_active_port_is_none(
+    tmp_path: Path,
+    active: str | None,
+) -> None:
+    profile = _owned_profile(
+        tmp_path,
+        "chrome --user-data-dir={profile} --remote-debugging-port=0",
+    )
+    if active is not None:
+        (profile / "DevToolsActivePort").write_text(active)
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") is None
+
+
+# -- _chrome_for_testing ------------------------------------------------------
+
+
+def _fetch_browser_install(
+    root: Path,
+    build: str,
+    *,
+    name: str = "Google Chrome for Testing",
+    arch: str = "chrome-mac-arm64",
+) -> Path:
+    """Write a stub browser where the download roots put a real one."""
+    binary = root / build / arch / f"{name}.app" / "Contents" / "MacOS"
+    binary.mkdir(parents=True, exist_ok=True)
+    executable = binary / name
+    _ = executable.write_text("#!/bin/sh\n")
+    return executable
+
+
+@pytest.fixture
+def roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Redirect both download roots, as ``(puppeteer, playwright)``."""
+    puppeteer = tmp_path / "home" / ".cache" / "puppeteer" / "chrome"
+    playwright = tmp_path / "cache" / "ms-playwright"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(zendriver, "cache_dir", lambda: tmp_path / "cache")
+    return puppeteer, playwright
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_non_macos_hosts_need_no_separate_browser(platform: str) -> None:
+    """Linux and Windows keep the ordinary browser -- there is no capture."""
+    assert zendriver._chrome_for_testing(platform=platform) == ""
+
+
+def test_no_install_falls_back_to_zendriver(
+    roots: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A miss must cost click capture, never the fetch: "" means "let zendriver
+    # find Chrome".
+    del roots
+    with caplog.at_level("DEBUG", logger=zendriver.logger.name):
+        assert zendriver._chrome_for_testing(platform="darwin") == ""
+    assert caplog.records[-1].message == (
+        "no Chrome for Testing found; falling back to zendriver's Chrome"
+    )
+
+
+def test_a_puppeteer_install_is_found(roots: tuple[Path, Path]) -> None:
+    expected = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
+    assert zendriver._chrome_for_testing(platform="darwin") == str(expected)
+
+
+def test_a_playwright_install_is_found(roots: tuple[Path, Path]) -> None:
+    expected = _fetch_browser_install(roots[1], "chromium-1217")
+    assert zendriver._chrome_for_testing(platform="darwin") == str(expected)
+
+
+def test_a_chromium_app_is_found(roots: tuple[Path, Path]) -> None:
+    expected = _fetch_browser_install(
+        roots[0],
+        "build",
+        name="Chromium",
+        arch="chrome-mac-x64",
+    )
+    assert zendriver._chrome_for_testing(platform="darwin") == str(expected)
+
+
+def test_the_newest_build_wins(roots: tuple[Path, Path]) -> None:
+    # Builds accumulate across upgrades; a stale one eventually cannot read a
+    # profile the current browser wrote.
+    _ = _fetch_browser_install(roots[0], "mac_arm-131.0.6778.85")
+    newest = _fetch_browser_install(roots[0], "mac_arm-147.0.7727.57")
+    assert zendriver._chrome_for_testing(platform="darwin") == str(newest)
+
+
+@pytest.mark.parametrize(
+    ("older", "newer"),
+    [
+        ("mac_arm-99.0.4844.51", "mac_arm-100.0.4896.60"),
+        ("chromium-999", "chromium-1000"),
+        ("alpha", "beta"),
+    ],
+)
+def test_build_order_is_numeric_then_by_name(
+    roots: tuple[Path, Path],
+    older: str,
+    newer: str,
+) -> None:
+    # Text comparison ranks "99" above "100", which silently pins fetches to
+    # the older browser at every version rollover past a digit boundary; names
+    # without digits must still order deterministically.
+    _ = _fetch_browser_install(roots[0], older)
+    expected = _fetch_browser_install(roots[0], newer)
+    assert zendriver._chrome_for_testing(platform="darwin") == str(expected)
+
+
+def test_a_directory_without_the_binary_is_skipped(roots: tuple[Path, Path]) -> None:
+    # Playwright's roots include ``ffmpeg-*`` and other non-browser payloads.
+    (roots[1] / "ffmpeg-1011").mkdir(parents=True)
+    expected = _fetch_browser_install(roots[1], "chromium-1217")
+    assert zendriver._chrome_for_testing(platform="darwin") == str(expected)
+
+
+def test_an_intel_download_is_found(roots: tuple[Path, Path]) -> None:
+    # Runnable under Rosetta on Apple silicon, so keying discovery to the host
+    # arch would skip a usable one.
+    expected = _fetch_browser_install(
+        roots[0],
+        "mac-147.0.7727.57",
+        arch="chrome-mac-x64",
+    )
+    assert zendriver._chrome_for_testing(platform="darwin") == str(expected)
+
+
+# -- open_window, _launch, _watch_window, _close_chrome -----------------------
+
+
+def test_launch_uses_a_bounded_connect_budget_and_profile_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A dead Chrome must fail fast; a healthy one answers DevTools in ~0.3s."""
     captured: dict[str, object] = {}
 
-    class Process:
-        returncode = None
+    async def start(config: Config) -> _FakeBrowser:
+        captured.update(
+            {
+                "headless": config.headless,
+                "profile": config.user_data_dir,
+                "sandbox": config.sandbox,
+                "executable": config.browser_executable_path,
+                "args": config(),
+                "timeout": config.browser_connection_timeout,
+                "tries": config.browser_connection_max_tries,
+            },
+        )
+        return _FakeBrowser()
 
-        def poll(self) -> None:
-            return None
+    monkeypatch.setattr("zendriver.start", start)
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "/cache/testing")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    asyncio.run(zendriver._launch(tmp_path / "nested" / "profile"))
 
-    def popen(args: list[str], **kwargs: object) -> Process:
-        captured["args"] = args
-        captured.update(kwargs)
-        (profile / "DevToolsActivePort").write_text("6789\n/devtools/browser/x\n")
-        return Process()
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-
-    def answers(port: int) -> bool:
-        return port == 6789
-
-    monkeypatch.setattr(zendriver, "_port_answers", answers)
-    monkeypatch.setattr(zendriver, "_launched", [])
-
-    assert zendriver._launch_detached(profile, headless=True) == 6789
-    assert captured["start_new_session"] is True
-    args = cast(list[str], captured["args"])
-    assert f"--user-data-dir={profile}" in args
-    assert "--remote-debugging-port=0" in args
-    assert "--headless=new" in args
-    assert len(zendriver._launched) == 1
+    assert captured["headless"] is False
+    assert captured["profile"] == str(tmp_path / "nested" / "profile")
+    assert (tmp_path / "nested" / "profile").is_dir()
+    assert captured["sandbox"] is False
+    assert captured["executable"] == "/cache/testing"
+    budget = cast(float, captured["timeout"]) * cast(int, captured["tries"])
+    assert cast(float, captured["timeout"]) >= 0.3
+    assert budget <= 3.0
+    assert "--use-mock-keychain" in cast(list[str], captured["args"])
 
 
-def test_launch_detached_reports_a_chrome_that_exits(
+def test_launch_falls_back_to_zendriver_chrome(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class Process:
-        returncode = 21
+    captured: dict[str, object] = {}
 
-        def poll(self) -> int:
-            return 21
+    async def start(config: Config) -> _FakeBrowser:
+        captured["executable"] = config.browser_executable_path
+        captured["args"] = config()
+        return _FakeBrowser()
 
-    def popen(args: list[str], **kwargs: object) -> Process:
-        del args, kwargs
-        return Process()
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(zendriver, "_launched", [])
-    with pytest.raises(zendriver.BrowserUnavailableError, match="exited with code 21"):
-        zendriver._launch_detached(tmp_path / "profile", headless=True)
+    monkeypatch.setattr("zendriver.start", start)
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    asyncio.run(zendriver._launch(tmp_path))
+    assert captured["executable"] == Config().browser_executable_path
+    assert "--use-mock-keychain" not in cast(list[str], captured["args"])
 
 
-def test_open_instance_closes_the_shared_chrome_under_the_launch_lock(
+def test_launch_wraps_start_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+) -> None:
+    async def start(config: Config) -> _FakeBrowser:
+        del config
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("zendriver.start", start)
+    with pytest.raises(
+        zendriver.BrowserUnavailableError,
+        match=r"^Could not launch Chrome: connection refused$",
+    ):
+        asyncio.run(zendriver._launch(tmp_path))
+
+
+def test_close_chrome_starts_and_stops_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[_FakeBrowser] = []
+
+    async def start(*, host: str, port: int) -> _FakeBrowser:
+        assert host == "127.0.0.1"
+        assert port == 9222
+        browser = _FakeBrowser()
+        created.append(browser)
+        return browser
+
+    monkeypatch.setattr("zendriver.start", start)
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_nowhere)
+    asyncio.run(zendriver._close_chrome(9222))
+    assert len(created) == 1
+    assert created[0].stop_calls == 1
+
+
+def test_close_chrome_reports_a_stuck_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def start(*, host: str, port: int) -> _FakeBrowser:
+        del host, port
+        return _FakeBrowser()
+
+    clock = iter([0.0, 0.0, 10.0])
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("zendriver.start", start)
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_everywhere)
+    # The module's clock only: the event loop reads ``time.monotonic`` too.
+    monkeypatch.setattr(
+        zendriver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(clock), sleep=time.sleep),
+    )
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    with pytest.raises(
+        zendriver.BrowserUnavailableError,
+        match=r"^Chrome on DevTools port 9222 did not close\.$",
+    ):
+        asyncio.run(zendriver._close_chrome(9222))
+    assert sleeps == [0.05]
+
+
+@pytest.mark.parametrize(
+    ("port", "answers"),
+    [(None, False), (9222, False), (9222, True)],
+)
+def test_open_window_closes_the_shared_chrome_under_the_launch_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    port: int | None,
+    answers: bool,
 ) -> None:
     """A fetch between close and launch would relaunch headless and take the lock."""
     events: list[str] = []
     browser = _FakeBrowser()
-    browser.stopped = True
 
     @contextlib.contextmanager
     def lock(profile_dir: Path) -> Generator[None]:
-        del profile_dir
+        assert profile_dir == tmp_path
         events.append("lock")
         yield
         events.append("unlock")
 
-    async def launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
-        del profile_dir
-        events.append(f"launch:{headless}")
+    async def close(found: int) -> None:
+        events.append(f"close:{found}")
+
+    async def launch(profile_dir: Path) -> _FakeBrowser:
+        assert profile_dir == tmp_path
+        events.append("launch")
         return browser
 
-    monkeypatch.setattr(zendriver, "_launch_lock", lock)
-
-    def close(profile_dir: Path) -> None:
-        del profile_dir
-        events.append("close")
-
-    async def visit(url: str, browser_arg: Browser) -> set[str]:
-        del url, browser_arg
+    async def watch(url: str, browser_arg: Browser) -> set[str]:
+        assert url == "https://gated.example/"
+        assert browser_arg is browser
         events.append("window")
         return {"visited.example"}
 
@@ -4514,17 +3085,30 @@ def test_open_instance_closes_the_shared_chrome_under_the_launch_lock(
         events.append(f"clear:{host}")
         return 1
 
-    monkeypatch.setattr(zendriver, "_close_shared_browser", close)
-    monkeypatch.setattr(zendriver, "_launch_browser", launch)
-    monkeypatch.setattr(zendriver, "_open_instance", visit)
+    monkeypatch.setattr(zendriver, "_launch_lock", lock)
+
+    def devtools_port(profile_dir: Path) -> int | None:
+        del profile_dir
+        return port
+
+    def port_answers(found: int) -> bool:
+        del found
+        return answers
+
+    monkeypatch.setattr(zendriver, "_devtools_port", devtools_port)
+    monkeypatch.setattr(zendriver, "_port_answers", port_answers)
+    monkeypatch.setattr(zendriver, "_close_chrome", close)
+    monkeypatch.setattr(zendriver, "_launch", launch)
+    monkeypatch.setattr(zendriver, "_watch_window", watch)
     monkeypatch.setattr(zendriver, "clear_host", clear)
 
-    zendriver.open_instance("https://gated.example/", profile_dir=tmp_path)
+    zendriver.open_window("https://gated.example/", profile_dir=tmp_path)
 
+    closed = ["close:9222"] if answers else []
     assert events == [
         "lock",
-        "close",
-        "launch:False",
+        *closed,
+        "launch",
         "unlock",
         "window",
         "clear:visited.example",
@@ -4549,11 +3133,28 @@ def _page(
     )
 
 
+class _WatchedBrowser(_FakeBrowser):
+    """A window that delivers scripted target events, then closes."""
+
+    def __init__(self, events: Sequence[object]) -> None:
+        super().__init__()
+        self._events = list(events)
+
+    @override
+    async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+        tab = await super().get(url, new_tab=new_tab)
+        for event in self._events:
+            await self.connection.emit(event)
+        self._events = []
+        self.stopped = True
+        return tab
+
+
 def _visits(
     monkeypatch: pytest.MonkeyPatch,
     events: Sequence[object],
 ) -> tuple[set[str], list[str]]:
-    """Feed target events to a watched browser; return its visits and clears."""
+    """Feed target events to a watched window; return its visits and clears."""
     cleared: list[str] = []
 
     def clear(host: str) -> int:
@@ -4561,15 +3162,12 @@ def _visits(
         return 1
 
     monkeypatch.setattr(zendriver, "clear_host", clear)
-    browser = _FakeBrowser()
-
-    async def go() -> set[str]:
-        visited = zendriver._watch_visits(cast(Browser, browser))
-        for event in events:
-            await browser.connection.emit(event)
-        return visited
-
-    return asyncio.run(go()), cleared
+    monkeypatch.setattr(zendriver, "challenged_urls", list)
+    browser = _WatchedBrowser(events)
+    visited = asyncio.run(
+        zendriver._watch_window("about:blank", cast(Browser, browser)),
+    )
+    return visited, cleared
 
 
 def test_a_page_the_user_loads_lifts_its_lock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4591,7 +3189,7 @@ def test_an_agent_tab_and_its_popups_never_lift_a_lock(
     visited, cleared = _visits(
         monkeypatch,
         [
-            target.TargetCreated(_page("agent", zendriver._AGENT_TAB)),
+            target.TargetCreated(_page("agent", "about:blank#wesearch-agent")),
             target.TargetInfoChanged(_page("agent", "https://www.google.com/")),
             target.TargetCreated(
                 _page("popup", "https://popup.example/", opener="agent"),
@@ -4616,443 +3214,310 @@ def test_only_web_pages_count_as_visits(monkeypatch: pytest.MonkeyPatch) -> None
         [
             target.TargetCreated(worker),
             target.TargetInfoChanged(_page("own", "chrome://newtab/")),
+            target.AttachedToTarget(
+                session_id=target.SessionID("s"),
+                target_info=_page("x", "https://other.example/"),
+                waiting_for_debugger=False,
+            ),
         ],
     )
     assert visited == set()
+
+
+def test_a_misrouted_event_never_counts_as_a_visit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign event type delivered to the handler is ignored (measured live).
+
+    ``AttachedToTarget`` carries a ``target_info`` too, so without the type
+    guard it would read as a visit and unlock its host.
+    """
+    cleared: list[str] = []
+
+    def clear(host: str) -> int:
+        cleared.append(host)
+        return 1
+
+    class _MisroutingBrowser(_FakeBrowser):
+        @override
+        async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+            tab = await super().get(url, new_tab=new_tab)
+            foreign = target.AttachedToTarget(
+                session_id=target.SessionID("s"),
+                target_info=_page("x", "https://other.example/"),
+                waiting_for_debugger=False,
+            )
+            for handler in self.connection.handlers[target.TargetCreated]:
+                result = handler(foreign, self.connection)
+                if inspect.isawaitable(result):
+                    await result
+            self.stopped = True
+            return tab
+
+    monkeypatch.setattr(zendriver, "clear_host", clear)
+    monkeypatch.setattr(zendriver, "challenged_urls", list)
+    visited = asyncio.run(
+        zendriver._watch_window("about:blank", cast(Browser, _MisroutingBrowser())),
+    )
+    assert visited == set()
+    assert cleared == []
 
 
 def test_a_watch_needs_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     browser = _FakeBrowser()
     monkeypatch.setattr(browser, "connection", None)
     with pytest.raises(zendriver.BrowserUnavailableError, match="no DevTools"):
-        zendriver._watch_visits(cast(Browser, browser))
+        asyncio.run(zendriver._watch_window("about:blank", cast(Browser, browser)))
 
 
-def test_the_window_opens_each_challenged_site(
+def test_the_window_opens_the_url_then_each_challenged_site(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     browser = _FakeBrowser()
     browser.stopped = True
+    tabs: list[_FakeTab] = []
+    real_get = browser.get
+
+    async def get(url: str, new_tab: bool = False) -> _FakeTab:
+        tab = await real_get(url, new_tab=new_tab)
+        tabs.append(tab)
+        return tab
+
+    monkeypatch.setattr(browser, "get", get)
     monkeypatch.setattr(
         zendriver,
         "challenged_urls",
         lambda: ["https://gated.example/", "https://locked.example/a"],
     )
     asyncio.run(
-        zendriver._open_instance("https://gated.example/", cast(Browser, browser)),
+        zendriver._watch_window("https://gated.example/", cast(Browser, browser)),
     )
     assert browser.gets == ["about:blank", "about:blank"]
-    assert browser.last_tab is not None
-    assert browser.last_tab.navigations == ["https://locked.example/a"]
+    assert [tab.navigations for tab in tabs] == [
+        ["https://gated.example/"],
+        ["https://locked.example/a"],
+    ]
 
 
-def test_a_challenged_site_that_will_not_open_spares_the_window(
+def test_a_site_that_will_not_open_spares_the_window(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _RefusingBrowser(_FakeBrowser):
+        @override
+        async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
+            raise RuntimeError("refused")
+
+    browser = _RefusingBrowser()
+    browser.stopped = True
+    monkeypatch.setattr(zendriver, "challenged_urls", list)
+    asyncio.run(zendriver._watch_window("https://bad.example/", cast(Browser, browser)))
+    assert browser.stop_calls == 0
+    assert "could not open https://bad.example/" in caplog.text
+
+
+def test_the_window_polls_until_chrome_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    browser = _FakeBrowser()
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay: float) -> None:
+        if not delay:
+            await real_sleep(0)  # The fake tab's own yields.
+            return
+        sleeps.append(delay)
+        browser.stopped = True
+
+    monkeypatch.setattr(zendriver, "challenged_urls", list)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    asyncio.run(zendriver._watch_window("about:blank", cast(Browser, browser)))
+    assert sleeps == [0.5]
+
+
+class _HangingStopBrowser(_FakeBrowser):
+    """A browser whose ``stop`` never returns, as a wedged connection's does."""
+
+    @override
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        await asyncio.Event().wait()
+        raise AssertionError("The browser stop was never bounded.")
+
+
+class _RaisingStopBrowser(_FakeBrowser):
+    """A browser whose ``stop`` fails outright rather than hanging."""
+
+    @override
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        raise RuntimeError("stop blew up")
+
+
+def _interrupt_watch(
+    monkeypatch: pytest.MonkeyPatch,
+    browser: _FakeBrowser,
+) -> None:
+    """Run the window until its poll is interrupted; expect that interruption."""
+    real_sleep = asyncio.sleep
+
+    async def interrupted(delay: float) -> None:
+        if not delay:
+            await real_sleep(0)  # The fake tab's own yields.
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(zendriver, "challenged_urls", list)
+    monkeypatch.setattr(asyncio, "sleep", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(zendriver._watch_window("about:blank", cast(Browser, browser)))
+
+
+def test_an_interrupted_window_stops_chrome_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = _FakeBrowser()
+    _interrupt_watch(monkeypatch, browser)
+    assert browser.stop_calls == 1
+
+
+@pytest.mark.parametrize("browser_type", [_RaisingStopBrowser, _HangingStopBrowser])
+def test_a_failed_stop_kills_chrome_without_replacing_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    browser_type: type[_FakeBrowser],
+) -> None:
+    """Cleanup must never outrank the failure that triggered it.
+
+    A stop that raises or hangs leaks the whole Chrome tree, and the leaked
+    root holds its profile's ``SingletonLock``, so it must be killed; and the
+    interruption in flight, not the stop's trouble, must reach the caller.
+    """
+    browser = browser_type()
+    process = _FakeProcess()
+    browser._process = process
+    real_timeout = asyncio.timeout
+    budgets: list[float | None] = []
+
+    def timeout(delay: float | None) -> asyncio.Timeout:
+        budgets.append(delay)
+        return real_timeout(0.01)
+
+    monkeypatch.setattr(asyncio, "timeout", timeout)
+    _interrupt_watch(monkeypatch, browser)
+    assert browser.stop_calls == 1
+    assert process.kills == 1
+    assert budgets == [30.0]
+    assert "browser stop failed; killing it" in caplog.text
+
+
+def test_a_failed_stop_without_a_process_handle_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     browser = _RaisingStopBrowser()
-    asyncio.run(zendriver._open_locked(cast(Browser, browser), "https://bad.example/"))
-    assert browser.stop_calls == 0
-    assert "could not open locked site https://bad.example/" in caplog.text
+    _interrupt_watch(monkeypatch, browser)
+    assert browser.stop_calls == 1
 
 
-def test_fetch_zendriver_never_overrides_chromes_own_identity(
+def test_a_kill_that_fails_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RaisingProcess(_FakeProcess):
+        @override
+        def kill(self) -> None:
+            raise OSError("already gone")
+
+    browser = _RaisingStopBrowser()
+    browser._process = RaisingProcess()
+    _interrupt_watch(monkeypatch, browser)
+
+
+# -- main ---------------------------------------------------------------------
+
+
+def test_main_prints_lifecycle_and_opens_url(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A curl-era User-Agent in Chrome got Google's enablejs shell instead of results."""
-    forwarded: list[dict[str, str] | None] = []
+    opened: list[tuple[str, Path]] = []
 
-    async def navigate(url: str, **kwargs: object) -> BrowserResult:
-        forwarded.append(cast("dict[str, str] | None", kwargs["headers"]))
-        return BrowserResult(body=b"", cookies={}, final_url=url)
+    def open_window(url: str, *, profile_dir: Path) -> None:
+        opened.append((url, profile_dir))
 
-    class Pool:
-        def run(
-            self,
-            coro: Coroutine[object, object, BrowserResult],
-            *,
-            timeout_sec: float = 0,
-        ) -> BrowserResult:
-            del timeout_sec
-            return asyncio.run(coro)
-
-    monkeypatch.setattr(zendriver, "_navigate", navigate)
-    monkeypatch.setattr(zendriver, "_pool", Pool)
-    zendriver.fetch_zendriver(
-        "https://www.google.com/search?q=x",
-        profile_dir=_PROFILE,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10) GSA NSTNWV",
-            "Accept-Language": "en-US",
-            "Referer": "https://html.duckduckgo.com/html/",
-            "sec-ch-ua-mobile": "?1",
-            "x-browser-validation": "abc",
-            "X-Subscription-Token": "key",
-            "Authorization": "Bearer token",
-        },
-    )
-    zendriver.fetch_zendriver(
-        "https://example.com/",
-        profile_dir=_PROFILE,
-        headers={"User-Agent": "only identity"},
+    profile = data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver"
+    monkeypatch.setattr(zendriver, "open_window", open_window)
+    monkeypatch.setattr(sys, "argv", ["zendriver", "https://example.com/"])
+    assert zendriver.main() == 0
+    assert opened == [("https://example.com/", profile)]
+    assert capsys.readouterr().out == (
+        f"Opening https://example.com/ in Chrome on {profile}"
+        " -- close the window when done.\nWindow closed.\n"
     )
 
-    assert forwarded == [
-        {"X-Subscription-Token": "key", "Authorization": "Bearer token"},
-        None,
+
+def test_main_defaults_to_a_blank_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+
+    def open_window(url: str, *, profile_dir: Path) -> None:
+        del profile_dir
+        opened.append(url)
+
+    monkeypatch.setattr(zendriver, "open_window", open_window)
+    monkeypatch.setattr(sys, "argv", ["zendriver"])
+    zendriver.main()
+    assert opened == ["about:blank"]
+
+
+@pytest.mark.parametrize("prog", ["zendriver", "different-name"])
+def test_main_help_is_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    prog: str,
+) -> None:
+    monkeypatch.setattr(sys, "argv", [prog, "--help"])
+    with pytest.raises(SystemExit) as error:
+        zendriver.main()
+    assert error.value.code == 0
+    assert capsys.readouterr().out == (
+        "usage: zendriver [-h] [url]\n\n"
+        "Open a URL in a visible Chrome on the profile the zendriver transport fetches "
+        "with, to see what a fetch saw or to log in. Cookies you set persist for later "
+        "fetches. Close the window when done.\n\n"
+        "positional arguments:\n"
+        "  url         The URL to open; omit for a blank page.\n\n"
+        "options:\n"
+        "  -h, --help  show this help message and exit\n\n"
+        "Examples:\n"
+        "  zendriver https://the-site-that-failed.example/\n"
+        "  zendriver https://login.example/  # seat a session cookie\n"
+        "  zendriver # opens blank; navigate by hand\n"
+    )
+
+
+def test_no_prose_cites_a_line_number_in_this_package() -> None:
+    """A ``file:NNN`` citation in prose rots the moment anything shifts.
+
+    A line number is correct for exactly one commit and nothing re-checks it,
+    so name the SYMBOL or the setting instead. Matched on the repo's OWN file
+    kinds rather than any ``word.word:digits``, which would sweep in
+    ``example.com:443``.
+    """
+    package = _CWD.parent.parent
+    citation = re.compile(
+        r"\b[\w./-]+\.(?:py|pyi|toml|ya?ml|cfg|ini|txt|md|sh|json|lock):\d+",
+    )
+    offenders = [
+        f"{path.relative_to(package)}:{number}: {match.group(0)}"
+        for path in sorted(package.rglob("*.py"))
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        )
+        for match in [citation.search(line)]
+        if match is not None
     ]
 
-
-def test_shared_browser_looks_up_the_profile_it_was_given(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    profile = tmp_path / "profile"
-    asked: list[Path] = []
-
-    def port(profile_dir: Path) -> int:
-        asked.append(profile_dir)
-        return 4242
-
-    monkeypatch.setattr(zendriver, "_devtools_port", port)
-    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
-
-    zendriver._shared_browser(profile, headless=True)
-
-    assert asked == [profile]
-
-
-def test_connect_attaches_to_the_port_the_shared_browser_reports(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attached: list[int] = []
-    browser = _FakeBrowser()
-
-    def shared(profile_dir: Path, *, headless: bool) -> int:
-        assert profile_dir == _PROFILE
-        assert headless
-        return 7777
-
-    async def attach(port: int) -> _FakeBrowser:
-        attached.append(port)
-        return browser
-
-    monkeypatch.setattr(zendriver, "_shared_browser", shared)
-    monkeypatch.setattr(zendriver, "_attach", attach)
-    pool = _BrowserPool()
-    try:
-        assert pool.run(pool.browser(_PROFILE, headless=True)) is browser
-    finally:
-        pool.shutdown()
-    assert attached == [7777]
-
-
-def test_attach_reports_an_unreachable_devtools_port(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def start(**kwargs: object) -> _FakeBrowser:
-        del kwargs
-        raise RuntimeError("Failed to connect to browser")
-
-    monkeypatch.setattr("zendriver.start", start)
-    with pytest.raises(
-        zendriver.BrowserUnavailableError,
-        match=r"^Could not attach to Chrome on DevTools port 9: ",
-    ):
-        asyncio.run(zendriver._attach(9))
-
-
-class _ConnectionlessBrowser:
-    """A browser whose connection never opened."""
-
-    connection = None
-
-
-def test_disconnect_tolerates_a_browser_without_a_connection() -> None:
-    asyncio.run(zendriver._disconnect(cast(Browser, _ConnectionlessBrowser())))
-
-
-def test_pool_shutdown_logs_a_failed_disconnect_and_still_stops(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async def failing(browser: Browser) -> None:
-        del browser
-        raise RuntimeError("socket gone")
-
-    pool = _BrowserPool()
-    pool._browsers["profile"] = (True, cast(Browser, _FakeBrowser()))
-    monkeypatch.setattr(zendriver, "_disconnect", failing)
-    caplog.set_level("WARNING", logger=zendriver.__name__)
-
-    pool.shutdown()
-
-    assert [r.getMessage() for r in caplog.records] == [
-        "browser disconnect failed during shutdown",
-    ]
-    assert pool._loop.is_closed()
-
-
-def test_pool_shutdown_spends_one_budget_across_every_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pool = _BrowserPool()
-    browsers = [_FakeBrowser() for _ in range(3)]
-    for index, browser in enumerate(browsers):
-        pool._browsers[f"profile-{index}"] = (True, cast(Browser, browser))
-    # The loop thread reads the clock too, so this one never runs dry: the first
-    # two reads (deadline, first browser) are 0, every later read is past it.
-    reads = [0]
-
-    def monotonic() -> float:
-        reads[0] += 1
-        return 0.0 if reads[0] <= 2 else 10.0
-
-    monkeypatch.setattr(time, "monotonic", monotonic)
-
-    pool.shutdown(budget_sec=5.0)
-
-    assert [browser.connection.closed for browser in browsers] == [True, False, False]
-
-
-def test_port_answers_reports_whether_the_port_accepts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Connection:
-        def close(self) -> None:
-            pass
-
-    def connect(address: tuple[str, int], timeout: float) -> Connection:
-        assert address[0] == "127.0.0.1"
-        assert timeout == 0.2
-        if address[1] != 4242:
-            raise ConnectionRefusedError
-        return Connection()
-
-    monkeypatch.setattr(socket, "create_connection", connect)
-    assert zendriver._port_answers(4242)
-    assert not zendriver._port_answers(4243)
-
-
-def test_launch_detached_kills_a_chrome_that_never_reports_a_port(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class Process:
-        returncode = None
-
-        def __init__(self) -> None:
-            self.killed = False
-
-        def poll(self) -> None:
-            return None
-
-        def kill(self) -> None:
-            self.killed = True
-
-        def wait(self) -> int:
-            return -9
-
-    process = Process()
-
-    def popen(args: list[str], **kwargs: object) -> Process:
-        del args, kwargs
-        return process
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(zendriver, "_launched", [])
-
-    def no_sleep(seconds: float) -> None:
-        del seconds
-
-    monkeypatch.setattr(time, "sleep", no_sleep)
-    with pytest.raises(zendriver.BrowserUnavailableError, match="did not come up"):
-        zendriver._launch_detached(
-            tmp_path / "profile",
-            headless=True,
-            connect_timeout_sec=0.01,
-        )
-    assert process.killed
-
-
-def test_launch_detached_reports_a_missing_chrome(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    def popen(args: list[str], **kwargs: object) -> object:
-        del args, kwargs
-        raise FileNotFoundError("no chrome")
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    with pytest.raises(zendriver.BrowserUnavailableError, match="no chrome"):
-        zendriver._launch_detached(tmp_path / "profile", headless=True)
-
-
-def test_close_launched_browsers_terminates_then_kills_a_stuck_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Process:
-        def __init__(self, *, stuck: bool) -> None:
-            self.stuck = stuck
-            self.calls: list[str] = []
-
-        def terminate(self) -> None:
-            self.calls.append("terminate")
-
-        def wait(self, timeout: float | None = None) -> int:
-            self.calls.append(f"wait:{timeout}")
-            if self.stuck and timeout is not None:
-                raise subprocess.TimeoutExpired("chrome", timeout)
-            return 0
-
-        def kill(self) -> None:
-            self.calls.append("kill")
-
-    polite, stuck = Process(stuck=False), Process(stuck=True)
-    monkeypatch.setattr(zendriver, "_launched", [polite, stuck])
-
-    zendriver.close_launched_browsers()
-
-    assert polite.calls == ["terminate", "wait:5"]
-    assert stuck.calls == ["terminate", "wait:5", "kill", "wait:None"]
-    assert zendriver._launched == []
-
-
-def test_pool_shutdown_twice_is_a_noop() -> None:
-    pool = _BrowserPool()
-    pool.shutdown()
-    pool.shutdown()
-    assert pool._loop.is_closed()
-
-
-def test_launch_detached_waits_for_a_reported_port_to_answer(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class Process:
-        returncode = None
-
-        def poll(self) -> None:
-            return None
-
-    profile = tmp_path / "profile"
-
-    def popen(args: list[str], **kwargs: object) -> Process:
-        del args, kwargs
-        (profile / "DevToolsActivePort").write_text("4242\n/devtools/browser/x\n")
-        return Process()
-
-    answers = iter([False, True])
-
-    def port_answers(port: int) -> bool:
-        del port
-        return next(answers)
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(zendriver, "_launched", [])
-    monkeypatch.setattr(zendriver, "_port_answers", port_answers)
-    monkeypatch.setattr(time, "sleep", sleeps.append)
-    assert zendriver._launch_detached(profile, headless=True) == 4242
-    assert sleeps == [0.05]
-
-
-def _owned_profile(tmp_path: Path, command: str) -> Path:
-    """Make ``tmp_path/profile`` owned by pid 123 running ``command``."""
-    profile = tmp_path / "profile"
-    proc = tmp_path / "proc" / "123"
-    profile.mkdir()
-    proc.mkdir(parents=True)
-    (profile / "SingletonLock").symlink_to("host-123")
-    (proc / "cmdline").write_text(command.format(profile=profile))
-    return profile
-
-
-def test_devtools_port_needs_a_debugging_port_flag(tmp_path: Path) -> None:
-    profile = _owned_profile(tmp_path, "chrome --user-data-dir={profile}")
-    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") is None
-
-
-@pytest.mark.parametrize("active", [None, "not-a-port\n"])
-def test_devtools_port_without_a_readable_active_port_is_none(
-    tmp_path: Path,
-    active: str | None,
-) -> None:
-    profile = _owned_profile(
-        tmp_path,
-        "chrome --user-data-dir={profile} --remote-debugging-port=0",
+    assert offenders == [], (
+        "prose cites a line number, which silently rots -- name the symbol "
+        f"instead: {offenders}"
     )
-    if active is not None:
-        (profile / "DevToolsActivePort").write_text(active)
-    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") is None
-
-
-def test_guard_ignores_events_other_than_paused_requests() -> None:
-    tab = _FakeTab(content="", href="")
-
-    async def go() -> None:
-        await zendriver._guard_requests(
-            cast(Tab, tab),
-            "https://public.example/",
-            trust="internal",
-            on_redirect=None,
-            max_redirects=10,
-        )
-        tab.pause_request(object())
-
-    asyncio.run(go())
-    assert tab.continued_requests == []
-    assert tab.failed_requests == []
-
-
-def test_carried_headers_send_no_override_for_unbound_caller_headers() -> None:
-    assert (
-        zendriver._carried_headers(
-            {"Accept": "text/html"},
-            {"X-Trace": "1"},
-            "https://a.example/next",
-            "https://a.example/",
-        )
-        is None
-    )
-
-
-def test_dispatch_on_a_closed_loop_drops_the_command() -> None:
-    loop = asyncio.new_event_loop()
-    loop.close()
-    sent: list[object] = []
-
-    async def send(command: object) -> None:
-        sent.append(command)
-
-    class SendingTab:
-        def send(self, command: object) -> Coroutine[object, object, None]:
-            return send(command)
-
-    zendriver._dispatch(loop, cast(Tab, SendingTab()), object())
-    assert sent == []
-
-
-def test_close_shared_browser_skips_a_port_nothing_answers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[int] = []
-
-    def refuse(address: tuple[str, int], timeout: float) -> object:
-        del address, timeout
-        raise OSError("refused")
-
-    async def close_browser(port: int) -> None:
-        closed.append(port)
-
-    def devtools_port(profile: Path) -> int:
-        del profile
-        return 9222
-
-    monkeypatch.setattr(zendriver, "_devtools_port", devtools_port)
-    monkeypatch.setattr(socket, "create_connection", refuse)
-    monkeypatch.setattr(zendriver, "_close_browser_on_port", close_browser)
-    zendriver._close_shared_browser(_PROFILE)
-    assert closed == []
 
 
 if __name__ == "__main__":

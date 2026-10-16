@@ -18,18 +18,19 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
+from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from treekle import from_plain
 
-from wesearch.fetch.custom_types import FetchBodyParamsSchema
+from wesearch.fetch import FetchSession
 from wesearch.mcp import server
+from wesearch.mcp.schema import Schema, literal_values
+from wesearch.mcp.types import FetchBodyParamsSchema, SearchParamsSchema
 from wesearch.paper import authors, details, fetch, search
-from wesearch.paper.custom_types import AuthorRecord, PaperRecord
-from wesearch.search import custom_types
-from wesearch.search.search import SearchParamsSchema
-from wesearch.types.params import Transport
-from wesearch.types.schema import Schema, literal_values
-from wesearch.web import _KIND_HTML, FetchResult, _extract_text
+from wesearch.paper.types import AuthorRecord, PaperRecord
+from wesearch.search import types
+from wesearch.types.params import PolicyParams, Transport
+from wesearch.web import FetchResult, _extract_text
 
 
 if TYPE_CHECKING:
@@ -52,16 +53,17 @@ def _fetch_web_returning(html: bytes, *, max_chars: int) -> Callable[..., FetchR
         *,
         max_chars: int = max_chars,
         policy: object = None,
+        session: object = None,
     ) -> FetchResult:
-        del policy
+        del session, policy
         # Pinned, not defaulted: this stub feeds a few-line fixture, which the
         # default trafilatura scores as boilerplate and discards entirely --
         # leaving no text for the truncation assertion to be about.
-        text = _extract_text(html, kind=_KIND_HTML, url=url, extractor="html2text")
+        text = _extract_text(html, kind="html", url=url, extractor="html2text")
         return FetchResult(
             text=text[:max_chars],
             url=url,
-            kind=_KIND_HTML,
+            kind="html",
             truncated=len(text) > max_chars,
         )
 
@@ -90,7 +92,13 @@ def test_paper_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_paper_details_normalizes_id(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, object] = {}
 
-    def fake_metadata(kind: str, canonical: str) -> PaperRecord:
+    def fake_metadata(
+        kind: str,
+        canonical: str,
+        *,
+        session: FetchSession | None = None,
+    ) -> PaperRecord:
+        del session
         seen["id"] = (kind, canonical)
         return _RECORD
 
@@ -127,8 +135,13 @@ def test_author_search_shapes_result(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["records"] == [{"author_id": "123", "name": "Ada", "h_index": 40}]
 
 
+def test_web_search_description_names_the_real_fallback_order() -> None:
+    doc = server.web_search.__doc__ or ""
+    assert f"tries {', '.join(types.DEFAULT_SEARCH_CHAIN)} in order" in doc
+
+
 def test_web_search_returns_lean_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    rows = [custom_types.SearchResult(url="https://e.co", title="E", snippet="s")]
+    rows = [types.SearchResult(url="https://e.co", title="E", snippet="s")]
     monkeypatch.setattr(server, "search", _returns(rows))
     out = server.web_search("q")
     assert out == [{"url": "https://e.co", "title": "E", "snippet": "s"}]
@@ -161,8 +174,9 @@ def test_web_fetch_routes_through_the_shared_render_path(
         *,
         max_chars: int | None = None,
         policy: object = None,
+        session: object = None,
     ) -> object:
-        del max_chars
+        del session, max_chars
         captured["extractor"] = getattr(policy, "extractor", None)
         return FetchResult(text="body", url=url, kind="html", truncated=False)
 
@@ -188,8 +202,9 @@ def test_web_fetch_forwards_every_transport(monkeypatch: pytest.MonkeyPatch) -> 
         *,
         max_chars: int | None = None,
         policy: object = None,
+        session: object = None,
     ) -> FetchResult:
-        del max_chars
+        del session, max_chars
         captured["transport"] = getattr(policy, "transport", None)
         return FetchResult(text="body", url=url, kind="html", truncated=False)
 
@@ -209,10 +224,10 @@ def test_web_search_forwards_categories_and_transport(
     """
     captured: dict[str, object] = {}
 
-    def _fake(query: str, **kwargs: object) -> list[custom_types.SearchResult]:
+    def _fake(query: str, **kwargs: object) -> list[types.SearchResult]:
         del query
         captured.update(kwargs)
-        return [custom_types.SearchResult(url="https://e.co", title="E", snippet="s")]
+        return [types.SearchResult(url="https://e.co", title="E", snippet="s")]
 
     monkeypatch.setattr(server, "search", _fake)
     server.web_search("q", categories="science", transport="curl")
@@ -272,7 +287,7 @@ def _signature_default(fn: Callable[..., object], name: str) -> object:
     )
 
 
-def test_web_fetch_treats_the_model_url_as_untrusted(
+def test_web_fetch_refuses_private_hosts_for_the_model_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # An agent-supplied URL is the SSRF trust boundary. The server no longer has
@@ -285,16 +300,18 @@ def test_web_fetch_treats_the_model_url_as_untrusted(
         *,
         max_chars: int | None = None,
         policy: object = None,
+        session: object = None,
     ) -> FetchResult:
-        del max_chars
-        captured["trust"] = getattr(policy, "trust", None)
+        del session, max_chars
+        assert isinstance(policy, PolicyParams)
+        captured["allow_private_hosts"] = policy.allow_private_hosts
         return FetchResult(text="ok", url=url, kind="html", truncated=False)
 
     monkeypatch.setattr(server, "fetch_web", _fake_fetch)
     server.web_fetch("https://e.co")
     # The validation itself is pinned in fetch/common_test.py; what this server
     # owes is leaving the safe default alone.
-    assert captured["trust"] == "untrusted"
+    assert captured["allow_private_hosts"] is False
 
 
 def test_web_fetch_rejects_a_nonpositive_max_chars() -> None:
@@ -309,6 +326,51 @@ def test_paper_search_rejects_a_nonpositive_limit() -> None:
     # PaperError contract every caller catches.
     with pytest.raises(ToolError, match="ValueError: 'limit'"):
         server.paper_search("q", limit=0)
+
+
+@pytest.mark.parametrize(
+    ("tool", "first"),
+    [
+        (server.paper_references, "10.1000/x"),
+        (server.paper_citations, "10.1000/x"),
+        (server.author_search, "ada"),
+        (server.author_papers, "123"),
+    ],
+)
+def test_every_limited_tool_rejects_a_nonpositive_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tool: Callable[..., object],
+    first: str,
+) -> None:
+    _refuse_backends(monkeypatch)
+    with pytest.raises(ToolError, match=r"^ValueError: 'limit' must be >= 1, got 0\.$"):
+        tool(first, limit=0)
+
+
+def _refuse_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail any backend call, so a validation the tool skipped stays offline."""
+
+    def reached(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("backend reached")
+
+    for owner, name in (
+        (details, "references"),
+        (details, "citations"),
+        (authors, "search_authors"),
+        (authors, "author_papers"),
+    ):
+        monkeypatch.setattr(owner, name, reached)
+
+
+def test_author_papers_rejects_an_inverted_year_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _refuse_backends(monkeypatch)
+    with pytest.raises(
+        ToolError,
+        match=r"^ValueError: 'year_from' \(2021\) exceeds 'year_to' \(2020\)\.$",
+    ):
+        server.author_papers("123", year_from=2021, year_to=2020)
 
 
 @pytest.mark.parametrize(
@@ -398,6 +460,72 @@ _TOOLS = (
 )
 
 
+_LISTING = details.Listing(records=[_RECORD], complete=True)
+
+
+_SESSION_CALLS: list[tuple[str, dict[str, object], tuple[object, str, object]]] = [
+    (
+        "paper_search",
+        {"query": "q"},
+        (search, "search", search.SearchResult(records=[], total=0, complete=True)),
+    ),
+    ("paper_details", {"paper_id": "10.1000/x"}, (details, "metadata", _RECORD)),
+    ("paper_references", {"paper_id": "10.1000/x"}, (details, "references", _LISTING)),
+    ("paper_citations", {"paper_id": "10.1000/x"}, (details, "citations", _LISTING)),
+    ("paper_pdf", {"paper_id": "10.1000/x"}, (fetch, "download", (b"%PDF-x", "oa"))),
+    (
+        "author_search",
+        {"query": "ada"},
+        (authors, "search_authors", authors.AuthorSearchResult(records=[], total=0)),
+    ),
+    ("author_papers", {"author_id": "1"}, (authors, "author_papers", _LISTING)),
+    ("web_search", {"query": "q"}, (server, "search", [])),
+    (
+        "web_fetch",
+        {"url": "https://e.co"},
+        (
+            server,
+            "fetch_web",
+            FetchResult(text="t", url="https://e.co", kind="html", truncated=False),
+        ),
+    ),
+]
+
+
+def test_every_tool_shares_one_session_per_server_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: list[object] = []
+    for _, _, (owner, attribute, value) in _SESSION_CALLS:
+
+        def record(*args: object, value: object = value, **kwargs: object) -> object:
+            del args
+            seen.append(kwargs.get("session"))
+            return value
+
+        monkeypatch.setattr(owner, attribute, record)
+    monkeypatch.setattr(server, "cache_dir", _returns(tmp_path))
+    closed: list[FetchSession] = []
+
+    def close(self: FetchSession) -> None:
+        closed.append(self)
+
+    monkeypatch.setattr(FetchSession, "close", close)
+
+    async def run() -> None:
+        async with Client(server.mcp) as client:
+            for tool, arguments, _ in _SESSION_CALLS:
+                result = await client.call_tool(tool, arguments)
+                assert not result.is_error, (tool, result.content)
+
+    asyncio.run(run())
+    assert len(seen) == len(_SESSION_CALLS)
+    assert isinstance(seen[0], FetchSession)
+    assert all(session is seen[0] for session in seen)
+    assert closed == [seen[0]]
+
+
 def test_append_doc_preserves_existing_text_and_adds_extra() -> None:
     def tool() -> None:
         """Existing."""
@@ -463,9 +591,6 @@ def test_tool_description_documents_every_parameter(tool: str) -> None:
         assert not allowed or quoted <= allowed, f"{tool}.{name}: {quoted - allowed}"
 
 
-_LISTING = details.Listing(records=[_RECORD], complete=True)
-
-
 # Keys are written in double quotes under ``Returns:``, values in single quotes, so
 # the documented key set can be read back exactly. ``paper_details`` (one paper's
 # lean record, whose keys vary with the fields it has) and ``web_search`` (a list)
@@ -495,7 +620,7 @@ _RETURN_SHAPES: list[tuple[str, Callable[..., object], tuple[object, str, object
         (
             server,
             "fetch_web",
-            FetchResult(text="t", url="https://e.co", kind=_KIND_HTML, truncated=False),
+            FetchResult(text="t", url="https://e.co", kind="html", truncated=False),
         ),
     ),
 ]

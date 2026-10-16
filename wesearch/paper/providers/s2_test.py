@@ -47,7 +47,7 @@ class TestGet:
         with (
             patch(
                 "wesearch.paper.providers.s2.fetch",
-                MagicMock(return_value=(b"not json", FetchSession())),
+                MagicMock(return_value=b"not json"),
             ),
             pytest.raises(BackendError),
         ):
@@ -72,7 +72,7 @@ class TestBackoff:
             s2.get("/paper/search", {})
 
     def test_a_429_is_retried_by_fetch(self) -> None:
-        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with patch("wesearch.paper.providers.s2.fetch", fetch):
             s2.get("/paper/x", {})
         assert fetch.requests[0].retry.retries == 2
@@ -115,14 +115,8 @@ class TestBatch:
 class TestPaginate:
     def test_walks_cursor_to_limit(self) -> None:
         pages = [
-            (
-                json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode(),
-                FetchSession(),
-            ),
-            (
-                json.dumps({"data": [{"year": 2021}] * 3, "next": 6}).encode(),
-                FetchSession(),
-            ),
+            json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode(),
+            json.dumps({"data": [{"year": 2021}] * 3, "next": 6}).encode(),
         ]
         with patch("wesearch.paper.providers.s2.fetch", side_effect=pages):
             page = s2.paginate("/paper/x/citations", {"fields": "year"}, limit=5)
@@ -130,19 +124,13 @@ class TestPaginate:
         assert not page.complete
 
     def test_exhaustion_marks_complete(self) -> None:
-        one = (
-            json.dumps({"data": [{"year": 2020}], "next": None}).encode(),
-            FetchSession(),
-        )
+        one = json.dumps({"data": [{"year": 2020}], "next": None}).encode()
         with patch("wesearch.paper.providers.s2.fetch", return_value=one):
             page = s2.paginate("/paper/x/references", {}, limit=10)
         assert page.complete
 
     def test_depth_ceiling_400_stops_with_results(self) -> None:
-        first = (
-            json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode(),
-            FetchSession(),
-        )
+        first = json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode()
         ceiling = FetchError("u", 400, {}, b"offset + limit < 10000")
         with patch(
             "wesearch.paper.providers.s2.fetch",
@@ -164,20 +152,14 @@ class TestPaginate:
     def test_non_advancing_cursor_terminates(self) -> None:
         # A server regression where ``next`` does not advance past ``offset``
         # must terminate (not loop forever) and report incomplete.
-        page_json = (
-            json.dumps({"data": [{"year": 2020}] * 3, "next": 0}).encode(),
-            FetchSession(),
-        )
+        page_json = json.dumps({"data": [{"year": 2020}] * 3, "next": 0}).encode()
         with patch("wesearch.paper.providers.s2.fetch", return_value=page_json):
             page = s2.paginate("/paper/x/citations", {}, limit=100)
         assert len(page.entries) == 3
         assert not page.complete
 
     def test_author_papers_builds_endpoint(self) -> None:
-        one = (
-            json.dumps({"data": [{"title": "P"}], "next": None}).encode(),
-            FetchSession(),
-        )
+        one = json.dumps({"data": [{"title": "P"}], "next": None}).encode()
         fetch = _RecordingFetch(one)
         with patch("wesearch.paper.providers.s2.fetch", fetch):
             page = s2.author_papers("42", limit=None)
@@ -188,14 +170,8 @@ class TestPaginate:
 class TestSearchPaginate:
     def test_walks_offset_to_total_and_reports_total(self) -> None:
         pages = [
-            (
-                json.dumps({"data": [{"title": "A"}] * 2, "total": 3}).encode(),
-                FetchSession(),
-            ),
-            (
-                json.dumps({"data": [{"title": "B"}], "total": 3}).encode(),
-                FetchSession(),
-            ),
+            json.dumps({"data": [{"title": "A"}] * 2, "total": 3}).encode(),
+            json.dumps({"data": [{"title": "B"}], "total": 3}).encode(),
         ]
         with patch("wesearch.paper.providers.s2.fetch", side_effect=pages):
             page, total = s2.search_paginate({"query": "x"}, limit=5)
@@ -204,10 +180,7 @@ class TestSearchPaginate:
         assert page.complete
 
     def test_caps_page_size_at_search_ceiling(self) -> None:
-        one = (
-            json.dumps({"data": [{"title": "A"}], "total": 1}).encode(),
-            FetchSession(),
-        )
+        one = json.dumps({"data": [{"title": "A"}], "total": 1}).encode()
         fetch = _RecordingFetch(one)
         with patch("wesearch.paper.providers.s2.fetch", fetch):
             page, total = s2.search_paginate({"query": "x"}, limit=None)
@@ -287,34 +260,85 @@ class TestRecordMapping:
         assert s2._next_offset_advance({"data": {}, "next": 5}, 0, 5) is None
 
 
-type _Fetch = Callable[..., tuple[bytes, FetchSession]]
+type _Fetch = Callable[..., bytes]
 
 
 class _RecordingFetch:
     """A ``fetch`` stand-in that replays canned responses and records requests."""
 
-    def __init__(self, *responses: tuple[bytes, FetchSession]) -> None:
+    def __init__(self, *responses: bytes) -> None:
         self._responses = list(responses)
         self.urls: list[str] = []
         self.requests: list[RequestParams] = []
+        self.sessions: list[FetchSession | None] = []
 
     def __call__(
         self,
         url: str,
         *,
-        session: FetchSession | None = None,
         request: RequestParams | None = None,
-    ) -> tuple[bytes, FetchSession]:
-        del session
+        session: FetchSession | None = None,
+    ) -> bytes:
         assert request is not None
         self.urls.append(url)
         self.requests.append(request)
+        self.sessions.append(session)
         return self._responses.pop(0)
+
+
+def _pages(*payloads: object) -> _RecordingFetch:
+    return _RecordingFetch(*(json.dumps(p).encode() for p in payloads))
+
+
+class TestSessionForwarding:
+    """Every fetch an S2 call makes reuses the caller's session."""
+
+    def test_get(self) -> None:
+        session = FetchSession()
+        fetch = _pages({"ok": True})
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
+            s2.get("/paper/x", {}, session=session)
+        assert fetch.sessions == [session]
+        assert fetch.sessions[0] is session
+
+    def test_batch(self) -> None:
+        session = FetchSession()
+        fetch = _pages([{"x": 1}])
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
+            s2.batch(["a"], "title", session=session)
+        assert [s is session for s in fetch.sessions] == [True]
+
+    def test_paginate_every_page(self) -> None:
+        session = FetchSession()
+        fetch = _pages(
+            {"data": [{"year": 1}] * 3, "next": 3},
+            {"data": [{"year": 2}] * 3, "next": None},
+        )
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
+            s2.paginate("/paper/x/citations", {}, limit=5, session=session)
+        assert [s is session for s in fetch.sessions] == [True, True]
+
+    def test_search_paginate_every_page(self) -> None:
+        session = FetchSession()
+        fetch = _pages(
+            {"data": [{"title": "A"}] * 2, "total": 3},
+            {"data": [{"title": "B"}], "total": 3},
+        )
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
+            s2.search_paginate({"query": "x"}, limit=5, session=session)
+        assert [s is session for s in fetch.sessions] == [True, True]
+
+    def test_author_papers(self) -> None:
+        session = FetchSession()
+        fetch = _pages({"data": [{"title": "P"}], "next": None})
+        with patch("wesearch.paper.providers.s2.fetch", fetch):
+            s2.author_papers("42", limit=None, session=session)
+        assert [s is session for s in fetch.sessions] == [True]
 
 
 def _fetch_returning(payload: object) -> _Fetch:
     body = json.dumps(payload).encode()
-    return lambda *_args, **_kwargs: (body, FetchSession())
+    return lambda *_args, **_kwargs: body
 
 
 class TestExactInternals:
@@ -328,7 +352,7 @@ class TestExactInternals:
         assert s2._headers() == {"Accept": "application/json", "x-api-key": "secret"}
 
     def test_get_builds_exact_request(self) -> None:
-        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with (
             patch.dict("os.environ", {"SEMANTIC_SCHOLAR_API_KEY": ""}),
             patch("wesearch.paper.providers.s2.fetch", fetch),
@@ -366,6 +390,7 @@ class TestExactInternals:
             "/x",
             {"fields": "a", "offset": 7, "limit": 9},
             transport="curl",
+            session=None,
         )
 
     def test_next_offset_requires_integer_and_rows(self) -> None:
@@ -379,7 +404,7 @@ class TestExactInternals:
         assert s2._search_offset_advance({"total": 3, "data": []}, 0, 2) is None
 
     def test_batch_builds_exact_post_request(self) -> None:
-        fetch = _RecordingFetch((json.dumps([{"x": 1}]).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps([{"x": 1}]).encode())
         with patch("wesearch.paper.providers.s2.fetch", fetch):
             assert s2.batch(
                 ["a"],
@@ -490,7 +515,7 @@ class TestExactInternals:
 
     def test_batch_forwards_retries_and_drops_scalar_miss(self) -> None:
         fetch = _RecordingFetch(
-            (json.dumps([{"x": 1}, 7, None]).encode(), FetchSession()),
+            json.dumps([{"x": 1}, 7, None]).encode(),
         )
         with patch("wesearch.paper.providers.s2.fetch", fetch):
             result = s2.batch(
@@ -507,7 +532,7 @@ class TestExactInternals:
         assert fetch.requests[0].retry.timeout_sec == 5.5
 
     def test_get_default_request_contract(self) -> None:
-        fetch = _RecordingFetch((json.dumps({"ok": True}).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with patch("wesearch.paper.providers.s2.fetch", fetch):
             assert s2.get("/paper/x", {}) == {"ok": True}
         request = fetch.requests[0]
@@ -520,7 +545,7 @@ class TestExactInternals:
         with (
             patch(
                 "wesearch.paper.providers.s2.fetch",
-                _RecordingFetch((b"bad", FetchSession())),
+                _RecordingFetch(b"bad"),
             ),
             pytest.raises(
                 BackendError,
@@ -530,7 +555,7 @@ class TestExactInternals:
             s2.get("/paper/x", {})
 
     def test_batch_default_request_options(self) -> None:
-        fetch = _RecordingFetch((b"[]", FetchSession()))
+        fetch = _RecordingFetch(b"[]")
         with (
             patch.dict("os.environ", {"SEMANTIC_SCHOLAR_API_KEY": ""}),
             patch("wesearch.paper.providers.s2.fetch", fetch),
@@ -545,7 +570,7 @@ class TestExactInternals:
         with (
             patch(
                 "wesearch.paper.providers.s2.fetch",
-                _RecordingFetch((b"bad", FetchSession())),
+                _RecordingFetch(b"bad"),
             ),
             pytest.raises(
                 BackendError,
@@ -555,7 +580,7 @@ class TestExactInternals:
             s2.batch(["a"], "title")
 
     def test_batch_request_forwards_timeout_and_headers(self) -> None:
-        fetch = _RecordingFetch((json.dumps([{"x": 1}]).encode(), FetchSession()))
+        fetch = _RecordingFetch(json.dumps([{"x": 1}]).encode())
         with (
             patch.dict("os.environ", {"SEMANTIC_SCHOLAR_API_KEY": ""}),
             patch("wesearch.paper.providers.s2.fetch", fetch),
@@ -626,6 +651,7 @@ class TestExactInternals:
                 "/x",
                 {"fields": "title", "offset": 0, "limit": 2},
                 transport="curl",
+                session=None,
             )
             return object()
 
@@ -661,7 +687,12 @@ class TestExactInternals:
             ) as get,
         ):
             s2.paginate("/x", {}, limit=1)
-        get.assert_called_once_with("/x", {"offset": 0, "limit": 1}, transport="auto")
+        get.assert_called_once_with(
+            "/x",
+            {"offset": 0, "limit": 1},
+            transport="auto",
+            session=None,
+        )
 
     def test_search_paginate_forwards_path_params_and_transport(self) -> None:
         captured: list[object] = []
@@ -681,6 +712,7 @@ class TestExactInternals:
                 "/paper/search",
                 {"query": "x", "offset": 0, "limit": 7},
                 transport="curl",
+                session=None,
             )
             return object()
 
@@ -703,6 +735,7 @@ class TestExactInternals:
                 "/paper/search",
                 {"query": "x", "offset": 0, "limit": 1},
                 transport="auto",
+                session=None,
             )
             return object()
 

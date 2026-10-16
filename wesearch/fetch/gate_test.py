@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import patch
+
+import fcntl
 import time
 
 import pytest
@@ -216,10 +220,64 @@ def test_an_unpaced_site_that_never_failed_leaves_no_state() -> None:
     assert clear_host("probe.example") == 0
 
 
+def test_an_unpaced_site_that_recovered_leaves_no_state() -> None:
+    # Else every later request to it pays for a locked file read and write.
+    _block()
+    time.sleep(0.06)
+    _send()
+    assert clear_host("probe.example") == 0
+
+
+def test_a_paced_site_that_recovered_keeps_its_pace() -> None:
+    policies = (SitePolicy(host="probe.example", interval_sec=0.05, cooldown_sec=0.01),)
+    with pytest.raises(PuzzleChallengeError), gated(_URL, egress="", policies=policies):
+        raise PuzzleChallengeError("challenge")
+    time.sleep(0.02)
+    with gated(_URL, egress="", policies=policies):
+        pass
+    assert clear_host("probe.example") == 1
+
+
+def test_a_block_that_waited_on_a_deleted_gate_still_locks() -> None:
+    # A writer that opened the file before another process deleted it must not
+    # record the block on the unlinked inode, where no one would read it.
+    real = fcntl.flock
+    unlinked: list[Path] = []
+
+    def flock(fd: int, op: int) -> None:
+        if not unlinked:
+            path = Path(f"/proc/self/fd/{fd}").readlink()
+            path.unlink()
+            unlinked.append(path)
+        real(fd, op)
+
+    with patch("wesearch.fetch.gate.fcntl.flock", flock):
+        _block()
+    assert unlinked
+    with pytest.raises(CooldownError):
+        _send()
+
+
 def test_a_hostless_url_passes_ungated() -> None:
     for _ in range(2):
         with pytest.raises(PuzzleChallengeError), gated("data:,x", egress=""):
             raise PuzzleChallengeError("challenge")
+
+
+def test_an_ordinary_failure_frees_the_probe() -> None:
+    _block()
+    time.sleep(0.06)
+    with pytest.raises(FetchError), gated(_URL, egress="203.0.113.1", policies=_FAST):
+        raise FetchError(_URL, 503, {}, b"")
+    _send()
+
+
+def test_a_timeout_on_a_site_that_answers_frees_the_probe() -> None:
+    _block()
+    time.sleep(0.06)
+    with pytest.raises(TimeoutError), gated(_URL, egress="203.0.113.1", policies=_FAST):
+        raise TimeoutError
+    _send()
 
 
 def test_an_interrupted_request_frees_the_probe() -> None:

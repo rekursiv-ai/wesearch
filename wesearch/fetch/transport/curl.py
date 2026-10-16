@@ -1,72 +1,160 @@
-"""curl_cffi transport for :mod:`wesearch.fetch`."""
+"""Fetch like Chrome with curl_cffi: Chrome's TLS fingerprint and headers."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
 import functools
 import importlib
 import logging
-import re
-import threading
 
+from wesearch.chrome.headers import (
+    chrome_headers_for_host,
+    chrome_identity_headers,
+    chrome_platform,
+)
 from wesearch.fetch.challenge import classify_http_error
 from wesearch.fetch.common import (
-    _REDIRECT_STATUSES,
-    Observer,
-    ValidatedHost,
-    apply_redirect,
+    DEFAULT_PORTS,
+    PendingRequest,
     bracket_ipv6,
+    merge_headers,
+    origin,
     pinned_host,
-    redirect_target,
 )
+from wesearch.fetch.session import default_session
 from wesearch.types.errors import FetchError
+from wesearch.types.params import ignore, no_cookies
 
 
 if TYPE_CHECKING:
-    # Type-only: every use is an annotation or a quoted ``cast``. Keeping them
-    # out of the runtime block preserves the lazy ``curl_cffi`` import below.
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from curl_cffi import requests as cc_requests
     from curl_cffi.requests import Response
-    from curl_cffi.requests.impersonate import BrowserTypeLiteral
-    from curl_cffi.requests.session import HttpMethod
 
     import curl_cffi
 
-    from wesearch.types.params import Trust
+    from wesearch.fetch.types import FetchSession
+    from wesearch.types.params import HttpMethod
 else:
     from wrapt import lazy_import
 
-    curl_cffi = lazy_import("curl_cffi")
+    curl_cffi = lazy_import("curl_cffi")  # 86ms.
 
+
+__all__ = ["curl_available", "fetch_curl"]
 
 logger = logging.getLogger(__name__)
 
 
-__all__ = [
-    "close_curl_session",
-    "close_curl_sessions_except",
-    "curl_available",
-    "curl_chrome_major",
-    "curl_session",
-    "fetch_curl",
-    "seed_session_jar",
-    "set_session_cookies",
-]
+def fetch_curl(
+    url: str,
+    *,
+    method: HttpMethod = "GET",
+    headers: Mapping[str, str | None] = MappingProxyType({}),
+    body: bytes = b"",
+    timeout_sec: float = 30.0,
+    connect_timeout_sec: float = 10.0,
+    max_redirects: int = 10,
+    on_redirect: Callable[[str], None] = ignore,
+    on_response: Callable[[int, dict[str, str], str], None] = ignore,
+    allow_private_hosts: bool = False,
+    session: FetchSession | None = None,
+    cookies_for_host: Callable[[str], Mapping[str, str]] = no_cookies,
+) -> bytes:
+    """Fetch ``url`` looking like Chrome on this OS; return the response body.
+
+    Sends Chrome's TLS fingerprint and headers, so most sites that refuse
+    scripts serve it. Pages that need JavaScript need ``fetch_zendriver``.
+
+    Args:
+      url: Fully-qualified URL.
+      method: HTTP method.
+      headers: Sent over Chrome's headers, names in any case; a ``None`` value
+        removes that header. A ``Cookie`` header is the request's cookies.
+      body: Request body.
+      timeout_sec: Seconds allowed for the whole request.
+      connect_timeout_sec: Seconds allowed to connect.
+      max_redirects: Redirects to follow; at 0 the redirect is returned.
+      on_redirect: Called with each redirect target; raise to stop.
+      on_response: Called with ``(status, headers, url)`` for every response.
+      allow_private_hosts: Allow loopback, private, and link-local addresses;
+        leave ``False`` for any URL you did not write.
+      session: Connections to reuse; ``None`` uses the process's shared session.
+      cookies_for_host: Returns the cookies to send a host a redirect moves to;
+        the caller's ``Cookie`` stays with the first origin.
+
+    Returns:
+      body: The response body, decompressed.
+
+    Raises:
+      FetchError: On a status of 400 or more, or a failed connection (status 0).
+
+    """
+    session = default_session() if session is None else session
+    pending = PendingRequest(
+        url=url,
+        method=method,
+        headers=merge_headers(_chrome_headers(url, method), headers),
+        body=body,
+        remaining=max_redirects,
+    )
+    # curl_cffi drops an impersonated header whose value is None (measured); the
+    # merge alone cannot remove one curl adds itself.
+    removed = {name: value for name, value in headers.items() if value is None}
+    while True:
+        requested = pending.url
+        try:
+            response = _connection(
+                session,
+                requested,
+                allow_private_hosts=allow_private_hosts,
+            ).request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request kwargs have no complete stubs.
+                cast("HttpMethod", pending.method),
+                requested,
+                headers={**pending.headers, **removed},
+                data=pending.body or None,
+                impersonate="chrome",
+                timeout=(connect_timeout_sec, timeout_sec),
+                allow_redirects=False,
+                discard_cookies=True,
+            )
+        except curl_cffi.CurlError as error:
+            raise FetchError(requested, 0, {}, str(error).encode()) from error
+        status = int(response.status_code)
+        received = {str(k).lower(): str(v) for k, v in response.headers.items()}
+        # ``items()`` joins repeated Set-Cookie with ", ", which cookie values
+        # also contain; one per line splits back exactly.
+        set_cookies = [
+            cookie
+            for cookie in response.headers.get_list("set-cookie")
+            if cookie is not None
+        ]
+        if set_cookies:
+            received["set-cookie"] = "\n".join(set_cookies)
+        content = bytes(response.content or b"")
+        if pending.follow(
+            status,
+            received,
+            on_response=on_response,
+            on_redirect=on_redirect,
+            cookies_for_host=cookies_for_host,
+        ):
+            continue
+        if status >= 400:
+            raise classify_http_error(requested, status, received, content)
+        return content
 
 
 @functools.cache
 def curl_available() -> bool:
-    """Whether ``curl_cffi`` and its native library load on this host.
-
-    Cached: a failed native load does not heal within a process.
+    """Return whether ``curl_cffi`` and its native library load on this host.
 
     Returns:
-      available: ``True`` when the curl transport can run.
+      available: ``False`` when the import fails; ``fetch`` then uses stdlib.
 
     """
     try:
@@ -77,452 +165,53 @@ def curl_available() -> bool:
     return True
 
 
-def curl_chrome_major(impersonate: str) -> int:
-    """Return the Chrome major curl_cffi impersonates for ``impersonate``.
-
-    Args:
-      impersonate: curl_cffi target or alias (``chrome``, ``chrome146``).
-
-    Returns:
-      major: The version in the target curl_cffi resolves the name to.
-
-    Raises:
-      ValueError: When ``impersonate`` names no Chrome target.
-
-    """
-    target = curl_cffi.requests.impersonate.REAL_TARGET_MAP.get(
-        impersonate,
-        impersonate,
+# curl_cffi sends the macOS Chrome's identity and no ``Origin``; Chrome on this host
+# sends its own OS, and ``Origin`` on a non-GET.
+def _chrome_headers(url: str, method: str) -> dict[str, str]:
+    """Return the Chrome headers curl_cffi's impersonation leaves out."""
+    target = str(curl_cffi.requests.impersonate.REAL_TARGET_MAP["chrome"])
+    major = int(target.removeprefix("chrome"))
+    platform = chrome_platform(target)
+    headers = chrome_identity_headers(major=major, platform=platform)
+    if method not in ("GET", "HEAD"):
+        headers["Origin"] = origin(url)
+    return headers | chrome_headers_for_host(
+        urlparse(url).hostname or "",
+        major=major,
+        platform=platform,
     )
-    match = re.fullmatch(r"chrome(\d+)(?:_android)?", target)
-    if match is None:
-        raise ValueError(f"Unsupported impersonate target {impersonate!r}.")
-    return int(match[1])
 
 
-# Pool identity: egress, registrable domain, impersonation target, SSRF pin,
-# and the port that pin applies to. The pin participates because
-# ``CurlOpt.RESOLVE`` is fixed when the Session is built.
-_SessionKey: TypeAlias = tuple[  # noqa: UP040 -- The forward reference keeps the type alias compatible with the runtime parser.
-    str,
-    str,
-    str,
-    "ValidatedHost | None",
-    int,
-]
-
-# Live curl_cffi Sessions keyed by identity, so a session reuses one connection
-# across requests -- the connection continuity a real browser has, and which a
-# per-call request() (fresh TLS each time) lacks. Keyed on impersonate and on
-# the SSRF pin, since both are fixed at construction.
-# A live pool of open connections, not a tunable.
-_curl_sessions: dict[_SessionKey, cc_requests.Session[Response]] = {}
-# Guards every mutation of the live curl session pool.
-_curl_lock = threading.Lock()
-
-
-def curl_session(
-    egress: str,
-    domain: str,
-    impersonate: str,
+def _connection(
+    session: FetchSession,
+    url: str,
     *,
-    pin: ValidatedHost | None = None,
-    port: int = 443,
+    allow_private_hosts: bool,
 ) -> cc_requests.Session[Response]:
-    """Return the pooled curl_cffi Session for an identity, creating it once.
-
-    Keyed on the REGISTRABLE domain (eTLD+1), not the exact host, so sibling
-    subdomains of one site share a single connection + cookie jar -- the HTTP/2
-    connection coalescing a real browser does for hosts on one certificate.
-    ``www.google.com`` and ``scholar.google.com`` therefore reuse one session,
-    so a warm-up GET to the apex carries its TLS handshake and Set-Cookie into a
-    later request to the subdomain (a cold second connection is a bot tell that
-    Scholar, in particular, budgets against).
-
-    ``pin`` fixes the connect IP via ``CurlOpt.RESOLVE``, so a validated host
-    cannot be re-resolved to a private address before the socket opens. It is
-    passed as a Session-level ``curl_options`` entry rather than set on
-    ``session.curl``: curl_cffi hands each thread its own handle by default, so
-    a handle-level pin is invisible to the worker thread that performs the
-    request (measured -- an off-thread request fails DNS outright), while
-    ``use_thread_local_curl=False`` shares one handle and breaks under
-    concurrency ("easy handle already used"). ``curl_options`` is applied per
-    request, so it is the only form that is both thread- and concurrency-safe.
-
-    Args:
-      egress: Public egress IP the identity is keyed to.
-      domain: Request hostname; coalesced to its registrable domain.
-      impersonate: curl_cffi TLS-impersonation target.
-      pin: Validated host/IP to pin the connection to, or ``None`` to let curl
-        resolve. A pinned session is pooled separately from an unpinned one --
-        the option cannot be changed on a live session without racing its
-        concurrent users.
-      port: Port the pin applies to; ``RESOLVE`` entries are per host:port.
-
-    Returns:
-      session: The pooled Session for this identity and pin.
-
-    """
-    key = (egress, _registrable_domain(domain), impersonate, pin, port)
-    with _curl_lock:
-        session = _curl_sessions.get(key)
-        if session is None:
-            options = (
-                {
+    """Return the session's curl connection for ``url``'s host, opening it once."""
+    parsed = urlparse(url)
+    pin = pinned_host(url, allow_private_hosts=allow_private_hosts)
+    port = parsed.port or DEFAULT_PORTS[parsed.scheme]
+    key = (session.egress, parsed.hostname or "", pin, port)
+    with session.lock:
+        connection = session.curl.get(key)
+        if isinstance(connection, curl_cffi.requests.Session):
+            return cast("cc_requests.Session[Response]", connection)
+        # Pinned per connection, so curl cannot re-resolve the host to a private
+        # address. Session-level ``curl_options``: a handle-level pin misses
+        # curl_cffi's per-thread handles (measured: DNS fails).
+        opened = cast(
+            "cc_requests.Session[Response]",
+            curl_cffi.requests.Session(
+                impersonate="chrome",
+                curl_options={
                     curl_cffi.CurlOpt.RESOLVE: [
                         f"{pin.host}:{port}:{bracket_ipv6(pin.ip)}",
                     ],
                 }
                 if pin is not None
-                else {}
-            )
-            session = cast(
-                "cc_requests.Session[Response]",
-                curl_cffi.requests.Session(
-                    impersonate=cast("BrowserTypeLiteral", impersonate),
-                    curl_options=options,
-                ),
-            )
-            _curl_sessions[key] = session
-        return session
-
-
-def seed_session_jar(
-    session: cc_requests.Session[Response],
-    domain: str,
-    cookies: dict[str, str],
-) -> None:
-    """Load stored profile cookies into a curl session jar it does not yet hold.
-
-    Cross-process persistence: the profile store outlives the in-memory session,
-    so a fresh process seeds the jar from disk. Only names absent from the jar
-    are added, so a live rotating cookie (curl tracking Scholar's NID/GSP) is
-    never clobbered by a stale stored copy.
-
-    Args:
-      session: In-memory curl session.
-      domain: Domain for which to seed cookies.
-      cookies: Stored name=value pairs not yet in the jar.
-
-    """
-    if not cookies:
-        return
-    # Cast keeps iteration typed under monorepo basedpyright; the export
-    # disables unknown-member warnings and ty rejects the redundant cast, so
-    # export ships the bare iteration.
-    present = {c.name for c in session.cookies.jar}
-    for name, value in cookies.items():
-        if name not in present:  # Never clobber a live jar cookie with a stale copy.
-            _jar_set(session, domain, name, value)
-
-
-def set_session_cookies(
-    session: cc_requests.Session[Response],
-    domain: str,
-    cookies: dict[str, str],
-) -> None:
-    """Set caller cookies into a curl session jar, OVERWRITING any prior value.
-
-    Unlike :func:`seed_session_jar` (which preserves live jar cookies), a caller
-    cookie is an explicit per-call override and must win, so it replaces a
-    same-named jar entry. This keeps the jar the single cookie source on the curl
-    path: sending the cookie via a header too would duplicate a name the jar
-    already holds.
-
-    Args:
-      session: In-memory curl session.
-      domain: Domain for which to set cookies.
-      cookies: Per-call override name=value pairs.
-
-    """
-    for name, value in cookies.items():
-        _jar_set(session, domain, name, value)
-
-
-def close_curl_session(egress: str, domain: str, impersonate: str) -> None:
-    """Close and drop an identity's pooled Sessions (a burn ends the connection).
-
-    Every pin and port for the identity is dropped, not one exact key: the pin
-    participates in the pool key, so matching on a single tuple would leave the
-    burned identity's other pinned sessions alive and the caller would keep
-    presenting the cookies that just got it blocked.
-
-    Args:
-      egress: IP address identity.
-      domain: Registrable domain.
-      impersonate: User-Agent string.
-
-    """
-    prefix = (egress, _registrable_domain(domain), impersonate)
-    with _curl_lock:
-        sessions = [
-            _curl_sessions.pop(key) for key in list(_curl_sessions) if key[:3] == prefix
-        ]
-    for session in sessions:
-        session.close()  # I/O outside the lock; the pops already removed them.
-
-
-def close_curl_sessions_except(egress: str | None) -> None:
-    """Close pooled sessions that belong to a different egress.
-
-    Args:
-      egress: IP address identity to retain (others closed).
-
-    """
-    with _curl_lock:
-        sessions = [
-            _curl_sessions.pop(key) for key in list(_curl_sessions) if key[0] != egress
-        ]
-    for session in sessions:
-        session.close()
-
-
-def fetch_curl(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    connect_timeout_sec: float | None = None,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: Observer | None,
-    trust: Trust = "untrusted",
-    session: cc_requests.Session[Response] | None = None,
-    reseat: Callable[[str], cc_requests.Session[Response] | None] | None = None,
-) -> bytes:
-    """Perform a curl request, following redirects manually.
-
-    ONE implementation for every request. SSRF pinning used to fork this into a
-    second raw-handle path that took no Session -- so choosing pinning silently
-    forfeited the pooled connection and its cookie jar, and the fork drifted
-    from this one twice (headers, then cookies). Pinning is now an option on the
-    pooled Session (see :func:`curl_session`), so there is nothing to diverge.
-
-    Args:
-      url: Fully-qualified URL.
-      method: HTTP method.
-      headers: Complete request headers, Cookie already merged.
-      body: Encoded request body, or ``None``.
-      timeout_sec: Per-request timeout.
-      connect_timeout_sec: Ceiling on the handshake alone; ``None`` shares
-        ``timeout_sec``.
-      max_redirects: Redirect budget; at 0 the final 3xx body is returned.
-      impersonate: curl_cffi TLS-impersonation target.
-      on_redirect: Called with each redirect target before it is followed.
-      on_response: Called with ``(status, headers, url)`` per hop.
-      trust: Provenance of the URL. Under ``"untrusted"`` a one-shot request
-        (no pooled ``session``) validates the host to a public address before
-        connecting; a pooled session was already validated and pinned when the
-        pool built it.
-      session: Pooled Session to reuse, or ``None`` for a one-shot request.
-      reseat: Called with the next hop's URL when a redirect crosses hosts,
-        returning the Session for that host. A pin is fixed per Session, so a
-        cross-host hop needs the pool entry for the NEW host; ``None`` keeps the
-        current session for every hop.
-
-    Returns:
-      content: The decoded response body.
-
-    Raises:
-      FetchError: On a non-success status, or a transport failure (status 0).
-
-    """
-    # ``requests`` auto-decompresses .content, so no decompress call is needed.
-    # Cookies are already in headers["Cookie"], so NO cookies= kwarg is passed
-    # (curl would emit a second Cookie source -- verified both are sent).
-    loop = _CurlLoop(
-        url=url,
-        method=method,
-        headers=headers,
-        body=body,
-        remaining=max_redirects,
-    )
-    impers = cast("BrowserTypeLiteral", impersonate)
-    # curl_cffi reads a (connect, read) pair; a bare float budgets both together.
-    timeout = (
-        timeout_sec
-        if connect_timeout_sec is None
-        else (connect_timeout_sec, timeout_sec)
-    )
-    while True:
-        # A keyless request has no pooled session to have been pinned at build
-        # time, so it validates here. Validation is per hop: a redirect can
-        # point at a private address, which is the classic SSRF bypass.
-        #
-        # The resolved IP is pinned, not merely checked: discarding it leaves
-        # curl to resolve again, which is the DNS-rebinding window. ``RESOLVE``
-        # is per host:port, so the pin names this hop's port.
-        one_shot_options: dict[int, list[str]] = {}
-        if session is None:
-            pin = pinned_host(loop.url, trust)
-            if pin is not None:
-                parsed = urlparse(loop.url)
-                pin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                one_shot_options = {
-                    curl_cffi.CurlOpt.RESOLVE: [
-                        f"{pin.host}:{pin_port}:{bracket_ipv6(pin.ip)}",
-                    ],
-                }
-        try:
-            verb = cast("HttpMethod", loop.method)  # Curl types verb as a Literal.
-            resp = (
-                session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request TypedDict has no complete checker stubs.
-                    verb,
-                    loop.url,
-                    headers=loop.headers,
-                    data=loop.body,
-                    impersonate=impers,
-                    timeout=timeout,
-                    allow_redirects=False,
-                )
-                if session is not None
-                else curl_cffi.requests.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's request TypedDict has no complete checker stubs.
-                    verb,
-                    loop.url,
-                    headers=loop.headers,
-                    data=loop.body,
-                    impersonate=impers,
-                    timeout=timeout,
-                    allow_redirects=False,
-                    curl_options=one_shot_options,
-                )
-            )
-        except curl_cffi.CurlError as e:
-            raise FetchError(loop.url, 0, {}, str(e).encode()) from e
-        # curl_cffi's request/Session.request type a None return for the
-        # thread/stream overloads; the sync call here always yields a Response.
-        status = int(resp.status_code)
-        resp_headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
-        # curl_cffi's Headers.items() lossily folds duplicate Set-Cookie with
-        # ", " (and Set-Cookie values may contain ", "); get_list preserves the
-        # individual headers, newline-joined to match join_headers so
-        # parse_set_cookie splits them back exactly.
-        cookies_list = _curl_set_cookies(resp)
-        if cookies_list:
-            resp_headers["set-cookie"] = "\n".join(cookies_list)
-        content = bytes(resp.content or b"")
-        current_url = loop.url
-        if loop.follow(
-            status,
-            resp_headers,
-            on_response=on_response,
-            on_redirect=on_redirect,
-        ):
-            # A pin is fixed per Session, so a hop onto a different host must
-            # move to that host's pool entry -- otherwise the new host would be
-            # fetched through the previous host's pin and fail to resolve.
-            if (
-                reseat is not None
-                and urlparse(loop.url).hostname != urlparse(current_url).hostname
-            ):
-                session = reseat(loop.url)
-            continue
-        if status >= 400:
-            raise classify_http_error(current_url, status, resp_headers, content)
-        return content
-
-
-def _jar_set(
-    session: cc_requests.Session[Response],
-    domain: str,
-    name: str,
-    value: str,
-) -> None:
-    """Set one cookie in a curl jar, honoring RFC 6265bis name-prefix rules."""
-    # RFC 6265bis 4.1.3 cookie-name prefixes, which curl_cffi enforces (and warns
-    # + coerces when violated): a __Secure- cookie must be Secure; a __Host-
-    # cookie must additionally be host-only (no Domain) with Path=/. Chrome only
-    # ever sends these over https, so set them to match.
-    if name.startswith("__Host-"):
-        session.cookies.set(name, value, path="/", secure=True)
-    elif name.startswith("__Secure-"):
-        session.cookies.set(name, value, domain=domain, secure=True)
-    else:
-        session.cookies.set(name, value, domain=domain)
-
-
-# A coarse public-suffix approximation: a two-label tail is the registrable domain,
-# unless the last label is a 2-letter ccTLD and the second-to-last is a short (<=3-char)
-# second-level label (``co.uk``, ``com.au``), in which case the tail is three labels.
-# Sufficient for connection coalescing -- an over-broad grouping only shares a
-# connection, never crosses a real origin boundary for cookies (those stay domain-scoped
-# by the jar).
-def _registrable_domain(host: str) -> str:
-    """Return the eTLD+1 of a host (``a.b.example.co.uk`` -> ``example.co.uk``)."""
-    labels = host.split(".")
-    tail = labels[-2:]
-    if len(labels[-1]) == 2 and len(labels) > 1 and len(labels[-2]) <= 3:
-        return ".".join(labels[-3:])
-    return ".".join(tail)
-
-
-def _curl_set_cookies(resp: Response) -> list[str]:
-    """Return the individual ``Set-Cookie`` headers of a curl response."""
-    get_list = getattr(resp.headers, "get_list", None)
-    if get_list is None:
-        value: object = resp.headers.get("set-cookie")  # pyright: ignore[reportAny] -- curl_cffi's dynamic headers stub returns Any.
-        return [value] if isinstance(value, str) else []
-    return list(cast(list[str], get_list("set-cookie")))
-
-
-@dataclass(slots=True, kw_only=True)
-class _CurlLoop:
-    """Mutable per-hop state shared by both curl backends' redirect loops.
-
-    Holds the current URL, method, headers, body, and remaining redirect budget.
-    :meth:`follow` runs the identical post-response decision both backends make:
-    fire ``on_response``, and if the status is a followable redirect within
-    budget, advance the state to the next hop (via :func:`apply_redirect`) and
-    report ``True``. A ``False`` return means the response is terminal, leaving
-    each backend to classify/return its (differently decompressed) body.
-    """
-
-    url: str
-    method: str
-    headers: dict[str, str]
-    body: bytes | None
-    remaining: int
-
-    def follow(
-        self,
-        status: int,
-        resp_headers: dict[str, str],
-        *,
-        on_response: Observer | None,
-        on_redirect: Callable[[str], None] | None,
-    ) -> bool:
-        """Fire ``on_response``; advance to the next hop on a redirect within budget.
-
-        Args:
-          status: HTTP status code.
-          resp_headers: Response headers (destination for redirect).
-          on_response: Callback to fire before redirect check.
-          on_redirect: Callback to fire on redirect (new URL).
-
-        Returns:
-          result: True if redirect was followed, False if not.
-
-        """
-        if on_response is not None:
-            on_response(status, resp_headers, self.url)
-        # A redirect is followed only while the budget allows; at 0 the contract
-        # is "do not follow, return the 3xx body" (matching the stdlib path).
-        if status not in _REDIRECT_STATUSES or self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        redirect_url = redirect_target(self.url, status, resp_headers)
-        if on_redirect is not None:
-            on_redirect(redirect_url)
-        self.headers, self.method, self.body = apply_redirect(
-            self.url,
-            self.headers,
-            self.method,
-            body=self.body,
-            status=status,
-            redirect_url=redirect_url,
+                else {},
+            ),
         )
-        self.url = redirect_url
-        return True
+        session.curl[key] = opened
+        return opened

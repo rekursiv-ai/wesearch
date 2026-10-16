@@ -329,6 +329,32 @@ class TestEchoOracle:
         assert handlers == [handler]
         handler.start.assert_called_once_with()
 
+    def test_serve_drops_a_connection_accepted_after_stop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``close()``'s wake-up connection must not start a handler.
+
+        On macOS the loop is woken by a loopback connect, which ``accept()``
+        returns like any client; serving it would leave a handler ``close()``
+        then waits on, and leak its socket.
+        """
+        oracle = object.__new__(EchoOracle)
+        raw = MagicMock()
+        sock = MagicMock()
+        sock.accept.side_effect = [(raw, object()), AssertionError("kept accepting")]
+        monkeypatch.setattr(oracle, "_sock", sock, raising=False)
+        oracle._stopped = threading.Event()
+        oracle._stopped.set()
+        handlers: list[threading.Thread] = []
+        monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
+        with patch("wesearch.chrome.echo.threading.Thread") as factory:
+            oracle._serve()
+        raw.close.assert_called_once_with()
+        factory.assert_not_called()
+        assert handlers == []
+        assert sock.accept.call_count == 1
+
     def test_captures_ordered_headers_of_a_live_request(self) -> None:
         with EchoOracle() as oracle:
             context = ssl.create_default_context(cafile=str(oracle.ca_path))

@@ -261,18 +261,6 @@ def self_signed_localhost_cert(cert_path: Path, key_path: Path) -> None:
     )
 
 
-class _Recvable(Protocol):
-    """The one operation reading a head needs.
-
-    Narrower than ``ssl.SSLSocket`` on purpose: the truncation this reader must
-    distinguish is reproducible only by feeding it bytes directly, and a
-    parameter that demands a real TLS socket makes that test impossible to
-    write without a cast asserting something untrue.
-    """
-
-    def recv(self, bufsize: int, /) -> bytes: ...
-
-
 # Returns ``""`` for a head that never terminated -- the peer hung up, stalled past its
 # timeout mid-request, or ran past ``max_bytes`` without ending the block. Returning the
 # PARTIAL bytes instead let ``GET / HTTP`` (Chrome's preconnect, and what the resilience
@@ -292,6 +280,18 @@ def _read_head(conn: _Recvable, *, max_bytes: int = 1 << 16) -> str:
             return ""
         data += chunk
     return codecs.latin_1_decode(data[: end + 4])[0] if end != -1 else ""
+
+
+class _Recvable(Protocol):
+    """The one operation reading a head needs.
+
+    Narrower than ``ssl.SSLSocket`` on purpose: the truncation this reader must
+    distinguish is reproducible only by feeding it bytes directly, and a
+    parameter that demands a real TLS socket makes that test impossible to
+    write without a cast asserting something untrue.
+    """
+
+    def recv(self, bufsize: int, /) -> bytes: ...
 
 
 def _requests_root(request: str) -> bool:

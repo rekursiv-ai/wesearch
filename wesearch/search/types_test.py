@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from bs4 import BeautifulSoup
 
-from wesearch.search.custom_types import (
+from wesearch.search.types import (
     ImageResult,
     clean_text,
     strip_scripts,

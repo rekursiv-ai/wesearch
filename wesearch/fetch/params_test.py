@@ -15,7 +15,6 @@ from wesearch.types.params import (
     RequestParams,
     RetryParams,
     Transport,
-    Trust,
 )
 
 
@@ -42,7 +41,7 @@ class TestGrouping:
             (ContentParams(), "method"),
             (RetryParams(), "retries"),
             (ObserveParams(), "on_redirect"),
-            (PolicyParams(), "trust"),
+            (PolicyParams(), "allow_private_hosts"),
         ],
     )
     def test_groups_are_frozen(self, group: object, attribute: str) -> None:
@@ -53,13 +52,13 @@ class TestGrouping:
         # Safe by default: a caller who says nothing gets SSRF validation. The
         # old contract defaulted to unvalidated, so every caller had to opt in
         # and the one that did (sagent) lost the browser transport for it.
-        assert PolicyParams().trust == "untrusted"
+        assert PolicyParams().allow_private_hosts is False
         assert PolicyParams().transport == "auto"
 
     def test_content_holds_no_transport_knob(self) -> None:
         fields = {f.name for f in dataclasses.fields(ContentParams)}
         assert "transport" not in fields
-        assert "trust" not in fields
+        assert "allow_private_hosts" not in fields
         assert "validated_hosts" not in fields
 
     def test_request_params_exposes_no_flat_transport_fields(self) -> None:
@@ -102,11 +101,11 @@ class TestValidation:
 
     def test_untrusted_browser_request_is_valid(self) -> None:
         # The regression this whole redesign exists to kill: a browser
-        # transport under the DEFAULT trust must construct and run. Chrome owns
-        # its DNS, so ``untrusted`` validates the host and declines to pin --
-        # it does not reject the request.
+        # transport under the DEFAULT policy must construct and run. Chrome owns
+        # its DNS, so a public-only fetch validates the host and declines to pin
+        # -- it does not reject the request.
         params = RequestParams(policy=PolicyParams(transport="zendriver"))
-        assert params.policy.trust == "untrusted"
+        assert params.policy.allow_private_hosts is False
 
     def test_negative_retries_rejected(self) -> None:
         with pytest.raises(ValueError, match="retries"):
@@ -136,11 +135,8 @@ class TestValidation:
             RequestParams(content=ContentParams(data={"a": "1"}, json=None))
 
 
-class TestTrustVocabulary:
-    """``Trust`` names where a URL came from, not what DNS to do about it."""
-
-    def test_two_levels(self) -> None:
-        assert set(get_args(Trust)) == {"untrusted", "internal"}
+class TestVocabulary:
+    """The ``Literal`` vocabularies tool schemas enumerate with ``get_args``."""
 
     def test_transport_vocabulary_unchanged(self) -> None:
         # A ``type`` alias would break ``get_args`` at the sagent tool schemas

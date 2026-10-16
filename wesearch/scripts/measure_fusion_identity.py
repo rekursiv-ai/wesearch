@@ -32,10 +32,7 @@ from wesearch.paper.search import search
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from wesearch.paper.custom_types import PaperRecord
-
-
-_ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+?)(?:v\d+)?$", re.IGNORECASE)
+    from wesearch.paper.types import PaperRecord
 
 
 def main(
@@ -102,98 +99,6 @@ def main(
     return 0 if sampled else 1
 
 
-def _identity_of(doi: str) -> set[str]:
-    """Keys a bare DOI string contributes under the shipped identity rule."""
-    if not doi:
-        return set()
-    keys = {f"doi:{str.casefold(doi)}"}
-    match = _ARXIV_DOI_RE.match(doi)
-    if match:
-        keys.add(f"arxiv:{str.casefold(match.group(1))}")
-    return keys
-
-
-def _text(value: object) -> str:
-    """Return ``value`` when it is a string, else ``""``."""
-    return value if isinstance(value, str) else ""
-
-
-def _object(value: object) -> dict[str, object]:
-    """Return ``value`` when it is a JSON object, else ``{}``."""
-    try:
-        return from_plain(value, dict[str, object])
-    except ReadError:
-        return {}
-
-
-def _array(value: object) -> list[object]:
-    """Return ``value`` when it is a JSON array, else ``[]``."""
-    try:
-        return from_plain(value, list[object])
-    except ReadError:
-        return []
-
-
-def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
-    """MAG id -> DOI (``""`` when absent) from a raw S2 search page."""
-    for _attempt in range(attempts):
-        try:
-            body = s2.get(
-                "/paper/search",
-                {"query": query, "fields": s2.S2_PAPER_FIELDS_STR, "limit": 40},
-            )
-            break
-        except PaperError:
-            time.sleep(6.0)
-    else:
-        raise PaperError(f"Semantic Scholar unavailable for {query!r}")
-    out: dict[str, str] = {}
-    for row in _array(body.get("data")):
-        ids = _object(_object(row).get("externalIds"))
-        mag = _text(ids.get("MAG"))
-        if mag:
-            out[mag] = _text(ids.get("DOI"))
-    return out
-
-
-def _raw_mag_openalex(query: str) -> dict[str, str]:
-    """MAG id -> DOI (``""`` when absent) from a raw OpenAlex works page."""
-    out: dict[str, str] = {}
-    body = openalex._get(  # noqa: SLF001 -- probe reads the raw payload.
-        "/works",
-        {
-            "filter": f"title_and_abstract.search:{query}",
-            "select": "id,doi,ids,title",
-            "per-page": 40,
-            "page": 1,
-        },
-    )
-    for work in _array(body.get("results")):
-        work_obj = _object(work)
-        mag = _text(_object(work_obj.get("ids")).get("mag"))
-        if mag:
-            doi = _text(work_obj.get("doi"))
-            out[mag.rpartition("/")[2]] = doi.rpartition("doi.org/")[2] or doi
-    return out
-
-
-def _doi_keys(rec: PaperRecord) -> list[str]:
-    """Today's identity: DOI only (fuse falls back to title when absent)."""
-    return [f"doi:{str.casefold(rec.doi)}"] if rec.doi else []
-
-
-def _arxiv_keys(rec: PaperRecord) -> list[str]:
-    """DOI plus arXiv id, including one recovered from a 10.48550 DOI."""
-    keys = _doi_keys(rec)
-    arxiv = rec.arxiv_id
-    if not arxiv and rec.doi:
-        match = _ARXIV_DOI_RE.match(rec.doi)
-        arxiv = match.group(1) if match else ""
-    if arxiv:
-        keys.append(f"arxiv:{str.casefold(arxiv)}")
-    return keys
-
-
 def _raw_records(
     query: str,
     *,
@@ -218,6 +123,49 @@ def _raw_records(
     return s2_hits, oa_hits
 
 
+def _raw_mag_s2(query: str, *, attempts: int = 4) -> dict[str, str]:
+    """MAG id -> DOI (``""`` when absent) from a raw S2 search page."""
+    for _attempt in range(attempts):
+        try:
+            body = s2.get(
+                "/paper/search",
+                {"query": query, "fields": s2.S2_PAPER_FIELDS_STR, "limit": 40},
+            )
+            break
+        except PaperError:
+            time.sleep(6.0)
+    else:
+        raise PaperError(f"Semantic Scholar unavailable for {query!r}")
+    out: dict[str, str] = {}
+    for row in _array(body.get("data")):
+        ids = _object(_object(row).get("externalIds"))
+        mag = _text(ids.get("MAG"))
+        if mag:
+            out[mag] = _text(ids.get("DOI"))
+    return out
+
+
+def _array(value: object) -> list[object]:
+    """Return ``value`` when it is a JSON array, else ``[]``."""
+    try:
+        return from_plain(value, list[object])
+    except ReadError:
+        return []
+
+
+def _object(value: object) -> dict[str, object]:
+    """Return ``value`` when it is a JSON object, else ``{}``."""
+    try:
+        return from_plain(value, dict[str, object])
+    except ReadError:
+        return {}
+
+
+def _text(value: object) -> str:
+    """Return ``value`` when it is a string, else ``""``."""
+    return value if isinstance(value, str) else ""
+
+
 def _cross_backend_joins(
     s2_hits: list[PaperRecord],
     oa_hits: list[PaperRecord],
@@ -227,6 +175,55 @@ def _cross_backend_joins(
     left = {key for rec in s2_hits for key in key_fn(rec)}
     right = {key for rec in oa_hits for key in key_fn(rec)}
     return left & right
+
+
+def _doi_keys(rec: PaperRecord) -> list[str]:
+    """Today's identity: DOI only (fuse falls back to title when absent)."""
+    return [f"doi:{str.casefold(rec.doi)}"] if rec.doi else []
+
+
+def _arxiv_keys(rec: PaperRecord) -> list[str]:
+    """DOI plus arXiv id, including one recovered from a 10.48550 DOI."""
+    keys = _doi_keys(rec)
+    arxiv = rec.arxiv_id
+    if not arxiv and rec.doi:
+        match = re.match(r"^10\.48550/arxiv\.(.+?)(?:v\d+)?$", rec.doi, re.IGNORECASE)
+        arxiv = match.group(1) if match else ""
+    if arxiv:
+        keys.append(f"arxiv:{str.casefold(arxiv)}")
+    return keys
+
+
+def _raw_mag_openalex(query: str) -> dict[str, str]:
+    """MAG id -> DOI (``""`` when absent) from a raw OpenAlex works page."""
+    out: dict[str, str] = {}
+    body = openalex._get(  # noqa: SLF001 -- probe reads the raw payload.
+        "/works",
+        {
+            "filter": f"title_and_abstract.search:{query}",
+            "select": "id,doi,ids,title",
+            "per-page": 40,
+            "page": 1,
+        },
+    )
+    for work in _array(body.get("results")):
+        work_obj = _object(work)
+        mag = _text(_object(work_obj.get("ids")).get("mag"))
+        if mag:
+            doi = _text(work_obj.get("doi"))
+            out[mag.rpartition("/")[2]] = doi.rpartition("doi.org/")[2] or doi
+    return out
+
+
+def _identity_of(doi: str) -> set[str]:
+    """Keys a bare DOI string contributes under the shipped identity rule."""
+    if not doi:
+        return set()
+    keys = {f"doi:{str.casefold(doi)}"}
+    match = re.match(r"^10\.48550/arxiv\.(.+?)(?:v\d+)?$", doi, re.IGNORECASE)
+    if match:
+        keys.add(f"arxiv:{str.casefold(match.group(1))}")
+    return keys
 
 
 if __name__ == "__main__":

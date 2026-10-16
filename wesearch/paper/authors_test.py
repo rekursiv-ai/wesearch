@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+from wesearch.fetch import FetchSession
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
-from wesearch.paper.custom_types import AuthorRecord
 from wesearch.paper.paginate import Page
 from wesearch.paper.providers import s2
+from wesearch.paper.types import AuthorRecord
 
 
 if TYPE_CHECKING:
@@ -45,7 +46,7 @@ class TestAuthors:
         assert isinstance(recs[0], AuthorRecord)
         assert recs[1] is None
         assert batch.call_args.args == (["1", "2"], s2.AUTHOR_FIELDS_STR)
-        assert batch.call_args.kwargs == {"endpoint": "author"}
+        assert batch.call_args.kwargs == {"endpoint": "author", "session": None}
 
     def test_search_authors_requests_exact_path_and_params(self) -> None:
         payload: dict[str, MutablePlainTree] = {
@@ -58,6 +59,7 @@ class TestAuthors:
             "/author/search",
             {"query": "Ada", "fields": s2.AUTHOR_FIELDS_STR},
         )
+        assert get.call_args.kwargs == {"session": None}
 
     def test_search_authors_sorts_unknown_h_index_last(self) -> None:
         payload: dict[str, MutablePlainTree] = {
@@ -84,8 +86,9 @@ class TestAuthors:
             *,
             limit: int | None,
             keep: Callable[[dict[str, MutablePlainTree]], bool],
+            session: FetchSession | None = None,
         ) -> Page:
-            del author_id, limit
+            del author_id, limit, session
             return Page(entries=[e for e in entries if keep(e)], complete=True)
 
         with patch.object(s2, "author_papers", side_effect=fake) as papers:
@@ -101,8 +104,9 @@ class TestAuthors:
             *,
             limit: int | None,
             keep: Callable[[dict[str, MutablePlainTree]], bool],
+            session: FetchSession | None = None,
         ) -> Page:
-            del author_id, limit, keep
+            del author_id, limit, session, keep
             return Page(entries=[], complete=False)
 
         with patch.object(s2, "author_papers", side_effect=fake):
@@ -122,8 +126,9 @@ class TestAuthors:
             *,
             limit: int | None,
             keep: Callable[[dict[str, MutablePlainTree]], bool],
+            session: FetchSession | None = None,
         ) -> Page:
-            del author_id, limit
+            del author_id, limit, session
             return Page(entries=[e for e in entries if keep(e)], complete=True)
 
         with patch.object(s2, "author_papers", side_effect=fake):
@@ -138,8 +143,9 @@ class TestAuthors:
             *,
             limit: int | None,
             keep: Callable[[dict[str, MutablePlainTree]], bool],
+            session: FetchSession | None = None,
         ) -> Page:
-            del author_id, limit
+            del author_id, limit, session
             # No bounds -> keep predicate returns True for every entry.
             return Page(entries=[e for e in entries if keep(e)], complete=True)
 
@@ -161,13 +167,66 @@ class TestAuthors:
             *,
             limit: int | None,
             keep: Callable[[dict[str, MutablePlainTree]], bool],
+            session: FetchSession | None = None,
         ) -> Page:
-            del author_id, limit
+            del author_id, limit, session
             return Page(entries=[e for e in entries if keep(e)], complete=True)
 
         with patch.object(s2, "author_papers", side_effect=fake):
             listing = author_papers("1", limit=None, year_to=2020)
         assert [r.title for r in listing.records] == ["in", "boundary"]
+
+
+class _SessionFetch:
+    """A ``fetch`` returning one fixed body and recording each call's session."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.sessions: list[FetchSession | None] = []
+
+    def __call__(
+        self,
+        url: str,
+        *,
+        request: object = None,
+        session: FetchSession | None = None,
+    ) -> bytes:
+        del url, request
+        self.sessions.append(session)
+        return self._body
+
+
+class TestSessionForwarding:
+    """Every author call reuses the caller's session for its fetch."""
+
+    def _sessions(
+        self,
+        body: bytes,
+        call: Callable[[FetchSession], object],
+    ) -> list[bool]:
+        session = FetchSession()
+        fetch = _SessionFetch(body)
+        with patch.object(s2, "fetch", fetch):
+            call(session)
+        return [s is session for s in fetch.sessions]
+
+    def test_search_authors(self) -> None:
+        def call(s: FetchSession) -> object:
+            return search_authors("ada", limit=None, session=s)
+
+        assert self._sessions(b'{"data": []}', call) == [True]
+
+    def test_author_metadata(self) -> None:
+        def call(s: FetchSession) -> object:
+            return author_metadata(["1"], session=s)
+
+        assert self._sessions(b"[]", call) == [True]
+
+    def test_author_papers(self) -> None:
+        def call(s: FetchSession) -> object:
+            return author_papers("1", session=s)
+
+        assert self._sessions(b'{"data": [], "next": null}', call) == [True]
 
 
 if __name__ == "__main__":

@@ -1,29 +1,13 @@
-"""Chrome request-header parity: the headers curl_cffi impersonation omits.
+"""Chrome request headers: User-Agent, client hints, and Google-only headers.
 
-curl_cffi replays Chrome's TLS/HTTP-2 fingerprint and the THREE basic client
-hints (``sec-ch-ua``, ``-mobile``, ``-platform``), but not the extended
-low-entropy hints a real Chrome sends to every site, nor the Google-only
-integrity headers it sends to Google properties. A request that carries a
-Chrome User-Agent + TLS fingerprint yet omits these is provably not Chrome, a
-bot signal no cookie or pacing change addresses.
-
-Two layers, split by where a real Chrome sends them:
-
-- :func:`chrome_client_hints` -- the extended UA client-hint set
-  (``sec-ch-ua-arch`` etc.). Chrome sends these to EVERY site, so
-  :mod:`wesearch.fetch` adds them on every curl request, matching the
-  impersonated browser (desktop or Android). No extra requests.
+- :func:`chrome_identity_headers` / :func:`chrome_navigation_headers` -- the
+  User-Agent and basic client hints, alone or in a full request header set.
+- :func:`chrome_client_hints` -- the extended client hints (``sec-ch-ua-arch``
+  etc.) Chrome sends only to an origin that requested them via ``Accept-CH``.
 - :func:`chrome_headers_for_google` -- the ``x-browser-*`` + ``x-client-data``
-  headers Chrome sends ONLY to Google-owned hosts. A caller scraping a Google
-  property (e.g. Scholar) layers these on; they must NOT go to arbitrary sites.
-  ``x-browser-validation`` is the reverse-engineered integrity token:
-  ``base64(sha1(platform_api_key + UA))``.
+  headers Chrome sends ONLY to Google-owned hosts; never send them elsewhere.
 
-No Chrome version is written here: callers pass the major their transport
-presents, and the brand list is derived from it. The parity test checks the rest
-against a real browser::
-
-    uv run --frozen pytest -m integration wesearch/chrome/
+Every function takes the Chrome major version as an argument.
 
 References:
     https://github.com/dsekz/chrome-x-browser-validation-header
@@ -46,6 +30,7 @@ __all__ = [
     "chrome_brands",
     "chrome_client_hints",
     "chrome_headers_for_google",
+    "chrome_headers_for_host",
     "chrome_identity_headers",
     "chrome_navigation_headers",
     "chrome_platform",
@@ -58,11 +43,19 @@ __all__ = [
 type ChromePlatform = Literal["Windows", "Linux", "macOS", "Android"]
 
 
+# Chrome's reduced User-Agent reports the Android device model as "K".
+_UA_OS: Final[dict[ChromePlatform, str]] = {
+    "Windows": "Windows NT 10.0; Win64; x64",
+    "Linux": "X11; Linux x86_64",
+    "macOS": "Macintosh; Intel Mac OS X 10_15_7",
+    "Android": "Linux; Android 10; K",
+}
+
+
 def chrome_platform(impersonate: str, *, host: str = sys.platform) -> ChromePlatform:
     """Return the OS a Chrome impersonating ``impersonate`` presents.
 
-    A desktop target names THIS host's OS, so a cookie the local Chrome earned
-    returns from a browser naming the same OS.
+    A desktop target presents ``host``'s OS.
 
     Args:
       impersonate: curl_cffi target or alias (``chrome``, ``chrome131_android``).
@@ -81,9 +74,8 @@ def chrome_platform(impersonate: str, *, host: str = sys.platform) -> ChromePlat
 def chrome_brands(major: int, *, full_version: str = "") -> str:
     """Return Chrome's ``sec-ch-ua`` brand list for ``major``.
 
-    Chromium derives the GREASE brand, its version, and the list order from the
-    major version alone (``GenerateBrandVersionList``), so no release needs a
-    table entry.
+    Mirrors Chromium's ``GenerateBrandVersionList``, which derives the GREASE
+    brand and list order from the major version alone.
 
     Args:
       major: Chrome major version.
@@ -91,7 +83,7 @@ def chrome_brands(major: int, *, full_version: str = "") -> str:
         gives the ``sec-ch-ua`` form, which carries majors only.
 
     Returns:
-      brands: The header value.
+      brands: The header value, e.g. ``"Chromium";v="146", ...``.
 
     """
     chars = " (:-./);=?_"
@@ -136,7 +128,7 @@ def user_agent_platform(user_agent: str) -> ChromePlatform | None:
       user_agent: A Chrome User-Agent string.
 
     Returns:
-      platform: The platform its OS token names.
+      platform: The platform its OS token names, or ``None``.
 
     """
     os_token = user_agent.partition("(")[2].partition(")")[0]
@@ -173,28 +165,7 @@ def is_identity_header(name: str) -> bool:
     )
 
 
-# Per-platform Google API keys hard-coded in chrome.dll, used as the prefix when
-# hashing the User-Agent into x-browser-validation. From the reverse-engineering
-# above; stable across Chrome builds to date.
-_PLATFORM_API_KEY: Final[dict[ChromePlatform, str]] = {
-    "Windows": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
-    "Linux": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
-    "macOS": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
-    "Android": "AIzaSyA8Hr8czk2cWyLu-a_RSPVYUEHozUnu6bA",
-}
-
-# The UA OS token curl_cffi presents per platform (the string inside the UA's
-# first parenthesis). Android carries a device model too, but a generic "K" is
-# what a headless-of-recent Chrome reports.
-_UA_OS: Final[dict[ChromePlatform, str]] = {
-    "Windows": "Windows NT 10.0; Win64; x64",
-    "Linux": "X11; Linux x86_64",
-    "macOS": "Macintosh; Intel Mac OS X 10_15_7",
-    "Android": "Linux; Android 10; K",
-}
-
-
-def chrome_user_agent(major: int, platform: str = "macOS") -> str:
+def chrome_user_agent(major: int, platform: str) -> str:
     """Return the User-Agent string a Chrome of this major/platform presents.
 
     Args:
@@ -202,7 +173,10 @@ def chrome_user_agent(major: int, platform: str = "macOS") -> str:
       platform: OS platform (Windows/Linux/macOS/Android).
 
     Returns:
-      result: User-Agent header value for this Chrome version and platform.
+      user_agent: The reduced User-Agent, e.g. ``... Chrome/146.0.0.0 ...``.
+
+    Raises:
+      ValueError: If ``platform`` is not a :data:`ChromePlatform`.
 
     """
     os_name = _UA_OS.get(platform)
@@ -218,7 +192,7 @@ def chrome_user_agent(major: int, platform: str = "macOS") -> str:
 def chrome_navigation_headers(
     *,
     major: int,
-    platform: ChromePlatform = "macOS",
+    platform: ChromePlatform,
     method: str = "GET",
     content_type: str = "",
     origin: str = "",
@@ -226,12 +200,8 @@ def chrome_navigation_headers(
 ) -> dict[str, str]:
     """Return the full Chrome header set for a request, in exact wire order.
 
-    The complete core identity a real Chrome sends to any site -- the three basic
-    client hints, User-Agent, Accept, Sec-Fetch-*, Priority, Accept-Encoding/
-    Language -- matching the captured wire order of curl_cffi's impersonation
-    (verified against real Chrome). Used by the stdlib transport, which has no
-    impersonation and must reproduce the whole set by hand; the curl transport
-    lets its impersonation emit these and adds only the Accept-CH extensions.
+    Covers the basic client hints, User-Agent, Accept, Sec-Fetch-*, Priority,
+    and Accept-Encoding/Language, for a client with no impersonation of its own.
 
     Args:
       major: Chrome major version.
@@ -240,11 +210,8 @@ def chrome_navigation_headers(
         fetch/XHR shape (``Accept: */*``, ``Origin``, cross-site Sec-Fetch).
       content_type: Request body content type, added for a non-GET/HEAD.
       origin: The request origin (``scheme://host``) for a non-GET/HEAD.
-      http2: Whether the request rides HTTP/2. The ``Priority`` header is an
-        HTTP/2 construct; a real Chrome omits it on HTTP/1.1, so the stdlib
-        transport (HTTP/1.1 only) must leave ``http2`` false to match. The
-        curl transport carries ``Priority`` on HTTP/1.1 regardless (curl_cffi's
-        impersonation injects it pre-negotiation), a known curl_cffi limitation.
+      http2: Whether the request rides HTTP/2; adds ``Priority``, which Chrome
+        omits on HTTP/1.1.
 
     Returns:
       headers: The ordered Chrome header map.
@@ -285,37 +252,33 @@ def chrome_navigation_headers(
 def chrome_client_hints(
     *,
     major: int,
-    platform: ChromePlatform = "macOS",
+    platform: ChromePlatform = "Linux",
     full_version: str = "",
 ) -> dict[str, str]:
-    """Return the extended UA client-hint headers a real Chrome sends everywhere.
+    """Return the extended UA client-hint headers an origin opts into.
 
-    The three basic hints (``sec-ch-ua`` / ``-mobile`` / ``-platform``) are
-    supplied by curl_cffi's impersonation; this adds the low-entropy extensions
-    it omits, matching the impersonated browser. Mobile (Android) reports
-    ``sec-ch-ua-mobile: ?1`` and empty ``-arch``/``-bitness`` (a phone has no
-    desktop CPU hints), which is what a real mobile Chrome sends.
+    The basic hints come from :func:`chrome_identity_headers`. Android reports
+    empty ``-arch``/``-bitness``.
 
     Args:
-      major: Chrome major version (must equal the impersonated UA's version, or
-        the hints and the UA disagree -- itself a tell).
+      major: Chrome major version; must match the impersonated UA.
       platform: The impersonated OS; selects ``sec-ch-ua-platform`` and the
         mobile/arch shape.
       full_version: Full Chrome version (e.g. ``"146.0.7379.0"``) for
         ``sec-ch-ua-full-version-list``; defaults to ``"<major>.0.0.0"``.
 
     Returns:
-      headers: The extended client-hint header map to merge onto a request.
+      headers: The extended client-hint header map, in Chrome's wire order.
+
+    Raises:
+      ValueError: If ``platform`` is not a :data:`ChromePlatform`.
 
     """
     if platform not in _UA_OS:
         raise ValueError(f"Unsupported platform {platform!r}.")
     mobile = platform == "Android"
-    # Same GREASE brand and order as sec-ch-ua: a real Chrome derives both lists
-    # from one brand set, so a mismatch between them is itself a tell.
     full_list = chrome_brands(major, full_version=full_version or f"{major}.0.0.0")
-    # Key order mirrors a real Chrome's opted-in wire order exactly:
-    # arch, platform-version, model, bitness, wow64, full-version-list.
+    # Key order is Chrome's wire order; do not sort.
     return {
         "sec-ch-ua-arch": '""' if mobile else '"x86"',
         "sec-ch-ua-platform-version": '""',
@@ -329,9 +292,7 @@ def chrome_client_hints(
 def is_google_property(host: str) -> bool:
     """Whether a real Chrome sends its ``x-browser-*`` integrity headers to ``host``.
 
-    Chrome scopes the Google-only header set to Google-owned properties; a
-    request to any other host must not carry them (sending them elsewhere is
-    itself a bot tell). Matches the registrable Google domains by suffix.
+    Matches ``host`` by suffix against the Google domains this library fetches.
 
     Args:
       host: The bare DNS hostname of the request target.
@@ -345,42 +306,31 @@ def is_google_property(host: str) -> bool:
         host = host[:-1]
     return any(
         host == suffix or host.endswith(f".{suffix}")
-        for suffix in _GOOGLE_HOST_SUFFIXES
+        # Not exhaustive: only the Google properties this library fetches.
+        for suffix in (
+            "google.com",
+            "gstatic.com",
+            "googleapis.com",
+            "googleusercontent.com",
+        )
     )
-
-
-# The Google-owned property suffixes a real Chrome sends x-browser-*/x-client-data
-# to. Not an exhaustive Google-domain list -- the properties this library fetches
-# (Search, Scholar, and their static/api hosts).
-
-_GOOGLE_HOST_SUFFIXES: Final = (
-    "google.com",
-    "gstatic.com",
-    "googleapis.com",
-    "googleusercontent.com",
-)
 
 
 def chrome_headers_for_google(
     *,
     major: int,
-    platform: ChromePlatform = "macOS",
+    platform: ChromePlatform,
     x_client_data: str = "CInbygE=",
 ) -> dict[str, str]:
     """Return the Google-ONLY Chrome headers (``x-browser-*`` + ``x-client-data``).
 
-    These are the integrity/telemetry headers a real Chrome sends ONLY to
-    Google-owned hosts (google.com, scholar.google.com, gstatic, googleapis) --
-    send them to a Google property, never to an arbitrary site. The extended
-    client hints are NOT included here: :mod:`wesearch.fetch` adds those to
-    every origin that opts in via ``Accept-CH`` (Google does), matching a real
-    browser, so a caller need only add the Google-only set.
+    Send only to a host for which :func:`is_google_property` is true.
 
     Args:
       major: Chrome major version; must match the impersonated UA.
       platform: The impersonated OS; selects the validation API key + UA.
-      x_client_data: The opaque ``x-client-data`` install token (a real
-        low-entropy value by default, shared across many installs).
+      x_client_data: The opaque ``x-client-data`` install token; the default
+        is a low-entropy value shared across many real installs.
 
     Returns:
       headers: The Google-only header map.
@@ -397,7 +347,36 @@ def chrome_headers_for_google(
     }
 
 
+def chrome_headers_for_host(
+    host: str,
+    *,
+    major: int,
+    platform: ChromePlatform,
+) -> dict[str, str]:
+    """Return the Google-only headers Chrome sends to ``host``; empty off Google.
+
+    Args:
+      host: Bare hostname of the request.
+      major: Chrome major version; must match the impersonated UA.
+      platform: The impersonated OS.
+
+    Returns:
+      headers: :func:`chrome_headers_for_google` on a Google property, else ``{}``.
+
+    """
+    if is_google_property(host):
+        return chrome_headers_for_google(major=major, platform=platform)
+    return {}
+
+
 def _validation(user_agent: str, platform: ChromePlatform) -> str:
     """Compute ``x-browser-validation``: ``base64(sha1(api_key + UA))``."""
-    data = (_PLATFORM_API_KEY[platform] + user_agent).encode()
+    # Per-platform Google API keys hard-coded in Chrome (see the module References).
+    api_key = {
+        "Windows": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
+        "Linux": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
+        "macOS": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+        "Android": "AIzaSyA8Hr8czk2cWyLu-a_RSPVYUEHozUnu6bA",
+    }[platform]
+    data = (api_key + user_agent).encode()
     return base64.b64encode(hashlib.sha1(data).digest()).decode()  # noqa: S324 -- Chrome compatibility requires this exact SHA-1 validation formula.
