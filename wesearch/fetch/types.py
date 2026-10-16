@@ -106,7 +106,12 @@ class FetchSession:
 
 
 class Fetch(Protocol):
-    """A transport: :func:`fetch_curl`, :func:`fetch_stdlib`, or :func:`fetch_zendriver`."""
+    """A transport implementing the common HTTP request contract.
+
+    Implemented by :func:`wesearch.fetch.transport.curl.fetch_curl`,
+    :func:`wesearch.fetch.transport.stdlib.fetch_stdlib`, and
+    :func:`wesearch.fetch.transport.zendriver.fetch_zendriver`.
+    """
 
     def __call__(
         self,

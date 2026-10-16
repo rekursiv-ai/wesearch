@@ -26,11 +26,13 @@ _PRONUNCIATION = "\u02c8\u0101-j\u0259nt"
 @pytest.mark.parametrize("extractor", get_args(Extractor))
 def test_every_extractor_returns_text(extractor: Extractor) -> None:
     out = html_to_text(
-        "<html><body>hi</body></html>",
+        "<html><body><article><p>"
+        "This is a paragraph of article prose long enough to be scored as content."
+        "</p></article></body></html>",
         extractor=extractor,
-        url="http://x/",
+        url="https://example.com/article",
     )
-    assert "hi" in out
+    assert "paragraph of article prose" in out
 
 
 @pytest.mark.parametrize("name", ["nope"])

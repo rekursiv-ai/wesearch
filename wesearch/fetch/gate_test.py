@@ -18,6 +18,24 @@ _URL = "https://probe.example/search?q=x"
 _FAST = (SitePolicy(host="probe.example", cooldown_sec=0.05, max_cooldown_sec=1.0),)
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, delay: float) -> None:
+        self.now += delay
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    made = _Clock()
+    monkeypatch.setattr("wesearch.fetch.gate.time", made)
+    return made
+
+
 def _block(url: str = _URL, *, egress: str = "203.0.113.1") -> None:
     """Send one request through the gate and have the site block it."""
     with (
@@ -71,9 +89,9 @@ def test_a_refused_connection_counts_as_unreachable() -> None:
         _send(egress="")
 
 
-def test_an_expired_lock_admits_one_probe_while_others_wait() -> None:
+def test_an_expired_lock_admits_one_probe_while_others_wait(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     with (
         gated(_URL, egress="203.0.113.1", policies=_FAST),
         pytest.raises(CooldownError, match="probing"),
@@ -81,31 +99,31 @@ def test_an_expired_lock_admits_one_probe_while_others_wait() -> None:
         _send()
 
 
-def test_a_successful_probe_unlocks_every_caller() -> None:
+def test_a_successful_probe_unlocks_every_caller(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     _send()
     for _ in range(3):
         _send()
 
 
-def test_a_failed_probe_doubles_the_lock() -> None:
+def test_a_failed_probe_doubles_the_lock(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     with pytest.raises(CooldownError, match="cooling down"):
         _send()
 
 
-def test_a_success_resets_the_backoff() -> None:
+def test_a_success_resets_the_backoff(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     _block()
-    time.sleep(0.11)
+    clock.sleep(0.11)
     _send()
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     _send()
 
 
@@ -159,9 +177,9 @@ def test_challenges_list_oldest_first() -> None:
     assert challenged_urls() == ["https://probe.example/a", "https://other.example/b"]
 
 
-def test_an_answered_site_drops_its_challenge() -> None:
+def test_an_answered_site_drops_its_challenge(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     _send()
     assert challenged_urls() == []
 
@@ -192,27 +210,27 @@ def test_clearing_a_host_with_no_state_clears_nothing() -> None:
     assert clear_host("never.example") == 0
 
 
-def test_the_burst_is_free_and_then_paced() -> None:
+def test_the_burst_is_free_and_then_paced(clock: _Clock) -> None:
     policies = (SitePolicy(host="probe.example", interval_sec=0.05, burst=2),)
-    start = time.monotonic()
+    start = clock.time()
     for _ in range(2):
         with gated(_URL, egress="", policies=policies):
             pass
-    assert time.monotonic() - start < 0.04
+    assert clock.time() - start < 0.04
     with gated(_URL, egress="", policies=policies):
         pass
-    assert time.monotonic() - start >= 0.04
+    assert clock.time() - start >= 0.04
 
 
-def test_jitter_lengthens_only_a_wait_the_pace_imposed() -> None:
+def test_jitter_lengthens_only_a_wait_the_pace_imposed(clock: _Clock) -> None:
     policies = (SitePolicy(host="probe.example", interval_sec=0.02, jitter_sec=0.05),)
-    start = time.monotonic()
+    start = clock.time()
     with gated(_URL, egress="", policies=policies):
         pass
-    assert time.monotonic() - start < 0.02
+    assert clock.time() - start < 0.02
     with gated(_URL, egress="", policies=policies):
         pass
-    assert time.monotonic() - start >= 0.02
+    assert clock.time() - start >= 0.02
 
 
 def test_an_unpaced_site_that_never_failed_leaves_no_state() -> None:
@@ -220,19 +238,19 @@ def test_an_unpaced_site_that_never_failed_leaves_no_state() -> None:
     assert clear_host("probe.example") == 0
 
 
-def test_an_unpaced_site_that_recovered_leaves_no_state() -> None:
+def test_an_unpaced_site_that_recovered_leaves_no_state(clock: _Clock) -> None:
     # Else every later request to it pays for a locked file read and write.
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     _send()
     assert clear_host("probe.example") == 0
 
 
-def test_a_paced_site_that_recovered_keeps_its_pace() -> None:
+def test_a_paced_site_that_recovered_keeps_its_pace(clock: _Clock) -> None:
     policies = (SitePolicy(host="probe.example", interval_sec=0.05, cooldown_sec=0.01),)
     with pytest.raises(PuzzleChallengeError), gated(_URL, egress="", policies=policies):
         raise PuzzleChallengeError("challenge")
-    time.sleep(0.02)
+    clock.sleep(0.02)
     with gated(_URL, egress="", policies=policies):
         pass
     assert clear_host("probe.example") == 1
@@ -264,25 +282,25 @@ def test_a_hostless_url_passes_ungated() -> None:
             raise PuzzleChallengeError("challenge")
 
 
-def test_an_ordinary_failure_frees_the_probe() -> None:
+def test_an_ordinary_failure_frees_the_probe(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     with pytest.raises(FetchError), gated(_URL, egress="203.0.113.1", policies=_FAST):
         raise FetchError(_URL, 503, {}, b"")
     _send()
 
 
-def test_a_timeout_on_a_site_that_answers_frees_the_probe() -> None:
+def test_a_timeout_on_a_site_that_answers_frees_the_probe(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     with pytest.raises(TimeoutError), gated(_URL, egress="203.0.113.1", policies=_FAST):
         raise TimeoutError
     _send()
 
 
-def test_an_interrupted_request_frees_the_probe() -> None:
+def test_an_interrupted_request_frees_the_probe(clock: _Clock) -> None:
     _block()
-    time.sleep(0.06)
+    clock.sleep(0.06)
     with (
         pytest.raises(KeyboardInterrupt),
         gated(_URL, egress="203.0.113.1", policies=_FAST),
