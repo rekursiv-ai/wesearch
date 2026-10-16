@@ -208,18 +208,18 @@ def _fetch_as_profile(
     session: FetchSession,
 ) -> bytes:
     """Fetch with this egress's stored cookies for the host, saving what it sets."""
+    domain = urlparse(url).hostname or ""
     transport = resolve_transport(
         params.policy.transport,
         method=params.content.method,
         has_body=params.content.has_body,
-        domain=urlparse(url).hostname or "",
+        domain=domain,
     )
     if transport == "curl-then-zendriver":
         # The browser clears blocks curl cannot; anything else it would not help.
         try:
             return _fetch_as_profile(url, _on(params, "curl"), session=session)
         except BotDetectionError as block:
-            domain = urlparse(url).hostname or ""
             if domain and block.browser_clears:
                 transport_routing.remember_zendriver_domain(domain)
             return _fetch_as_profile(url, _on(params, "zendriver"), session=session)
@@ -229,7 +229,6 @@ def _fetch_as_profile(
     except BotDetectionError:
         # A stored identity may be what got blocked: forget it and retry once
         # from a freshly probed egress. The browser's wall is final.
-        domain = urlparse(url).hostname or ""
         if (
             transport == "zendriver"
             or session.profiles.load(session.egress, domain) is None
@@ -282,12 +281,17 @@ def _send(
         return no_cookies(host) if profile is None else profile.cookies
 
     headers.update(content.headers)
-    cookies = {**stored_cookies(parts.hostname or ""), **content.cookies}
-    if cookies:
+    stored = stored_cookies(parts.hostname or "")
+    if stored or content.cookies:
         # In any case: "cookie" beside "Cookie" sends two headers, a bot tell.
-        cookie = cookie_header(
+        # Later pairs win: the profile, then the caller's header, then ``cookies=``.
+        written = cookie_header(
             {k: v for k, v in headers.items() if v is not None},
-            cookies,
+            {},
+        )
+        cookie = cookie_header(
+            {"Cookie": f"{cookie_header({}, stored)}; {written}"},
+            content.cookies,
         )
         headers = merge_headers({}, {**headers, "Cookie": cookie}) | {
             k: v for k, v in headers.items() if v is None

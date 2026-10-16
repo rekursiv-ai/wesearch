@@ -708,6 +708,33 @@ class TestIdentityLayer:
         assert sent["User-Agent"] == "Mine/1"
         assert sent["Cookie"] == "GSP=caller"
 
+    def test_a_hand_written_cookie_header_overrides_the_profile(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # Profile, then the caller's ``Cookie`` header, then ``cookies=``: each
+        # later source is more deliberate than the one before.
+        session.profiles.save(
+            _EGRESS,
+            "x.com",
+            Profile(cookies={"GSP": "s", "A": "p", "K": "p"}),
+        )
+        with _serve(_response()) as request:
+            fetch.fetch(
+                "https://x.com/p",
+                request=RequestParams(
+                    content=ContentParams(
+                        headers={"cookie": "GSP=header; A=header"},
+                        cookies={"A": "param"},
+                    ),
+                ),
+                session=session,
+            )
+        sent = _sent_headers(request)
+        assert [v for k, v in sent.items() if k.lower() == "cookie"] == [
+            "GSP=header; A=param; K=p",
+        ]
+
     def test_no_profile_still_presents_the_curl_chrome(
         self,
         session: FetchSession,
@@ -778,6 +805,25 @@ class TestIdentityLayer:
         assert _sent_headers(request, 0)["Cookie"] == "GSP=old"
         assert "Cookie" not in _sent_headers(request, 1)
         assert session.profiles.load(_EGRESS, "x.com") is None
+
+    def test_the_fresh_identity_keeps_the_cookies_its_retry_set(
+        self,
+        session: FetchSession,
+    ) -> None:
+        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "old"}))
+        blocked = _response(
+            403,
+            b'<div class="g-recaptcha" data-sitekey="x"></div>',
+            [("content-type", "text/html")],
+        )
+        with (
+            _serve(blocked, _response(headers=[("set-cookie", "GSP=new")])),
+            patch("wesearch.fetch.fetch.egress_ip", _known_egress),
+        ):
+            fetch.fetch("https://x.com/p", session=session)
+        stored = session.profiles.load(_EGRESS, "x.com")
+        assert stored is not None
+        assert stored.cookies == {"GSP": "new"}
 
     def test_second_burn_raises(self, session: FetchSession) -> None:
         session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "x"}))
@@ -1675,7 +1721,41 @@ class TestCurlThenZendriverBackend:
                 )
                 == b"ok"
             )
+        assert browser.call_args.args == ("https://x.example/",)
         assert _sent_headers(browser) == {"X": "1", "Cookie": "c=2"}
+
+    def test_a_hostless_url_remembers_no_domain(self, session: FetchSession) -> None:
+        with (
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                side_effect=CloudflareChallengeError(),
+            ),
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered"),
+        ):
+            fetch.fetch("https:///x", request=_curl_then_zendriver(), session=session)
+        remember.assert_not_called()
+
+    def test_a_bodyless_post_to_a_learned_domain_stays_on_curl(
+        self,
+        session: FetchSession,
+    ) -> None:
+        with (
+            patch.object(
+                transport_routing,
+                "zendriver_domains",
+                return_value=frozenset({"walled.example"}),
+            ),
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok") as curl,
+            patch.object(zendriver, "fetch_zendriver") as via,
+        ):
+            fetch.fetch(
+                "https://walled.example/",
+                request=RequestParams(content=ContentParams(method="POST")),
+                session=session,
+            )
+        curl.assert_called_once()
+        via.assert_not_called()
 
     def test_domainless_url_sends_and_validates(self, session: FetchSession) -> None:
         validate = Mock()

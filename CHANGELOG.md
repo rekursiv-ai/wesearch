@@ -55,6 +55,8 @@ All notable wesearch changes are documented here. This project follows
   curl_cffi installed.
 - Processes sharing a cookie profile no longer lose each other's cookies, and
   a failed cookie save logs instead of failing the fetch.
+- A cookie in the caller's `Cookie` header overrides the stored profile's
+  cookie of the same name; `cookies=` overrides both.
 - The stdlib transport's `timeout_sec` bounds the whole request, not each read.
 - An unpaced site's gate file is deleted once the site recovers.
 - The `web_search` tool description states the real backend fallback order.
