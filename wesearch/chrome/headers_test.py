@@ -207,6 +207,13 @@ class TestImpersonateVersionPlatform:
             (chrome_user_agent(150, "macOS"), "macOS"),
             (chrome_user_agent(150, "Windows"), "Windows"),
             ("Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/150.0.0.0", "Android"),
+            (
+                (
+                    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36"
+                ),
+                "Linux",
+            ),
             ("Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) Chrome/150.0.0.0", None),
         ],
     )

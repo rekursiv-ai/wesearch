@@ -134,9 +134,12 @@ def user_agent_platform(user_agent: str) -> ChromePlatform | None:
     os_token = user_agent.partition("(")[2].partition(")")[0]
     if "Android" in os_token:
         return "Android"
+    # Distro builds insert a vendor token ("X11; Ubuntu; Linux x86_64").
+    parts = os_token.split("; ")
+    if parts[0] == "X11" and any(part.startswith("Linux") for part in parts[1:]):
+        return "Linux"
     prefixes: dict[str, ChromePlatform] = {
         "Windows NT": "Windows",
-        "X11; Linux": "Linux",
         "Macintosh": "macOS",
     }
     return next(
