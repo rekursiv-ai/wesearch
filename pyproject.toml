@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "treekle>=0.1.0",
+    "treekle>=0.2.0",
     # web client / scraping
     "beautifulsoup4",
     "curl-cffi>=0.15.0",

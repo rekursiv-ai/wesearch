@@ -1668,8 +1668,8 @@ wheels = [
 
 [[package]]
 name = "treekle"
-version = "0.1.1"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#2bf17dd1a809459a2430843402781f02c591131f" }
+version = "0.2.0"
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#18c7b3cd487cbc9fa615d4a5af05b190980f1a82" }
 
 [[package]]
 name = "truststore"
