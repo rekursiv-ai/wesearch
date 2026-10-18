@@ -92,6 +92,13 @@ def test_raw_mag_probes_skip_wrong_typed_rows() -> None:
         assert measure_fusion_identity._raw_mag_openalex("query") == {"9": ""}
 
 
+def test_raw_mag_probes_treat_non_array_payloads_as_empty() -> None:
+    with patch.object(s2, "get", return_value={"data": {"MAG": "m"}}):
+        assert measure_fusion_identity._raw_mag_s2("query") == {}
+    with patch.object(openalex, "_get", return_value={"results": "oops"}):
+        assert measure_fusion_identity._raw_mag_openalex("query") == {}
+
+
 def test_raw_mag_s2_retries_paper_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
