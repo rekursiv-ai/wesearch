@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, cast
 
 import argparse
@@ -9,6 +10,7 @@ import sys
 
 import pytest
 
+from wesearch.fetch.transport import zendriver
 from wesearch.search.types import SearchError, SearchResult
 from wesearch.tools import canary
 
@@ -77,6 +79,58 @@ def test_main_exits_with_the_failure_count(
     out = capsys.readouterr().out
     assert "FAIL brave" in out
     assert "ok   duckduckgo" in out
+
+
+@pytest.mark.parametrize(
+    ("landed", "failures"),
+    [((True, True), 0), ((True, False), 1)],
+)
+def test_main_probes_the_shared_browser_from_every_process(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    landed: tuple[bool, ...],
+    failures: int,
+) -> None:
+    fetched: list[str] = []
+    outcomes = iter(landed)
+
+    def fetch(url: str) -> bool:
+        fetched.append(url)
+        return next(outcomes)
+
+    monkeypatch.setattr(canary, "ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr(canary, "_browser_fetch", fetch)
+    argv = ["canary", "--backends", "--processes", "2", "--url", "https://u.example/"]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert canary.main() == failures
+    assert fetched == ["https://u.example/"] * 2
+    out = capsys.readouterr().out
+    assert f"{2 - failures}/2 processes fetched https://u.example/" in out
+    assert out.startswith("FAIL browser" if failures else "ok   browser")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [("<html>", True), ("", False), (OSError("evicted"), False)],
+)
+def test_browser_fetch_reports_whether_a_page_landed(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: object,
+    *,
+    expected: bool,
+) -> None:
+    seen: list[str] = []
+
+    def fake_fetch(url: str) -> object:
+        seen.append(url)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(zendriver, "fetch_zendriver", fake_fetch)
+    assert canary._browser_fetch("https://u.example/") is expected
+    assert seen == ["https://u.example/"]
 
 
 def test_processes_flag_defaults_to_skipping_the_browser() -> None:
