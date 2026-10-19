@@ -86,6 +86,9 @@ All notable wesearch changes are documented here. This project follows
   `FetchMethod`. `wesearch.search.custom_types` and
   `wesearch.paper.custom_types` are `.types`. `wesearch.fetch.providers.x`
   keeps only `matches`; fetch X URLs with `fetch_reader_proxy`.
+- The wheel no longer ships `wesearch.lib.testing`, the Chrome parity echo
+  oracle, or the `wesearch/scripts` benchmarks; each imported a test-only
+  package (`pytest`, `cryptography`, `lxml`) a runtime install lacks.
 
 ## 0.1.13 - 2026-10-07
 

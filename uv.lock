@@ -3,8 +3,8 @@ revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and sys_platform == 'darwin'",
 ]
 supported-markers = [
@@ -467,14 +467,14 @@ wheels = [
 
 [[package]]
 name = "deprecated"
-version = "3.0.0"
+version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/9c/16649913bf14c73e0a9453782e148362ff2657067deff6aa9c7ebcddcc31/deprecated-3.0.0.tar.gz", hash = "sha256:16850204d3a1e6bb0acd06bff48d96e8b0a0d25d1c52f71705405a0f4894192d", size = 166912, upload-time = "2026-09-26T13:58:10.675Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/85/12f0a49a7c4ffb70572b6c2ef13c90c88fd190debda93b23f026b25f9634/deprecated-1.3.1.tar.gz", hash = "sha256:b1b50e0ff0c1fddaa5708a2c6b0a6588bb09b892825ab2b214ac9ea9d92a5223", size = 2932523, upload-time = "2025-10-30T08:19:02.757Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/ae/676feae8e4644a6d7169951a97f61c56f416c73f67bf1761f2461d75cc81/deprecated-3.0.0-py3-none-any.whl", hash = "sha256:58204cf4a7f6270d547af5c278ee7a6bb56045a4b3d8441a1cd11660f41b7939", size = 21912, upload-time = "2026-09-26T13:58:09.458Z" },
+    { url = "https://files.pythonhosted.org/packages/84/d0/205d54408c08b13550c733c4b85429e7ead111c7f0014309637425520a9a/deprecated-1.3.1-py2.py3-none-any.whl", hash = "sha256:597bfef186b6f60181535a29fbe44865ce137a5079f295b479886c82729d5f3f", size = 11298, upload-time = "2025-10-30T08:19:00.758Z" },
 ]
 
 [[package]]
@@ -1438,7 +1438,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typeshed"
 version = "0.1.5"
-source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#5dc266817ec6a4092b013d7eb9671dad591cea87" }
+source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#44334e8a1c4071200c4c335bc1e3c31b3d58ce0a" }
 dependencies = [
     { name = "basedpyright" },
     { name = "ty" },
@@ -1447,7 +1447,7 @@ dependencies = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.5"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#5dc266817ec6a4092b013d7eb9671dad591cea87" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#44334e8a1c4071200c4c335bc1e3c31b3d58ce0a" }
 
 [[package]]
 name = "rpds-py"
@@ -1948,6 +1948,7 @@ debug = [
 dev = [
     { name = "basedpyright" },
     { name = "codespell" },
+    { name = "cryptography" },
     { name = "hypothesis" },
     { name = "ipython" },
     { name = "lxml-stubs" },
@@ -1969,6 +1970,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright" },
     { name = "codespell" },
+    { name = "cryptography" },
     { name = "hypothesis" },
     { name = "lxml-stubs" },
     { name = "nodejs-wheel-binaries" },
@@ -1985,6 +1987,7 @@ stubs = [
     { name = "lxml-stubs" },
 ]
 test = [
+    { name = "cryptography" },
     { name = "hypothesis" },
     { name = "nodejs-wheel-binaries" },
     { name = "pytest" },
@@ -2023,6 +2026,7 @@ debug = [
 dev = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "ipython" },
     { name = "lxml-stubs", specifier = ">=0.5.1" },
@@ -2044,6 +2048,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "lxml-stubs", specifier = ">=0.5.1" },
     { name = "nodejs-wheel-binaries", specifier = ">=24.16.0" },
@@ -2058,6 +2063,7 @@ pre-commit = [
 ]
 stubs = [{ name = "lxml-stubs", specifier = ">=0.5.1" }]
 test = [
+    { name = "cryptography", specifier = ">=42" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "nodejs-wheel-binaries", specifier = ">=24.16.0" },
     { name = "pytest", specifier = ">=7.0" },

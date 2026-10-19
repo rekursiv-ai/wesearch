@@ -1,7 +1,7 @@
 """Drive a real headless Chrome at a URL, for parity testing.
 
-The request is recorded by the receiving server (e.g.
-:class:`wesearch.chrome.echo.EchoOracle`), not here. Callers gate on
+The request is recorded by the receiving server (e.g. the loopback echo
+oracle in the parity tests), not here. Callers gate on
 :func:`chrome_available` and skip when no usable Chrome is installed; a
 snap-confined Chromium does not count.
 """

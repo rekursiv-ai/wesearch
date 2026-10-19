@@ -8,12 +8,11 @@ headers in the same order as Chrome's -- the definition of "indistinguishable
 from Chrome". The test fails the moment a backend diverges, keeping both honest
 as Chrome evolves.
 
-The endpoint is :class:`wesearch.chrome.echo.EchoOracle`: a self-signed
-loopback HTTPS server that records each request's ordered headers server-side,
-so the comparison never depends on a third-party echo host whose certificate can
-expire. Chrome reaches it with ``--ignore-certificate-errors``; the fetch
-backends trust its ``ca_path`` (``SSL_CERT_FILE`` for stdlib, curl's own CA
-bundle honors it too).
+The endpoint is the ``oracle`` fixture from this directory's conftest: a
+self-signed loopback HTTPS server that records each request's ordered headers
+server-side, so the comparison never depends on a third-party echo host whose
+certificate can expire. Chrome reaches it with ``--ignore-certificate-errors``;
+the fixture points both fetch backends' CA variables at its certificate.
 
 The oracle offers ALPN ``http/1.1`` only -- the one protocol every backend
 speaks. One wire consequence: real Chrome omits the HTTP/2-only ``Priority``
@@ -30,14 +29,12 @@ Requires a Chrome binary on PATH (skipped without one so CI stays green). Run::
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 from curl_cffi.requests.impersonate import REAL_TARGET_MAP
 
 import pytest
 
 from wesearch.chrome.capture import chrome_available, drive_chrome
-from wesearch.chrome.echo import EchoOracle
 from wesearch.chrome.headers import (
     chrome_brands,
     chrome_identity_headers,
@@ -61,6 +58,8 @@ from wesearch.profile import Profile, ProfileStore
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from wesearch.chrome.conftest import EchoOracle
 
 
 # A documentation address (RFC 5737): a preset egress skips the live IP probe.
@@ -105,24 +104,6 @@ def session(tmp_path: Path) -> Iterator[FetchSession]:
         yield opened
     finally:
         opened.close()
-
-
-@pytest.fixture
-def oracle() -> Iterator[EchoOracle]:
-    """Return a running loopback echo oracle whose CA the fetch backends trust."""
-    # ``stdlib`` (ssl) honors SSL_CERT_FILE; curl_cffi (BoringSSL) honors
-    # CURL_CA_BUNDLE. Both must trust the oracle's self-signed CA.
-    with (
-        EchoOracle() as running,
-        patch.dict(
-            "os.environ",
-            {
-                "SSL_CERT_FILE": str(running.ca_path),
-                "CURL_CA_BUNDLE": str(running.ca_path),
-            },
-        ),
-    ):
-        yield running
 
 
 @pytest.mark.browser_chrome

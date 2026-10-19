@@ -1,4 +1,4 @@
-"""Loopback TLS header-echo oracle for wire-parity tests.
+"""Chrome-test fixtures: a loopback TLS header-echo oracle for wire parity.
 
 A parity test proves that :func:`wesearch.fetch.fetch` presents the same
 ordered wire headers as a real Chrome. That needs a server which (a) reports the
@@ -6,13 +6,16 @@ exact header order it received and (b) serves valid TLS both a headless Chrome
 and the fetch backends will accept -- without depending on a third-party echo
 host whose certificate can expire out from under the suite.
 
-:class:`EchoOracle` is that server, self-contained and dependency-light: it mints
-a self-signed ``localhost`` certificate with :mod:`cryptography`, serves HTTPS on
-a loopback port from a daemon thread, and records the ordered header names of
-each request to ``/``. Chrome reaches it with ``--ignore-certificate-errors``
-(via :func:`wesearch.chrome.capture.drive_chrome`); the fetch
-backends reach it by trusting :attr:`ca_path` (``SSL_CERT_FILE`` for the stdlib
-path, ``verify`` for curl).
+:class:`EchoOracle` is that server: it mints a self-signed ``localhost``
+certificate with :mod:`cryptography`, serves HTTPS on a loopback port from a
+daemon thread, and records the ordered header names of each request to ``/``.
+Chrome reaches it with ``--ignore-certificate-errors`` (via
+:func:`wesearch.chrome.capture.drive_chrome`); the fetch backends reach it
+by trusting :attr:`ca_path`, which the :func:`oracle` fixture exports.
+
+It lives in a conftest because ``cryptography`` is a test-only dependency, and
+the wheel excludes ``**/conftest.py``: shipped, the oracle would be a public
+module whose imports a runtime install cannot satisfy.
 
 The listener offers only ALPN ``http/1.1``. HTTP/1.1 is the one protocol every
 backend speaks (``http.client`` has no HTTP/2), so a single plain
@@ -29,6 +32,7 @@ from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, cast
+from unittest.mock import patch
 
 import codecs
 import contextlib
@@ -42,15 +46,37 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+import pytest
+
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import TracebackType
 
 
 __all__ = [
     "EchoOracle",
+    "oracle",
     "self_signed_localhost_cert",
 ]
+
+
+@pytest.fixture
+def oracle() -> Iterator[EchoOracle]:
+    """Return a running echo oracle whose CA both fetch backends trust."""
+    # ``stdlib`` (ssl) honors SSL_CERT_FILE; curl_cffi (BoringSSL) honors
+    # CURL_CA_BUNDLE. Both must trust the oracle's self-signed CA.
+    with (
+        EchoOracle() as running,
+        patch.dict(
+            "os.environ",
+            {
+                "SSL_CERT_FILE": str(running.ca_path),
+                "CURL_CA_BUNDLE": str(running.ca_path),
+            },
+        ),
+    ):
+        yield running
 
 
 class EchoOracle:
@@ -72,7 +98,7 @@ class EchoOracle:
       port: The bound loopback port, for a client that needs it apart from
         :attr:`url` (``http.client`` takes host and port separately).
       ca_path: Path to the PEM certificate clients must trust to reach the
-        oracle (``SSL_CERT_FILE`` for stdlib, ``verify`` for curl).
+        oracle (``SSL_CERT_FILE`` for stdlib, ``CURL_CA_BUNDLE`` for curl).
 
     """
 

@@ -6,10 +6,10 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from http import client
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import os
 import socket
 import ssl
 import struct
@@ -23,8 +23,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 import pytest
 
-from wesearch.chrome import echo
-from wesearch.chrome.echo import (
+from wesearch.chrome import conftest
+from wesearch.chrome.conftest import (
     EchoOracle,
     _header_lines,
     _header_names,
@@ -36,6 +36,7 @@ from wesearch.chrome.echo import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 class TestHeaderParsing:
@@ -239,16 +240,16 @@ class TestEchoOracle:
         stack = MagicMock()
         stack.enter_context.side_effect = [str(tmp_path), sock]
         with (
-            patch("wesearch.chrome.echo.ExitStack", return_value=stack),
+            patch("wesearch.chrome.conftest.ExitStack", return_value=stack),
             patch(
-                "wesearch.chrome.echo.tempfile.TemporaryDirectory",
+                "wesearch.chrome.conftest.tempfile.TemporaryDirectory",
                 return_value=temporary,
             ) as temporary_factory,
-            patch("wesearch.chrome.echo.self_signed_localhost_cert"),
-            patch("wesearch.chrome.echo.ssl.SSLContext", return_value=context),
-            patch("wesearch.chrome.echo.socket.socket", return_value=sock),
+            patch("wesearch.chrome.conftest.self_signed_localhost_cert"),
+            patch("wesearch.chrome.conftest.ssl.SSLContext", return_value=context),
+            patch("wesearch.chrome.conftest.socket.socket", return_value=sock),
             patch(
-                "wesearch.chrome.echo.threading.Thread",
+                "wesearch.chrome.conftest.threading.Thread",
                 return_value=thread,
             ) as thread_factory,
         ):
@@ -287,7 +288,7 @@ class TestEchoOracle:
         oracle._captures = []
         request = "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
         with patch(
-            "wesearch.chrome.echo._read_head",
+            "wesearch.chrome.conftest._read_head",
             return_value=request,
         ):
             oracle._handle(raw)
@@ -316,7 +317,7 @@ class TestEchoOracle:
         monkeypatch.setattr(oracle, "_handle", handle, raising=False)
         handler = MagicMock()
         with patch(
-            "wesearch.chrome.echo.threading.Thread",
+            "wesearch.chrome.conftest.threading.Thread",
             return_value=handler,
         ) as factory:
             oracle._serve()
@@ -348,7 +349,7 @@ class TestEchoOracle:
         oracle._stopped.set()
         handlers: list[threading.Thread] = []
         monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
-        with patch("wesearch.chrome.echo.threading.Thread") as factory:
+        with patch("wesearch.chrome.conftest.threading.Thread") as factory:
             oracle._serve()
         raw.close.assert_called_once_with()
         factory.assert_not_called()
@@ -481,7 +482,7 @@ class TestEchoOracleCleanup:
         monkeypatch.setattr(oracle, "_stack", stack, raising=False)
         wake = MagicMock()
         with patch(
-            "wesearch.chrome.echo.socket.create_connection",
+            "wesearch.chrome.conftest.socket.create_connection",
             return_value=wake,
         ) as connect:
             oracle.close()
@@ -500,17 +501,27 @@ class TestEchoOracleCleanup:
         oracle.close()
         assert not directory.exists(), f"leaked {directory}"
 
-    def test_failed_construction_leaves_no_directory(self) -> None:
+    def test_failed_construction_leaves_no_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # __init__ acquires a temp dir, then a socket, then a thread. A raise
         # part-way through stranded everything acquired so far: the caller
-        # never gets an object, so close() is unreachable.
-        before = set(Path(tempfile.gettempdir()).glob("echo-oracle-*"))
+        # never gets an object, so close() is unreachable. A private tempdir,
+        # not a glob of the shared one: the glob named the wrong prefix and
+        # could never fail, and parallel workers create oracles there too.
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
         with (
-            patch.object(echo, "self_signed_localhost_cert", side_effect=OSError("x")),
+            patch.object(
+                conftest,
+                "self_signed_localhost_cert",
+                side_effect=OSError("x"),
+            ),
             pytest.raises(OSError, match="x"),
         ):
             EchoOracle()
-        assert set(Path(tempfile.gettempdir()).glob("echo-oracle-*")) == before
+        assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.network_localhost
     def test_close_joins_a_stalled_handler_thread(self) -> None:
@@ -543,6 +554,16 @@ class TestEchoOracleCleanup:
         finally:
             release.set()
             oracle.close()
+
+
+class TestOracleFixture:
+    def test_points_both_backends_at_the_oracle_certificate(
+        self,
+        oracle: EchoOracle,
+    ) -> None:
+        assert os.environ["SSL_CERT_FILE"] == str(oracle.ca_path)
+        assert os.environ["CURL_CA_BUNDLE"] == str(oracle.ca_path)
+        assert oracle.ca_path.is_file()
 
 
 class TestEchoOracleShutdown:
