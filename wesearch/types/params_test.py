@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from types import MappingProxyType
 from typing import Literal
 
 import pytest
@@ -17,6 +18,7 @@ from wesearch.types.params import (
     RequestParams,
     RetryParams,
     ignore,
+    no_cookies,
 )
 
 
@@ -132,6 +134,12 @@ def test_policy_field_default_and_missing_name() -> None:
     with pytest.raises(KeyError) as exc:
         PolicyParams.field_default("missing")
     assert exc.value.args == ("PolicyParams has no field 'missing'.",)
+
+
+def test_no_cookies_returns_an_empty_read_only_mapping() -> None:
+    jar = no_cookies("example.com")
+    assert dict(jar) == {}
+    assert isinstance(jar, MappingProxyType)
 
 
 def test_observe_callbacks_default_to_ignore() -> None:

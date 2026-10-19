@@ -9,6 +9,7 @@ from http import client
 from typing import cast
 from unittest.mock import Mock, call, patch
 
+import gzip
 import socket
 import ssl
 
@@ -163,6 +164,35 @@ def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
     assert resp.read.call_count == 3
     assert [c.args[0] for c in sock.settimeout.call_args_list] == [10.0, 10.0, 6.0, 2.0]
     assert conn.closed
+
+
+def test_an_error_status_raises_a_fetch_error_with_the_body() -> None:
+    conn = _Conn(_response(404, b"nope"))
+    with (
+        patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
+        pytest.raises(FetchError) as error,
+    ):
+        fetch_stdlib("http://127.0.0.1/gone", allow_private_hosts=True)
+    assert (error.value.url, error.value.status) == ("http://127.0.0.1/gone", 404)
+    assert error.value.body == b"nope"
+    assert conn.closed
+
+
+def test_an_error_body_is_decompressed_before_it_is_reported() -> None:
+    conn = _Conn(
+        _response(
+            429,
+            gzip.compress(b"slow down"),
+            [("Content-Encoding", "gzip")],
+        ),
+    )
+    with (
+        patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
+        pytest.raises(FetchError) as error,
+    ):
+        fetch_stdlib("http://127.0.0.1/", allow_private_hosts=True)
+    assert error.value.status == 429
+    assert error.value.body == b"slow down"
 
 
 @pytest.mark.parametrize(

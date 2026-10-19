@@ -282,6 +282,14 @@ def test_a_hostless_url_passes_ungated() -> None:
             raise PuzzleChallengeError("challenge")
 
 
+def test_a_hostless_url_that_succeeds_passes_ungated() -> None:
+    ran: list[str] = []
+    with gated("data:,x", egress=""):
+        ran.append("body")
+    assert ran == ["body"]
+    assert challenged_urls() == []
+
+
 def test_an_ordinary_failure_frees_the_probe(clock: _Clock) -> None:
     _block()
     clock.sleep(0.06)

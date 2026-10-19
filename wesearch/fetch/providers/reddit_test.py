@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
+from wesearch.fetch import FetchSession, PolicyParams, RequestParams
 from wesearch.fetch.providers import reddit
 
 
@@ -48,6 +51,29 @@ class TestRssUrl:
     def test_idempotent_on_rss(self) -> None:
         url = "https://reddit.com/r/x/.rss"
         assert reddit.rss_url(url) == url
+
+
+def _rss_fetch(
+    url: str,
+    *,
+    request: RequestParams,
+    session: FetchSession | None = None,
+) -> bytes:
+    assert request.policy == PolicyParams()
+    assert session is not None
+    return url.encode()
+
+
+class TestPublicFetch:
+    def test_fetches_the_rss_feed_on_the_shared_session(self) -> None:
+        # The public build has no OAuth path, so every fetch reads the feed.
+        with patch.object(reddit, "fetch", _rss_fetch):
+            body, payload = reddit.fetch_reddit(
+                "https://reddit.com/r/x",
+                policy=PolicyParams(),
+            )
+        assert body == b"https://reddit.com/r/x/.rss"
+        assert payload == "rss"
 
 
 if __name__ == "__main__":
