@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, cast, get_args
+from typing import Literal, get_args
 from unittest.mock import patch
 
 import importlib
@@ -63,7 +63,7 @@ def test_import_refuses_a_tab_without_a_categories_record(
         monkeypatch.undo()
         importlib.reload(searxng_module)
     assert set(searxng_module.CATEGORIES) == set(
-        get_args(cast(object, types.SearxngCategory.__value__)),
+        get_args(types.SearxngCategory.__value__),
     )
 
 
