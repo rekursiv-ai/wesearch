@@ -520,7 +520,7 @@ def searxng(
 
 
 # At import, not in a test: a tab missing a record fails before any query.
-if set(CATEGORIES) != set(get_args(cast(object, SearxngCategory.__value__))):
+if set(CATEGORIES) != set(get_args(SearxngCategory.__value__)):
     raise ValueError("every SearxngCategory needs a CATEGORIES record")
 
 

@@ -25,12 +25,12 @@ from wesearch.chrome.headers import (
     chrome_platform,
 )
 from wesearch.chrome.useragents import newest_chrome_major
-from wesearch.fetch.common_test import zstd_compress
 from wesearch.fetch.session import default_session
 from wesearch.fetch.transport.curl import fetch_curl
 from wesearch.fetch.transport.stdlib import fetch_stdlib
 from wesearch.fetch.transport.zendriver import fetch_zendriver
 from wesearch.fetch.types import Fetch, FetchSession
+from wesearch.lib import zstd_compat
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.types.params import ignore
 
@@ -179,7 +179,7 @@ def test_a_post_sends_its_body(base: str, send: _Send) -> None:
 
 @pytest.mark.parametrize(
     ("encoding", "encode"),
-    [("gzip", gzip.compress), ("zstd", zstd_compress)],
+    [("gzip", gzip.compress), ("zstd", zstd_compat.compress)],
 )
 def test_a_compressed_body_is_decoded(
     base: str,

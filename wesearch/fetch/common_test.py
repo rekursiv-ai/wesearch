@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import gzip
-import io
 import socket
-import sys
 import zlib
 
 import brotli
@@ -31,47 +29,13 @@ from wesearch.fetch.common import (
     public_host,
     redirect_target,
 )
+from wesearch.lib import zstd_compat
 from wesearch.types.errors import FetchError
 from wesearch.types.params import ignore, no_cookies
 
 
-try:
-    from compression import zstd
-except ImportError:
-    zstd = None
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-    import zstandard
-else:
-    from wrapt import lazy_import
-
-    zstandard = lazy_import("zstandard")  # 5ms.
-
-
-def zstd_compress(data: bytes, *, streaming: bool = False) -> bytes:
-    """Compress ``data`` as one zstd frame, via stdlib on 3.14+, else the wheel.
-
-    Args:
-      data: Bytes to compress.
-      streaming: Emit a streaming frame, which omits the content size from the
-        frame header -- the shape Cloudflare serves.
-
-    Returns:
-      frame: The compressed frame.
-
-    """
-    if zstd is not None:
-        if not streaming:
-            return zstd.compress(data)
-        compressor = zstd.ZstdCompressor()
-        return compressor.compress(data) + compressor.flush()
-    if not streaming:
-        return zstandard.ZstdCompressor().compress(data)
-    buf = io.BytesIO()
-    with zstandard.ZstdCompressor().stream_writer(buf, closefd=False) as w:
-        _ = w.write(data)
-    return buf.getvalue()
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -602,14 +566,18 @@ class TestDecompress:
 
     def test_zstd(self) -> None:
         data = b"hello world"
-        assert decompress(zstd_compress(data), "zstd") == data
+        assert decompress(zstd_compat.compress(data), "zstd") == data
 
     def test_zstd_streaming_frame_no_size(self) -> None:
         # Streaming-mode frames omit decompressed size from the header;
-        # `ZstdDecompressor.decompress()` rejects them. Real servers
-        # (e.g. Cloudflare) emit such frames -- we must handle them.
-        data = b"hello world " * 1000
-        assert decompress(zstd_compress(data, streaming=True), "zstd") == data
+        # `zstandard.ZstdDecompressor.decompress()` rejects them. Real servers
+        # (e.g. Cloudflare) emit such frames -- we must handle them. Neither
+        # library's one-shot `compress` can mint one, so the frame is a golden.
+        frame = bytes.fromhex(
+            "28b52ffd0058a500006068656c6c6f20776f726c64200100d1ee7c4902",
+        )
+        assert not frame[4] & 0b1110_0000  # No content size, not single-segment.
+        assert decompress(frame, "zstd") == b"hello world " * 1000
 
     def test_zstd_garbage_raises(self) -> None:
         with pytest.raises(ValueError, match="Decompression failed"):
@@ -724,64 +692,6 @@ class TestSharedHelpers:
     def test_pinned_host_rejects_hostless_public_only_url(self) -> None:
         with pytest.raises(ValueError, match="no host"):
             pinned_host("https:///relative", allow_private_hosts=False)
-
-
-class TestZstdCompress:
-    """The test-only zstd encoder other fetch tests feed the decoder with."""
-
-    def test_round_trips_both_frame_modes(self) -> None:
-        data = b"payload" * 100
-        regular = zstd_compress(data)
-        streaming = zstd_compress(data, streaming=True)
-        assert decompress(regular, "zstd") == data
-        assert decompress(streaming, "zstd") == data
-        assert regular != streaming
-
-    def test_uses_the_wheel_without_stdlib_zstd(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(sys.modules[__name__], "zstd", None)
-        data = b"wheel payload"
-        assert decompress(zstd_compress(data), "zstd") == data
-        assert decompress(zstd_compress(data, streaming=True), "zstd") == data
-
-    def test_selects_the_stdlib_frame_mode(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        compressor = Mock()
-        compressor.compress.return_value = b"regular"
-        compressor.flush.return_value = b"flush"
-        stdlib = Mock()
-        stdlib.compress.return_value = b"one-shot"
-        stdlib.ZstdCompressor.return_value = compressor
-        monkeypatch.setattr(sys.modules[__name__], "zstd", stdlib)
-        assert zstd_compress(b"data") == b"one-shot"
-        assert zstd_compress(b"data", streaming=True) == b"regularflush"
-        stdlib.compress.assert_called_once_with(b"data")
-        compressor.compress.assert_called_once_with(b"data")
-        compressor.flush.assert_called_once_with()
-
-    def test_selects_the_wheel_frame_mode(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        compressor = Mock()
-        compressor.compress.return_value = b"regular"
-        writer = Mock()
-        writer.__enter__ = Mock(return_value=writer)
-        writer.__exit__ = Mock(return_value=None)
-        compressor.stream_writer.return_value = writer
-        wheel = Mock()
-        wheel.ZstdCompressor.return_value = compressor
-        monkeypatch.setattr(sys.modules[__name__], "zstd", None)
-        monkeypatch.setattr(sys.modules[__name__], "zstandard", wheel)
-        assert zstd_compress(b"data") == b"regular"
-        zstd_compress(b"data", streaming=True)
-        compressor.stream_writer.assert_called_once()
-        assert compressor.stream_writer.call_args.kwargs == {"closefd": False}
-        writer.write.assert_called_once_with(b"data")
 
 
 class TestIPv6Bracketing:
