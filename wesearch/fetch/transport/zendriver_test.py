@@ -2062,7 +2062,7 @@ def test_pool_reconnects_a_browser_without_a_connection(connects: _Connects) -> 
 class _ConnectionlessBrowser:
     """A browser whose connection never opened."""
 
-    connection = None
+    connection: None = None
 
 
 def test_pool_run_gives_up_when_its_loop_stopped() -> None:

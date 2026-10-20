@@ -15,7 +15,6 @@ return type to that category's record.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, overload
-from urllib import error
 
 import json
 import logging
@@ -257,8 +256,6 @@ def search(
         except (
             FetchError,
             OSError,
-            TimeoutError,
-            error.URLError,
             json.JSONDecodeError,
         ) as e:
             if len(chain) == 1:

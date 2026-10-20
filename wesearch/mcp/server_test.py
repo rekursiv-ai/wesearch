@@ -42,7 +42,11 @@ if TYPE_CHECKING:
 # typed.
 def _returns[T](value: T) -> Callable[..., T]:
     """Return a typed stub callable for monkeypatching."""
-    return lambda *_args, **_kwargs: value
+
+    def returned(*_args: object, **_kwargs: object) -> T:
+        return value
+
+    return returned
 
 
 def _fetch_web_returning(html: bytes, *, max_chars: int) -> Callable[..., FetchResult]:

@@ -308,7 +308,7 @@ def _assert_identity_matches(
     """Our identity names this host's OS and the version our transport presents."""
     platform = chrome_platform("chrome")
     major = (
-        int(str(REAL_TARGET_MAP["chrome"]).removeprefix("chrome"))
+        int(REAL_TARGET_MAP["chrome"].removeprefix("chrome"))
         if backend == "curl"
         else newest_chrome_major(platform)
     )
