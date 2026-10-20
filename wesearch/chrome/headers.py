@@ -18,11 +18,15 @@ References:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import base64
 import hashlib
 import sys
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 __all__ = [
@@ -44,7 +48,7 @@ type ChromePlatform = Literal["Windows", "Linux", "macOS", "Android"]
 
 
 # Chrome's reduced User-Agent reports the Android device model as "K".
-_UA_OS: Final[dict[ChromePlatform, str]] = {
+_UA_OS: Final[Mapping[str, str]] = {
     "Windows": "Windows NT 10.0; Win64; x64",
     "Linux": "X11; Linux x86_64",
     "macOS": "Macintosh; Intel Mac OS X 10_15_7",

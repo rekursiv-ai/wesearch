@@ -360,7 +360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             html = cached_html(
                 page,
                 cache_dir=flags.cache_dir,
-                refresh=bool(flags.refresh),
+                refresh=bool(flags.refresh),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             )
         except Exception as error:  # noqa: BLE001 -- one unreachable page must not end the run.
             print(f"\n{page.slug}: UNAVAILABLE: {error}")
@@ -390,7 +390,7 @@ def _word_grams(text: str, size: int = 5) -> frozenset[tuple[str, ...]]:
         list[str],
         re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower()),
     )
-    words = [str(v) for v in values]
+    words = list(values)
     return frozenset(
         tuple(words[i : i + size]) for i in range(max(0, len(words) - size + 1))
     )

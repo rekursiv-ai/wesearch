@@ -165,12 +165,12 @@ def _statuses(seen: list[int]) -> Callable[[int, dict[str, str], str], None]:
 
 
 def test_a_get_returns_the_body(base: str, send: _Send) -> None:
-    _Server.routes["/"] = (200, [], b"hello")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"hello")
     assert send(f"{base}/") == b"hello"
 
 
 def test_a_post_sends_its_body(base: str, send: _Send) -> None:
-    _Server.routes["/form"] = (200, [], b"ok")
+    _Server.routes["/form"] = (200, list[tuple[str, str]](), b"ok")
     send(f"{base}/form", method="POST", body=b"a=1", headers={"X-Test": "yes"})
     method, path, headers, body = _Server.seen[-1]
     assert (method, path, body) == ("POST", "/form", b"a=1")
@@ -196,7 +196,7 @@ def test_a_redirect_is_followed_and_reported(
     send: _Send,
 ) -> None:
     _Server.routes["/a"] = (302, [("Location", "/b")], b"")
-    _Server.routes["/b"] = (200, [], b"final")
+    _Server.routes["/b"] = (200, list[tuple[str, str]](), b"final")
     hops: list[str] = []
     seen: list[int] = []
     assert (
@@ -239,7 +239,7 @@ def test_a_303_turns_a_post_into_a_bodyless_get(
     send: _Send,
 ) -> None:
     _Server.routes["/form"] = (303, [("Location", "/done")], b"")
-    _Server.routes["/done"] = (200, [], b"ok")
+    _Server.routes["/done"] = (200, list[tuple[str, str]](), b"ok")
     send(
         f"{base}/form",
         method="POST",
@@ -257,7 +257,7 @@ def test_a_cross_origin_redirect_drops_the_credentials(
 ) -> None:
     other = base.replace("127.0.0.1", "localhost")
     _Server.routes["/a"] = (302, [("Location", f"{other}/b")], b"")
-    _Server.routes["/b"] = (200, [], b"ok")
+    _Server.routes["/b"] = (200, list[tuple[str, str]](), b"ok")
     send(f"{base}/a", headers={"Cookie": "s=1", "Authorization": "Bearer x"})
     _, _, headers, _ = _Server.seen[-1]
     assert "cookie" not in headers
@@ -271,7 +271,7 @@ def test_a_cross_origin_redirect_sends_the_targets_cookies(
 ) -> None:
     other = base.replace("127.0.0.1", "localhost")
     _Server.routes["/a"] = (302, [("Location", f"{other}/b")], b"")
-    _Server.routes["/b"] = (200, [], b"ok")
+    _Server.routes["/b"] = (200, list[tuple[str, str]](), b"ok")
     asked: list[str] = []
 
     def stored(host: str) -> Mapping[str, str]:
@@ -293,7 +293,7 @@ def test_a_redirect_without_a_location_is_an_error(
     base: str,
     send: _Send,
 ) -> None:
-    _Server.routes["/a"] = (302, [], b"")
+    _Server.routes["/a"] = (302, list[tuple[str, str]](), b"")
     with pytest.raises(FetchError, match="302"):
         send(f"{base}/a")
 
@@ -345,7 +345,7 @@ def test_a_caller_header_replaces_the_transport_default(
     base: str,
     send: _Send,
 ) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     send(f"{base}/", headers={"User-Agent": "loop-paper", "X-Test": "yes"})
     _, _, headers, _ = _Server.seen[-1]
     assert headers["user-agent"] == "loop-paper"
@@ -356,7 +356,7 @@ def test_a_none_header_deletes_the_transport_default(
     base: str,
     send: _Send,
 ) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     send(f"{base}/")
     defaulted = set(_Server.seen[-1][2])
     send(f"{base}/", headers={"User-Agent": None, "Accept": None})
@@ -378,7 +378,7 @@ def test_each_transport_presents_its_own_chrome_on_the_host_os(
     name: str,
     major: int,
 ) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     _bind(_TRANSPORTS[name])(f"{base}/")
     _, _, headers, _ = _Server.seen[-1]
     platform = chrome_platform("chrome")
@@ -387,7 +387,7 @@ def test_each_transport_presents_its_own_chrome_on_the_host_os(
 
 
 def test_stdlib_sends_the_whole_chrome_navigation_set(base: str) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     _bind(fetch_stdlib)(f"{base}/", headers={"E": "f"})
     _, _, headers, _ = _Server.seen[-1]
     platform = chrome_platform("chrome")
@@ -399,14 +399,14 @@ def test_stdlib_sends_the_whole_chrome_navigation_set(base: str) -> None:
 
 
 def test_a_post_carries_its_origin(base: str, send: _Send) -> None:
-    _Server.routes["/form"] = (200, [], b"ok")
+    _Server.routes["/form"] = (200, list[tuple[str, str]](), b"ok")
     send(f"{base}/form", method="POST", body=b"a=1")
     _, _, headers, _ = _Server.seen[-1]
     assert headers["origin"] == base
 
 
 def test_a_caller_overrides_the_browser_identity(base: str, send: _Send) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     send(
         f"{base}/",
         headers={"User-Agent": "Android GSA", "sec-ch-ua-platform": '"Android"'},
@@ -421,7 +421,7 @@ def test_one_cookie_header_carries_the_cookies_each_hop_set(
     send: _Send,
 ) -> None:
     _Server.routes["/a"] = (302, [("Location", "/b"), ("Set-Cookie", "s=2")], b"")
-    _Server.routes["/b"] = (200, [], b"ok")
+    _Server.routes["/b"] = (200, list[tuple[str, str]](), b"ok")
     send(f"{base}/a", headers={"cookie": "s=1; keep=3"})
     first, second = _Server.raw
     assert [v for k, v in first if k.lower() == "cookie"] == ["s=1; keep=3"]
@@ -462,7 +462,7 @@ def test_a_public_only_fetch_refuses_a_loopback_address(
 
 
 def test_curl_reuses_one_connection_per_host_in_a_session(base: str) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     session = FetchSession(egress="203.0.113.7")
     try:
         fetch_curl(f"{base}/", allow_private_hosts=True, session=session)
@@ -477,7 +477,7 @@ def test_curl_reuses_one_connection_per_host_in_a_session(base: str) -> None:
 
 
 def test_curl_without_a_session_reuses_the_default_connection(base: str) -> None:
-    _Server.routes["/"] = (200, [], b"ok")
+    _Server.routes["/"] = (200, list[tuple[str, str]](), b"ok")
     fetch_curl(f"{base}/", allow_private_hosts=True)
     [opened] = default_session().curl.values()
     fetch_curl(f"{base}/", allow_private_hosts=True)

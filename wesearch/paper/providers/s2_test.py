@@ -338,7 +338,11 @@ class TestSessionForwarding:
 
 def _fetch_returning(payload: object) -> _Fetch:
     body = json.dumps(payload).encode()
-    return lambda *_args, **_kwargs: body
+
+    def fetched(*_args: object, **_kwargs: object) -> bytes:
+        return body
+
+    return fetched
 
 
 class TestExactInternals:

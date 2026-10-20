@@ -124,8 +124,8 @@ def fetch_curl(
             )
         except curl_cffi.CurlError as error:
             raise FetchError(requested, 0, {}, str(error).encode()) from error
-        status = int(response.status_code)
-        received = {str(k).lower(): str(v) for k, v in response.headers.items()}
+        status = int(response.status_code)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        received = {k.lower(): str(v) for k, v in response.headers.items()}
         # ``items()`` joins repeated Set-Cookie with ", ", which cookie values
         # also contain; one per line splits back exactly.
         set_cookies = [
@@ -135,7 +135,7 @@ def fetch_curl(
         ]
         if set_cookies:
             received["set-cookie"] = "\n".join(set_cookies)
-        content = bytes(response.content or b"")
+        content = response.content or b""
         if pending.follow(
             status,
             received,
@@ -169,7 +169,7 @@ def curl_available() -> bool:
 # sends its own OS, and ``Origin`` on a non-GET.
 def _chrome_headers(url: str, method: str) -> dict[str, str]:
     """Return the Chrome headers curl_cffi's impersonation leaves out."""
-    target = str(curl_cffi.requests.impersonate.REAL_TARGET_MAP["chrome"])
+    target = curl_cffi.requests.impersonate.REAL_TARGET_MAP["chrome"]
     major = int(target.removeprefix("chrome"))
     platform = chrome_platform(target)
     headers = chrome_identity_headers(major=major, platform=platform)

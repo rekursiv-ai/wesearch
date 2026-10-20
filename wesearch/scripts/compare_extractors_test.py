@@ -174,7 +174,7 @@ def test_main_scores_cached_page_and_writes_table(
         patch.object(compare_extractors, "_write_samples"),
         patch.object(compare_extractors, "_print_table") as table,
     ):
-        score.return_value = (1, [])
+        score.return_value = (1, list[object]())
         assert (
             compare_extractors.main(
                 ["--cache-dir", str(tmp_path), "--url", page.url],

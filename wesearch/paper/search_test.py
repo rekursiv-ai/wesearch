@@ -59,7 +59,7 @@ class TestSearchDispatch:
 
     def test_unknown_source_raises(self) -> None:
         with pytest.raises(PaperError, match="Unknown search source"):
-            search.search("q", source="bogus")  # ty: ignore[invalid-argument-type] -- The test passes an invalid source to exercise error handling.  # pyright: ignore[reportArgumentType] -- The test passes an invalid source to exercise error handling.
+            search.search("q", source="bogus")  # ty: ignore[invalid-argument-type] -- The test passes an invalid source to exercise error handling.  # pyright: ignore[reportArgumentType] -- The test passes an invalid source to exercise error handling.  # pyrefly: ignore[bad-argument-type] -- The test passes an invalid source to exercise error handling.
 
 
 class TestFusedSearch:

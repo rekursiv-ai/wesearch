@@ -78,7 +78,7 @@ class TestChromeClientHints:
 
     def test_unsupported_platform_rejected(self) -> None:
         with pytest.raises(ValueError, match="platform"):
-            chrome_client_hints(major=146, platform="BeOS")  # ty: ignore[invalid-argument-type] -- The test passes an invalid platform to verify validation.  # pyright: ignore[reportArgumentType] -- The test passes an invalid platform to verify validation.
+            chrome_client_hints(major=146, platform="BeOS")  # ty: ignore[invalid-argument-type] -- The test passes an invalid platform to verify validation.  # pyright: ignore[reportArgumentType] -- The test passes an invalid platform to verify validation.  # pyrefly: ignore[bad-argument-type] -- The test passes an invalid platform to verify validation.
 
 
 class TestGoogleChromeHeaders:

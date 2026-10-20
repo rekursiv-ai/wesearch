@@ -1773,7 +1773,7 @@ wheels = [
 [[package]]
 name = "treekle"
 version = "0.2.0"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#71200f6de45f85d276635c98a5415fafbaa6dbea" }
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#8d8845e09844ef72124f51626e1314fa7c1518e5" }
 
 [[package]]
 name = "truststore"
