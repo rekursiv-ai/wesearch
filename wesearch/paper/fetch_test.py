@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import logging
+
 import pytest
 
 from wesearch.fetch import FetchSession
@@ -12,6 +14,7 @@ from wesearch.paper import fetch
 from wesearch.paper.errors import NotFoundError
 from wesearch.paper.providers import s2
 from wesearch.types.errors import FetchError
+from wesearch.types.params import RequestParams
 
 
 if TYPE_CHECKING:
@@ -253,6 +256,172 @@ class TestDownload:
             pytest.raises(NotFoundError),
         ):
             fetch.download("arxiv", "1706.03762")
+
+
+def test_download_failure_message_and_forwarding() -> None:
+    with (
+        patch.object(fetch, "_fetch_open_access", return_value=None) as oa,
+        pytest.raises(
+            NotFoundError,
+            match=r"^No source returned a PDF for doi:10.1/x\.$",
+        ),
+    ):
+        fetch.download("doi", "10.1/x", oa_looked_up=True)
+    oa.assert_called_once_with(
+        "doi",
+        "10.1/x",
+        oa_url=None,
+        looked_up=True,
+        session=None,
+    )
+
+
+def test_s2_lookup_requests_exact_wire_path_and_fields() -> None:
+    payload: dict[str, MutablePlainTree] = {"openAccessPdf": {"url": "https://x/pdf"}}
+    with patch.object(s2, "get", return_value=payload) as get:
+        assert fetch._s2_oa_lookup("doi", "10.1/x") == "https://x/pdf"
+    assert get.call_args.args == ("/paper/DOI:10.1/x", {"fields": "openAccessPdf"})
+    assert get.call_args.kwargs == {"session": None}
+
+
+def test_fetch_arxiv_uses_default_base() -> None:
+    with patch.object(fetch, "_download_pdf", return_value=_PDF) as download:
+        assert fetch._fetch_arxiv("1.2") == _PDF
+    download.assert_called_once_with("https://arxiv.org/pdf/1.2", session=None)
+
+
+def test_fetch_arxiv_uses_custom_base_and_logs_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        patch.object(fetch, "_download_pdf", side_effect=ValueError("bad")) as download,
+        caplog.at_level(logging.DEBUG, logger=fetch.__name__),
+    ):
+        assert fetch._fetch_arxiv("1.2", arxiv_pdf_base="https://mirror/pdf") is None
+    download.assert_called_once_with("https://mirror/pdf/1.2", session=None)
+    assert [record.getMessage() for record in caplog.records] == [
+        "arXiv download failed: bad",
+    ]
+
+
+def test_fetch_open_access_logs_download_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        patch.object(fetch, "_download_pdf", side_effect=OSError("bad")),
+        caplog.at_level(logging.DEBUG, logger=fetch.__name__),
+    ):
+        assert (
+            fetch._fetch_open_access(
+                "doi",
+                "10.1/x",
+                oa_url="https://x/pdf",
+                looked_up=True,
+            )
+            is None
+        )
+    assert [record.getMessage() for record in caplog.records] == [
+        "OA download failed: bad",
+    ]
+
+
+def test_fetch_open_access_uses_kind_and_canonical() -> None:
+    with (
+        patch.object(fetch, "_s2_oa_lookup", return_value="https://x/pdf") as lookup,
+        patch.object(fetch, "_download_pdf", return_value=_PDF) as download,
+    ):
+        assert (
+            fetch._fetch_open_access("doi", "10.1/x", oa_url=None, looked_up=False)
+            == _PDF
+        )
+    lookup.assert_called_once_with("doi", "10.1/x", session=None)
+    download.assert_called_once_with("https://x/pdf", session=None)
+
+
+def test_download_pdf_defaults_and_minimum_boundary() -> None:
+    body = b"%PDF-" + b"0" * 123
+    with patch.object(
+        fetch,
+        "fetch",
+        return_value=body,
+    ) as fetch_call:
+        assert fetch._download_pdf("https://x/pdf") == body
+    request = fetch_call.call_args.kwargs["request"]
+    assert isinstance(request, RequestParams)
+    assert request.retry.retries == 2
+    assert request.retry.timeout_sec == 180.0
+    with (
+        patch.object(fetch, "fetch", return_value=body),
+        pytest.raises(ValueError, match="non-PDF"),
+    ):
+        fetch._download_pdf("https://x/pdf", min_pdf_bytes=129)
+
+
+def test_download_pdf_uses_exact_retry_and_timeout() -> None:
+    with patch.object(
+        fetch,
+        "fetch",
+        return_value=_PDF,
+    ) as fetch_call:
+        assert (
+            fetch._download_pdf(
+                "https://x/pdf",
+                retries=4,
+                download_timeout_sec=8.5,
+                min_pdf_bytes=128,
+            )
+            == _PDF
+        )
+    request = fetch_call.call_args.kwargs["request"]
+    assert isinstance(request, RequestParams)
+    assert request.retry.retries == 4
+    assert request.retry.timeout_sec == 8.5
+
+
+def test_validate_pdf_boundary_and_exact_message() -> None:
+    body = b"%PDF-" + b"0" * 123
+    assert fetch._validate_pdf("https://x", body) == body
+    with pytest.raises(
+        ValueError,
+        match=r"^GET https://x → non-PDF \(128 bytes, prefix=b'%PDF-0{11}'\)$",
+    ):
+        fetch._validate_pdf("https://x", body, min_pdf_bytes=129)
+
+
+def test_download_pdf_error_includes_url() -> None:
+    with (
+        patch.object(fetch, "fetch", return_value=b"bad"),
+        pytest.raises(ValueError, match=r"^GET https://x/pdf → non-PDF"),
+    ):
+        fetch._download_pdf("https://x/pdf")
+
+
+def test_download_open_never_reaches_a_source_only_provider() -> None:
+    with (
+        patch.object(fetch, "_fetch_open_access", return_value=None) as oa,
+        pytest.raises(
+            NotFoundError,
+            match=r"^No open copy returned a PDF for doi:10.1/x\.$",
+        ),
+    ):
+        fetch.download_open("doi", "10.1/x", oa_looked_up=True)
+    oa.assert_called_once_with(
+        "doi",
+        "10.1/x",
+        oa_url=None,
+        looked_up=True,
+        session=None,
+    )
+
+
+def test_download_open_serves_arxiv_then_open_access() -> None:
+    with patch.object(fetch, "_fetch_arxiv", return_value=_PDF):
+        assert fetch.download_open("arxiv", "1706.03762") == (_PDF, "arxiv")
+    with (
+        patch.object(fetch, "_fetch_arxiv", return_value=None),
+        patch.object(fetch, "_fetch_open_access", return_value=_PDF),
+    ):
+        assert fetch.download_open("arxiv", "1706.03762") == (_PDF, "open_access")
 
 
 if __name__ == "__main__":

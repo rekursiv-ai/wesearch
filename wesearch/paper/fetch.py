@@ -7,6 +7,9 @@ whose bytes start with the PDF magic:
 2. Open-access URL from S2 metadata (rate-gated through the shared S2 gate).
 3. Source-only providers available in this build.
 
+:func:`download_open` stops after step 2, for callers that must not reach a
+source-only provider.
+
 Nothing is written to disk; storing the PDF is the caller's job.
 """
 
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
 __all__ = [
     "batch_oa_urls",
     "download",
+    "download_open",
     "oa_url_of",
 ]
 
@@ -127,6 +131,68 @@ def download(
       NotFoundError: When no enabled source returned a PDF.
 
     """
+    found = _open_copy(
+        kind,
+        canonical,
+        oa_url=oa_url,
+        oa_looked_up=oa_looked_up,
+        session=session,
+    )
+    if found is not None:
+        return found
+    raise NotFoundError(f"No source returned a PDF for {kind}:{canonical}.")
+
+
+def download_open(
+    kind: IdType,
+    canonical: str,
+    *,
+    oa_url: str | None = None,
+    oa_looked_up: bool = False,
+    session: FetchSession | None = None,
+) -> tuple[bytes, str]:
+    """Download a paper's PDF from an open copy only: arXiv, then open access.
+
+    Unlike :func:`download`, no source-only provider is tried, so every byte
+    returned came from the paper's own open copy.
+
+    Args:
+      kind: ``"doi"`` or ``"arxiv"``, as from ``normalize_id``.
+      canonical: Bare identifier, as from ``normalize_id``.
+      oa_url: Pre-resolved open-access URL from a batched lookup, if any.
+      oa_looked_up: True when ``oa_url`` came from a completed lookup, so a
+        ``None`` means "no open-access copy" and skips the per-id S2 query.
+      session: Connections to reuse; ``None`` uses the process's shared session.
+
+    Returns:
+      pdf_bytes: The downloaded PDF content.
+      source_label: Which source served it (``"arxiv"`` or ``"open_access"``).
+
+    Raises:
+      NotFoundError: When neither arXiv nor open access returned a PDF.
+
+    """
+    found = _open_copy(
+        kind,
+        canonical,
+        oa_url=oa_url,
+        oa_looked_up=oa_looked_up,
+        session=session,
+    )
+    if found is None:
+        raise NotFoundError(f"No open copy returned a PDF for {kind}:{canonical}.")
+    return found
+
+
+def _open_copy(
+    kind: IdType,
+    canonical: str,
+    *,
+    oa_url: str | None,
+    oa_looked_up: bool,
+    session: FetchSession | None,
+) -> tuple[bytes, str] | None:
+    """Try arXiv, then open access; ``None`` when neither yields a PDF."""
     if kind == "arxiv":
         body = _fetch_arxiv(canonical, session=session)
         if body is not None:
@@ -140,7 +206,7 @@ def download(
     )
     if body is not None:
         return body, "open_access"
-    raise NotFoundError(f"No source returned a PDF for {kind}:{canonical}.")
+    return None
 
 
 def _fetch_arxiv(
