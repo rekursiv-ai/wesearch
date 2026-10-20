@@ -424,6 +424,24 @@ class TestChromeAvailable:
         with patch.object(shutil, "which", only_snap_chromium):
             assert not chrome_available()
 
+    def test_a_chromium_resolving_through_snap_to_snapd_does_not_count(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # `snapd` 2.77 made ``/usr/bin/snap`` a link to ``/usr/lib/snapd/snapd``, so
+        # ``/snap/bin/chromium`` now resolves to a binary named ``snapd``.
+        snapd = tmp_path / "snapd"
+        snapd.write_bytes(b"\x7fELF")
+        (tmp_path / "snap").symlink_to(snapd)
+        entry = tmp_path / "chromium"
+        entry.symlink_to(tmp_path / "snap")
+
+        def only_snap_chromium(name: str) -> str | None:
+            return str(entry) if name == "chromium" else None
+
+        with patch.object(shutil, "which", only_snap_chromium):
+            assert not chrome_available()
+
     def test_a_usr_bin_wrapper_around_the_snap_does_not_count(
         self,
         tmp_path: Path,

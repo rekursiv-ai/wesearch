@@ -157,11 +157,12 @@ def _chrome_binary() -> str | None:
 
 
 # The byte scan catches Ubuntu's ``/usr/bin/chromium-browser`` shell wrapper,
-# which execs the snap but passes a ``/snap/`` path check.
+# which execs the snap but passes a ``/snap/`` path check. ``snapd``: since snapd
+# 2.77 ``/usr/bin/snap`` links to ``/usr/lib/snapd/snapd``, where a snap resolves.
 def _snap_confined(launcher: str) -> bool:
     """Whether ``launcher`` is the snap entry point or a wrapper that execs it."""
     resolved = Path(launcher).resolve()
-    if resolved.name == "snap" or resolved.is_relative_to("/snap"):
+    if resolved.name in {"snap", "snapd"} or resolved.is_relative_to("/snap"):
         return True
     try:
         head = resolved.read_bytes()[:4096]
