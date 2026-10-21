@@ -18,15 +18,11 @@ References:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Literal
+from typing import Final, Literal
 
 import base64
 import hashlib
 import sys
-
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 
 __all__ = [
@@ -48,7 +44,7 @@ type ChromePlatform = Literal["Windows", "Linux", "macOS", "Android"]
 
 
 # Chrome's reduced User-Agent reports the Android device model as "K".
-_UA_OS: Final[Mapping[str, str]] = {
+_UA_OS: Final[dict[ChromePlatform, str]] = {
     "Windows": "Windows NT 10.0; Win64; x64",
     "Linux": "X11; Linux x86_64",
     "macOS": "Macintosh; Intel Mac OS X 10_15_7",
@@ -186,7 +182,7 @@ def chrome_user_agent(major: int, platform: str) -> str:
       ValueError: If ``platform`` is not a :data:`ChromePlatform`.
 
     """
-    os_name = _UA_OS.get(platform)
+    os_name = _UA_OS.get(platform)  # pyrefly: ignore[bad-argument-type] -- The lookup is the runtime check that ``platform`` is a ChromePlatform.
     if os_name is None:
         raise ValueError(f"Unsupported platform {platform!r}.")
     tail = "Mobile Safari/537.36" if platform == "Android" else "Safari/537.36"
