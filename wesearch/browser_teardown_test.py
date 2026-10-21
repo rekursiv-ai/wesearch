@@ -12,38 +12,14 @@ from pathlib import Path
 from typing import Final
 
 import ast
-import functools
-
-from treekle import from_plain
 
 import pytest
-import yaml
+
+from tools.precommit.tiers import TIERS
 
 
 _THIS: Final = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
-
-
-# Searched upward rather than counted: this file is copied into the exported package,
-# where ``wesearch/`` sits at the checkout root instead of under ``loop/``, so a fixed
-# ``parents[2]`` resolved to ``/tmp`` and the export died reading a config that exists
-# only in the monorepo.
-#
-# Bounded by the enclosing REPOSITORY, and that bound is the point. An unbounded walk
-# reaches ``/`` and adopts the first config it finds anywhere above -- verified: an
-# unrelated one two levels up was picked up, which in an installed package would be a
-# stranger's, and the assertions below would then be made against hooks wesearch does
-# not own.
-@functools.cache
-def _own_repo_config() -> Path | None:
-    """Return this checkout's ``.pre-commit-config.yaml``, or ``None``."""
-    for candidate in [_CWD, *_CWD.parents]:
-        config = candidate / ".pre-commit-config.yaml"
-        if config.is_file():
-            return config
-        if (candidate / ".git").exists():
-            return None
-    return None
 
 
 def test_the_conftest_imports_at_module_scope() -> None:
@@ -172,7 +148,7 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
 
     ``pyproject.toml`` sets ``--dist=worksteal`` for every run, under which
     ``xdist_group`` is IGNORED -- so a file that marks one is relying on the
-    integration hook's ``--dist=loadgroup`` to override it. Losing that flag
+    integration tier's ``--dist=loadgroup`` to override it. Losing that flag
     breaks nothing visibly: the tests still pass, spread across workers, and
     the grouping the marker asked for silently stops happening.
 
@@ -181,32 +157,17 @@ def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> N
     so ``loadgroup`` falls back to per-test scope there and its tests may land
     on any worker.
     """
-    config_path = _own_repo_config()
-    if config_path is None:
-        pytest.skip("no .pre-commit-config.yaml above this package")
     marked = [
         path.name
         for path in sorted(_CWD.rglob("*_test.py"))
         if "xdist_group" in path.read_text(encoding="utf-8") and path != _THIS
     ]
     assert marked, "no test file marks an xdist group; this guard is vacuous"
+    extra = TIERS["pytest-integration-global"].extra
 
-    config = from_plain(
-        yaml.safe_load(config_path.read_text(encoding="utf-8")),
-        dict[str, object],
-    )
-    integration = [
-        hook
-        for repo in from_plain(config.get("repos"), list[dict[str, object]], default=[])
-        for hook in from_plain(repo.get("hooks"), list[dict[str, object]], default=[])
-        if from_plain(hook.get("id"), str, default="") == "pytest-integration-global"
-    ]
-    assert integration, "no pytest-integration-global hook"
-    script = "\n".join(from_plain(integration[0].get("args"), list[str], default=[]))
-
-    assert "--dist=loadgroup" in script, (
-        f"{marked} mark an xdist group, but the integration hook no longer "
-        f"passes --dist=loadgroup, so the marker is inert: {script}"
+    assert "--dist=loadgroup" in extra, (
+        f"{marked} mark an xdist group, but the integration tier no longer "
+        f"passes --dist=loadgroup, so the marker is inert: {extra}"
     )
 
 
