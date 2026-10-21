@@ -3,7 +3,7 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 0.2.0 - 2026-10-20
+## 0.1.14 - 2026-10-20
 
 ### Changed
 
