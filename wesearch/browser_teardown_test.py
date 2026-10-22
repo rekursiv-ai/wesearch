@@ -15,7 +15,7 @@ import ast
 
 import pytest
 
-from tools.precommit.tiers import TIERS
+from tools.testing.tiers import TIERS
 
 
 _THIS: Final = Path(__file__).resolve()
