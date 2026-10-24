@@ -223,7 +223,8 @@ class TestEchoOracle:
             assert oracle._client_timeout_sec == 2.5
             assert oracle._thread.name == "echo-oracle-accept"
             assert oracle._thread.daemon is True
-            assert oracle._sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
+            # Set reads back nonzero: 1 on Linux, the option's own bit (4) on macOS.
+            assert oracle._sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) != 0
 
     def test_initialization_uses_exact_socket_tls_and_thread_settings(
         self,
