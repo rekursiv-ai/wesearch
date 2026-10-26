@@ -13,12 +13,11 @@ from typing import TYPE_CHECKING
 
 import fcntl
 import hashlib
-import json
 import logging
 import os
 import time
 
-from treekle import ReadError, from_plain, json_loads, to_plain
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 from wesearch.lib.userdirs import cache_dir
 from wesearch.search.types import SearchResult
@@ -61,7 +60,7 @@ def cached_search(
     base = cache_dir() / "rekursiv-ai" / "wesearch" / "search"
     base.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(
-        json.dumps(to_plain(dict(key)), sort_keys=True).encode(),
+        json_dumps(dict(key), sort_keys=True).encode(),
     ).hexdigest()
     path = base / f"{digest}.json"
     lock = os.open(
@@ -103,7 +102,7 @@ def _read(path: Path, *, ttl_sec: float) -> list[SearchResult] | None:
 def _write(path: Path, results: Sequence[SearchResult]) -> None:
     """Atomically replace ``path`` with ``results``."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(to_plain(list(results))))
+    tmp.write_text(json_dumps(list(results)))
     tmp.replace(path)
 
 
