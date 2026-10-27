@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Protocol, Self, TypeAlias
 
+import asyncio
 import threading
 
 from wesearch.lib.userdirs import data_dir
@@ -62,8 +63,14 @@ class FetchSession:
 
     Pass one session to every fetch that should reuse connections and the
     browser; a fetch given none uses the process's shared one (see
-    :func:`wesearch.fetch.session.default_session`). Thread-safe. Call
-    :meth:`close` when done with a session you made.
+    :func:`wesearch.fetch.session.default_session`). Thread-safe. Close a
+    session you made when done: ``with`` or, under a running event loop,
+    ``async with``, which closes it on a worker thread so the loop runs on.
+
+    Typical usage example:
+
+      async with FetchSession() as session:
+          body = await asyncio.to_thread(fetch, url, session=session)
 
     Attributes:
       profiles: Where cookies persist, per egress IP and host, across processes.
@@ -103,6 +110,20 @@ class FetchSession:
             curl_session.close()
         if browsers is not None:
             browsers.shutdown()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    # Closing joins the browser's thread and disconnects Chrome; done on the
+    # caller's loop, it would stall every task the loop runs meanwhile.
+    async def __aexit__(self, *exc: object) -> None:
+        await asyncio.to_thread(self.close)
 
 
 class Fetch(Protocol):

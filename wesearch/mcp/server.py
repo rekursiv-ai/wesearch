@@ -68,11 +68,8 @@ from wesearch.web import fetch_web
 @asynccontextmanager
 async def _lifespan(_: MCPServer[FetchSession]) -> AsyncGenerator[FetchSession]:
     """Share one session -- connections, Chrome, the egress -- across every call."""
-    session = FetchSession()
-    try:
+    async with FetchSession() as session:
         yield session
-    finally:
-        session.close()
 
 
 mcp = MCPServer[FetchSession](
