@@ -31,6 +31,7 @@ from zendriver import Browser, Config, Tab
 from zendriver.cdp import fetch, network, page, security, target
 from zendriver.core.connection import Transaction
 
+import asyncio_atexit
 import pytest
 
 from wesearch.fetch.session import default_session
@@ -2120,6 +2121,21 @@ def test_pool_shutdown_joins_thread_and_closes_loop() -> None:
     pool.shutdown()
     assert not pool._thread.is_alive()
     assert pool._loop.is_closed()
+
+
+@pytest.mark.asyncio
+async def test_pool_shutdown_under_a_running_loop_runs_its_loop_s_exit_hooks() -> None:
+    pool = BrowserPool()
+    ran = threading.Event()
+    pool.run(_on_exit(ran.set))
+    pool.shutdown()
+    assert ran.is_set()
+    assert pool._loop.is_closed()
+
+
+async def _on_exit(hook: Callable[[], None]) -> None:
+    """Register ``hook`` to run when the running loop closes, as zendriver does."""
+    asyncio_atexit.register(hook)
 
 
 def test_pool_shutdown_twice_is_a_noop() -> None:

@@ -315,7 +315,11 @@ class BrowserPool:
                 )
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
-        self._loop.close()
+        # Zendriver's asyncio_atexit makes ``close`` run the loop, which fails on
+        # a thread with a loop of its own running, as a caller's often has.
+        closer = threading.Thread(target=self._loop.close, name="loop-web-close")
+        closer.start()
+        closer.join()
         while stop_launched and _launched:
             process = _launched.pop()
             with contextlib.suppress(OSError):
