@@ -24,7 +24,8 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.3.1",
+    # 0.4.1 leaves dataclass fields at their defaults out of trees.
+    "treekle>=0.4.1",
     # web client / scraping
     "beautifulsoup4",
     "curl-cffi>=0.15.0",
