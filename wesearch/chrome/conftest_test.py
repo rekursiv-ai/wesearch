@@ -230,24 +230,40 @@ class TestEchoOracle:
         self,
         tmp_path: Path,
     ) -> None:
-        temporary = MagicMock()
-        temporary.__enter__.return_value = str(tmp_path)
-        context = MagicMock()
-        sock = MagicMock()
-        sock.__enter__.return_value = sock
-        sock.getsockname.return_value = ("127.0.0.1", 4321)
-        thread = MagicMock()
-        thread.is_alive.return_value = False
-        stack = MagicMock()
-        stack.enter_context.side_effect = [str(tmp_path), sock]
+        set_alpn_protocols = MagicMock()
+        setsockopt = MagicMock()
+        bind = MagicMock()
+        listen = MagicMock()
+        sock = MagicMock(
+            setsockopt=setsockopt,
+            bind=bind,
+            listen=listen,
+            getsockname=MagicMock(return_value=("127.0.0.1", 4321)),
+        )
+        join = MagicMock()
+        start = MagicMock()
+        thread = MagicMock(
+            join=join,
+            start=start,
+            is_alive=MagicMock(return_value=False),
+        )
+        callback = MagicMock()
+        close = MagicMock()
+        stack = MagicMock(
+            callback=callback,
+            close=close,
+            enter_context=MagicMock(side_effect=[str(tmp_path), sock]),
+        )
         with (
             patch("wesearch.chrome.conftest.ExitStack", return_value=stack),
             patch(
                 "wesearch.chrome.conftest.tempfile.TemporaryDirectory",
-                return_value=temporary,
             ) as temporary_factory,
             patch("wesearch.chrome.conftest.self_signed_localhost_cert"),
-            patch("wesearch.chrome.conftest.ssl.SSLContext", return_value=context),
+            patch(
+                "wesearch.chrome.conftest.ssl.SSLContext",
+                return_value=MagicMock(set_alpn_protocols=set_alpn_protocols),
+            ),
             patch("wesearch.chrome.conftest.socket.socket", return_value=sock),
             patch(
                 "wesearch.chrome.conftest.threading.Thread",
@@ -257,22 +273,18 @@ class TestEchoOracle:
             oracle = EchoOracle(client_timeout_sec=2.5)
             oracle.close()
         temporary_factory.assert_called_once_with(prefix="echo-")
-        stack.callback.assert_called_once_with(oracle._thread.join, timeout=5.0)
-        stack.close.assert_called_once_with()
-        context.set_alpn_protocols.assert_called_once_with(["http/1.1"])
-        sock.setsockopt.assert_called_once_with(
-            socket.SOL_SOCKET,
-            socket.SO_REUSEADDR,
-            1,
-        )
-        sock.bind.assert_called_once_with(("127.0.0.1", 0))
-        sock.listen.assert_called_once_with(8)
+        callback.assert_called_once_with(join, timeout=5.0)
+        close.assert_called_once_with()
+        set_alpn_protocols.assert_called_once_with(["http/1.1"])
+        setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        bind.assert_called_once_with(("127.0.0.1", 0))
+        listen.assert_called_once_with(8)
         thread_factory.assert_called_once_with(
             target=oracle._serve,
             name="echo-oracle-accept",
             daemon=True,
         )
-        thread.start.assert_called_once_with()
+        start.assert_called_once_with()
 
     def test_handle_sets_timeout_and_sends_exact_stub_response(
         self,
@@ -280,11 +292,16 @@ class TestEchoOracle:
     ) -> None:
         oracle = object.__new__(EchoOracle)
         oracle._client_timeout_sec = 3.5
-        context = MagicMock()
-        monkeypatch.setattr(oracle, "_context", context, raising=False)
+        sendall = MagicMock()
+        close = MagicMock()
+        wrap_socket = MagicMock(return_value=MagicMock(sendall=sendall, close=close))
+        monkeypatch.setattr(
+            oracle,
+            "_context",
+            MagicMock(wrap_socket=wrap_socket),
+            raising=False,
+        )
         raw = socket.socket()
-        conn = MagicMock()
-        context.wrap_socket.return_value = conn
         oracle._lock = threading.Lock()
         oracle._captures = []
         request = "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
@@ -294,12 +311,12 @@ class TestEchoOracle:
         ):
             oracle._handle(raw)
         raw.close()
-        context.wrap_socket.assert_called_once_with(raw, server_side=True)
-        conn.sendall.assert_called_once_with(
+        wrap_socket.assert_called_once_with(raw, server_side=True)
+        sendall.assert_called_once_with(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
             b"Content-Length: 15\r\nConnection: close\r\n\r\n<html>ok</html>",
         )
-        conn.close.assert_called_once_with()
+        close.assert_called_once_with()
         assert oracle._captures == [(("host",), ("Host: x",))]
 
     def test_serve_starts_exact_daemon_handler_for_each_connection(
@@ -308,15 +325,15 @@ class TestEchoOracle:
     ) -> None:
         oracle = object.__new__(EchoOracle)
         raw = MagicMock()
-        sock = MagicMock()
-        sock.accept.side_effect = [(raw, object()), OSError("closed")]
-        monkeypatch.setattr(oracle, "_sock", sock, raising=False)
+        accept = MagicMock(side_effect=[(raw, object()), OSError("closed")])
+        monkeypatch.setattr(oracle, "_sock", MagicMock(accept=accept), raising=False)
         oracle._stopped = threading.Event()
         handlers: list[threading.Thread] = []
         monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
         handle = MagicMock()
         monkeypatch.setattr(oracle, "_handle", handle, raising=False)
-        handler = MagicMock()
+        start = MagicMock()
+        handler = MagicMock(start=start)
         with patch(
             "wesearch.chrome.conftest.threading.Thread",
             return_value=handler,
@@ -329,7 +346,7 @@ class TestEchoOracle:
             daemon=True,
         )
         assert handlers == [handler]
-        handler.start.assert_called_once_with()
+        start.assert_called_once_with()
 
     def test_serve_drops_a_connection_accepted_after_stop(
         self,
@@ -342,20 +359,21 @@ class TestEchoOracle:
         then waits on, and leak its socket.
         """
         oracle = object.__new__(EchoOracle)
-        raw = MagicMock()
-        sock = MagicMock()
-        sock.accept.side_effect = [(raw, object()), AssertionError("kept accepting")]
-        monkeypatch.setattr(oracle, "_sock", sock, raising=False)
+        close = MagicMock()
+        accept = MagicMock(
+            side_effect=[(MagicMock(close=close), object()), AssertionError("again")],
+        )
+        monkeypatch.setattr(oracle, "_sock", MagicMock(accept=accept), raising=False)
         oracle._stopped = threading.Event()
         oracle._stopped.set()
         handlers: list[threading.Thread] = []
         monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
         with patch("wesearch.chrome.conftest.threading.Thread") as factory:
             oracle._serve()
-        raw.close.assert_called_once_with()
+        close.assert_called_once_with()
         factory.assert_not_called()
         assert handlers == []
-        assert sock.accept.call_count == 1
+        assert accept.call_count == 1
 
     def test_captures_ordered_headers_of_a_live_request(self) -> None:
         with EchoOracle() as oracle:
@@ -469,31 +487,45 @@ class TestEchoOracleCleanup:
     ) -> None:
         oracle = object.__new__(EchoOracle)
         oracle._client_timeout_sec = 10.0
-        sock = MagicMock()
-        sock.shutdown.side_effect = OSError("already closed")
-        monkeypatch.setattr(oracle, "_sock", sock, raising=False)
+        shutdown = MagicMock(side_effect=OSError("already closed"))
+        monkeypatch.setattr(
+            oracle,
+            "_sock",
+            MagicMock(shutdown=shutdown),
+            raising=False,
+        )
         oracle.port = 4321
-        thread = MagicMock()
-        thread.is_alive.return_value = True
+        thread_join = MagicMock()
+        thread = MagicMock(join=thread_join, is_alive=MagicMock(return_value=True))
         monkeypatch.setattr(oracle, "_thread", thread, raising=False)
-        handlers = [MagicMock()]
-        monkeypatch.setattr(oracle, "_handlers", handlers, raising=False)
+        handler_join = MagicMock()
+        monkeypatch.setattr(
+            oracle,
+            "_handlers",
+            [MagicMock(join=handler_join)],
+            raising=False,
+        )
         oracle._stopped = threading.Event()
-        stack = MagicMock()
-        monkeypatch.setattr(oracle, "_stack", stack, raising=False)
-        wake = MagicMock()
+        stack_close = MagicMock()
+        monkeypatch.setattr(
+            oracle,
+            "_stack",
+            MagicMock(close=stack_close),
+            raising=False,
+        )
+        wake_close = MagicMock()
         with patch(
             "wesearch.chrome.conftest.socket.create_connection",
-            return_value=wake,
+            return_value=MagicMock(close=wake_close),
         ) as connect:
             oracle.close()
-        sock.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+        shutdown.assert_called_once_with(socket.SHUT_RDWR)
         assert oracle._stopped.is_set()
         connect.assert_called_once_with(("127.0.0.1", 4321), timeout=1.0)
-        wake.close.assert_called_once_with()
-        thread.join.assert_called_once_with(timeout=1.0)
-        handlers[0].join.assert_called_once_with(timeout=11.0)
-        stack.close.assert_called_once_with()
+        wake_close.assert_called_once_with()
+        thread_join.assert_called_once_with(timeout=1.0)
+        handler_join.assert_called_once_with(timeout=11.0)
+        stack_close.assert_called_once_with()
 
     def test_close_removes_the_certificate_directory(self) -> None:
         oracle = EchoOracle()

@@ -86,14 +86,24 @@ def test_html2text_omits_images_with_alt_text() -> None:
     assert html_to_text(page).strip() == "beforeafter"
 
 
+class _Converter:
+    """An ``HTML2Text`` stand-in recording the options it is configured with."""
+
+    def __init__(self) -> None:
+        self.ignore_images = False
+        self.body_width = 78
+        self.handle = Mock(return_value="converted")
+
+
 def test_html2text_configures_its_converter(monkeypatch: pytest.MonkeyPatch) -> None:
-    converter = Mock()
-    converter.handle.return_value = "converted"
-    backend = Mock()
-    backend.HTML2Text.return_value = converter
-    monkeypatch.setattr("wesearch.fetch.html_to_text.html2text", backend)
+    converter = _Converter()
+    factory = Mock(return_value=converter)
+    monkeypatch.setattr(
+        "wesearch.fetch.html_to_text.html2text",
+        Mock(HTML2Text=factory),
+    )
     assert html_to_text("<p>x</p>", url="https://example.com") == "converted"
-    backend.HTML2Text.assert_called_once_with(baseurl="https://example.com")
+    factory.assert_called_once_with(baseurl="https://example.com")
     assert converter.ignore_images is True
     assert converter.body_width == 0
     converter.handle.assert_called_once_with("<p>x</p>")
@@ -142,14 +152,16 @@ def test_trafilatura_empty_page_yields_no_text() -> None:
 
 
 def test_trafilatura_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = Mock()
-    backend.extract.return_value = "article"
-    monkeypatch.setattr("wesearch.fetch.html_to_text.trafilatura", backend)
+    extract = Mock(return_value="article")
+    monkeypatch.setattr(
+        "wesearch.fetch.html_to_text.trafilatura",
+        Mock(extract=extract),
+    )
     assert (
         html_to_text("<p>x</p>", extractor="trafilatura", url="https://example.com")
         == "article"
     )
-    backend.extract.assert_called_once_with(
+    extract.assert_called_once_with(
         "<p>x</p>",
         url="https://example.com",
         output_format="markdown",
@@ -160,11 +172,13 @@ def test_trafilatura_passes_its_options(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_trafilatura_gets_none_for_no_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = Mock()
-    backend.extract.return_value = None
-    monkeypatch.setattr("wesearch.fetch.html_to_text.trafilatura", backend)
+    extract = Mock(return_value=None)
+    monkeypatch.setattr(
+        "wesearch.fetch.html_to_text.trafilatura",
+        Mock(extract=extract),
+    )
     assert html_to_text("<p>x</p>", extractor="trafilatura") == ""
-    assert backend.extract.call_args.kwargs["url"] is None
+    assert extract.call_args.kwargs["url"] is None
 
 
 @pytest.mark.cli_python_subprocess

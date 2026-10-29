@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from email.message import Message
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import patch
 from urllib import request
 from urllib.error import HTTPError, URLError
@@ -589,8 +589,7 @@ class TestDownload:
             records = useragents._download_records()
 
         assert records == TestRefresh._DATASET
-        sent_request = urlopen_mock.call_args.args[0]
-        assert isinstance(sent_request, request.Request)
+        sent_request = cast(request.Request, urlopen_mock.call_args.args[0])
         assert sent_request.full_url == (
             "https://raw.githubusercontent.com/intoli/user-agents/"
             "main/src/user-agents.json.gz"

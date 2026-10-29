@@ -64,8 +64,7 @@ def test_sends_the_key_and_caps_count() -> None:
         brave("q", 50)
 
     url = cast(str, fetch_mock.call_args.args[0])
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert url.startswith("https://api.search.brave.com/res/v1/web/search?")
     assert "count=20" in url
     assert request.content.headers is not None

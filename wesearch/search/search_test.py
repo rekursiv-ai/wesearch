@@ -1270,9 +1270,7 @@ class TestHeadersArg:
 def _request(mock: MagicMock | AsyncMock, index: int = -1) -> RequestParams:
     """Narrow a request recorded by a mock before inspecting its fields."""
     recorded = mock.call_args if index == -1 else mock.call_args_list[index]
-    request = recorded.kwargs["request"]
-    assert isinstance(request, RequestParams)
-    return request
+    return cast(RequestParams, recorded.kwargs["request"])
 
 
 def _recorded_url(mock: MagicMock | AsyncMock, index: int = -1) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import patch
 
 import logging
@@ -223,8 +224,7 @@ def test_duckduckgo_request_forwards_override_headers() -> None:
         return_value=b'<div id="links"></div>',
     ) as fetch_mock:
         duckduckgo("q", headers={"User-Agent": "custom"})
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert request.content.headers == {
         "Referer": "https://html.duckduckgo.com/html/",
         "User-Agent": "custom",
@@ -256,8 +256,7 @@ def test_duckduckgo_request_can_escalate_to_the_browser() -> None:
         return_value=b'<div id="links"></div>',
     ) as fetch_mock:
         duckduckgo("q")
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert request.content.raw_headers is False
     assert resolve_transport(request.policy.transport) == "curl-then-zendriver"
 
@@ -294,10 +293,10 @@ def test_duckduckgo_public_request_and_validation() -> None:
             connect_timeout_sec=1,
             transport="curl",
         )
-    url = fetch_mock.call_args.args[0]
-    assert str(url) == ("https://html.duckduckgo.com/html/?q=%27%21w%27+x&kl=wt-wt")
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    assert fetch_mock.call_args.args == (
+        "https://html.duckduckgo.com/html/?q=%27%21w%27+x&kl=wt-wt",
+    )
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert request.retry.retries == 4
     assert request.retry.timeout_sec == 2
     assert request.retry.connect_timeout_sec == 1

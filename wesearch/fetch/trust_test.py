@@ -10,14 +10,13 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 from unittest.mock import Mock, patch
 
 import inspect
 
 from curl_cffi import requests as cc_requests
 from curl_cffi.requests import Headers
-from treekle import from_plain
 
 import pytest
 
@@ -282,7 +281,7 @@ class TestCurlConnectionReuse:
             assert fetch("https://example.com/", session=session) == b"ok"
         assert len(session.curl) == 1
         cookies = [
-            from_plain(c.kwargs["headers"], dict[str, str | None]).get("Cookie")
+            cast(dict[str, str | None], c.kwargs["headers"]).get("Cookie")
             for c in request.call_args_list
         ]
         assert cookies == ["stored=S", None]

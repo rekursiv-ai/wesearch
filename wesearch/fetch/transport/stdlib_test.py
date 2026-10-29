@@ -59,12 +59,13 @@ def _response(
     body: bytes = b"ok",
     headers: list[tuple[str, str]] | None = None,
 ) -> Mock:
-    resp = Mock(spec=client.HTTPResponse)
-    resp.status = status
-    resp.read.side_effect = [body, b""]
-    resp.isclosed.return_value = False
-    resp.getheaders.return_value = headers or []
-    return resp
+    return Mock(
+        spec=client.HTTPResponse,
+        status=status,
+        read=Mock(side_effect=[body, b""]),
+        isclosed=Mock(return_value=False),
+        getheaders=Mock(return_value=headers or []),
+    )
 
 
 def test_a_public_only_request_dials_the_pin_and_names_the_host_first() -> None:
@@ -123,8 +124,8 @@ def test_a_cross_host_redirect_reopens_and_re_pins() -> None:
 
 
 def test_the_read_budget_widens_only_once_connected() -> None:
-    sock = Mock()
-    conn = _Conn(_response(), sock=sock)
+    settimeout = Mock()
+    conn = _Conn(_response(), sock=Mock(settimeout=settimeout))
     with (
         patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
         patch("wesearch.fetch.transport.stdlib.time.monotonic", return_value=0.0),
@@ -135,7 +136,7 @@ def test_the_read_budget_widens_only_once_connected() -> None:
             connect_timeout_sec=1.0,
             allow_private_hosts=True,
         )
-    assert sock.settimeout.call_args_list[0] == call(30.0)
+    assert settimeout.call_args_list[0] == call(30.0)
 
 
 def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
@@ -147,10 +148,11 @@ def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
         clock[0] += 4.0
         return b"x"
 
+    read = Mock(side_effect=trickle)
     resp = _response()
-    resp.read.side_effect = trickle
-    sock = Mock()
-    conn = _Conn(resp, sock=sock)
+    resp.read = read
+    settimeout = Mock()
+    conn = _Conn(resp, sock=Mock(settimeout=settimeout))
     with (
         patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
         patch(
@@ -161,8 +163,8 @@ def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
     ):
         fetch_stdlib("http://127.0.0.1/", timeout_sec=10.0, allow_private_hosts=True)
     assert error.value.status == 0
-    assert resp.read.call_count == 3
-    assert [c.args[0] for c in sock.settimeout.call_args_list] == [10.0, 10.0, 6.0, 2.0]
+    assert read.call_count == 3
+    assert settimeout.call_args_list == [call(10.0), call(10.0), call(6.0), call(2.0)]
     assert conn.closed
 
 
@@ -258,17 +260,18 @@ def test_the_pinned_connection_wraps_its_socket_for_the_hostname() -> None:
     context = cast("ssl.SSLContext", Mock(spec=ssl.SSLContext))
     conn._context = context
     raw = Mock(spec=socket.socket)
+    wrapped = Mock(spec=ssl.SSLSocket)
 
     def connect(self: client.HTTPConnection) -> None:
         self.sock = raw
 
     with (
         patch.object(client.HTTPConnection, "connect", connect),
-        patch.object(context, "wrap_socket") as wrap,
+        patch.object(context, "wrap_socket", return_value=wrapped) as wrap,
     ):
         conn.connect()
     wrap.assert_called_once_with(raw, server_hostname="example.com")
-    assert conn.sock is wrap.return_value
+    assert conn.sock is wrapped
 
 
 if __name__ == "__main__":
