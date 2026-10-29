@@ -777,9 +777,10 @@ class TestExactInternals:
             del row
             return False
 
-        with patch.object(s2, "paginate", return_value=object()) as paginate:
+        page = object()
+        with patch.object(s2, "paginate", return_value=page) as paginate:
             result = s2.author_papers("a", limit=4, keep=keep, transport="curl")
-        assert result is paginate.return_value
+        assert result is page
         assert paginate.call_args.args == (
             "/author/a/papers",
             {"fields": s2.S2_PAPER_FIELDS_STR},

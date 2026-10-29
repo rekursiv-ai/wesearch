@@ -182,9 +182,9 @@ def chrome_user_agent(major: int, platform: str) -> str:
       ValueError: If ``platform`` is not a :data:`ChromePlatform`.
 
     """
-    os_name = _UA_OS.get(platform)  # pyrefly: ignore[bad-argument-type] -- The lookup is the runtime check that ``platform`` is a ChromePlatform.
-    if os_name is None:
+    if platform not in _UA_OS:
         raise ValueError(f"Unsupported platform {platform!r}.")
+    os_name = _UA_OS[platform]
     tail = "Mobile Safari/537.36" if platform == "Android" else "Safari/537.36"
     return (
         f"Mozilla/5.0 ({os_name}) AppleWebKit/537.36 "

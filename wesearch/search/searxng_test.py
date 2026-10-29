@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 from unittest.mock import patch
 
 import importlib
@@ -63,7 +63,7 @@ def test_import_refuses_a_tab_without_a_categories_record(
         monkeypatch.undo()
         importlib.reload(searxng_module)
     assert set(searxng_module.CATEGORIES) == set(
-        get_args(types.SearxngCategory.__value__),
+        get_args(cast(object, types.SearxngCategory.__value__)),
     )
 
 
@@ -342,8 +342,7 @@ def test_searxng_public_request_forwards_parameters(
             retries=3,
             transport="zendriver",
         )
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert request.content.headers == {"X": "y"}
     assert request.retry.retries == 3
     assert request.retry.timeout_sec == 4
@@ -359,8 +358,7 @@ def test_searxng_defaults_and_count_boundaries(monkeypatch: pytest.MonkeyPatch) 
         return_value=b'{"results": []}',
     ) as fetch_mock:
         assert searxng("q") == []
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert request.content.headers == {}
     assert request.retry.retries == 1
     assert request.retry.timeout_sec == 15.0
@@ -450,8 +448,7 @@ def test_searxng_defaults_to_ten_results_and_auto_transport(
     ) as fetch_mock:
         results = searxng("q")
     assert len(results) == 10
-    request = fetch_mock.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
     assert request.policy.transport == "auto"
 
 

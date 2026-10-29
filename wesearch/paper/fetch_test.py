@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import logging
@@ -232,9 +232,7 @@ class TestDownload:
             )
         assert source == "open_access"
         assert body == _PDF
-        called = fetch_fn.call_args_list[0].args[0]
-        assert isinstance(called, str)
-        assert "arxiv.org" not in called
+        assert "arxiv.org" not in cast(str, fetch_fn.call_args_list[0].args[0])
 
     def test_oa_download_failure_returns_none(self) -> None:
         # OA URL present but GET raises -> _fetch_open_access swallows, None.
@@ -346,8 +344,7 @@ def test_download_pdf_defaults_and_minimum_boundary() -> None:
         return_value=body,
     ) as fetch_call:
         assert fetch._download_pdf("https://x/pdf") == body
-    request = fetch_call.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_call.call_args.kwargs["request"])
     assert request.retry.retries == 2
     assert request.retry.timeout_sec == 180.0
     with (
@@ -372,8 +369,7 @@ def test_download_pdf_uses_exact_retry_and_timeout() -> None:
             )
             == _PDF
         )
-    request = fetch_call.call_args.kwargs["request"]
-    assert isinstance(request, RequestParams)
+    request = cast(RequestParams, fetch_call.call_args.kwargs["request"])
     assert request.retry.retries == 4
     assert request.retry.timeout_sec == 8.5
 

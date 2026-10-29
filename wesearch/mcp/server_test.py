@@ -268,7 +268,7 @@ def test_mcp_renders_every_declared_param(
     fn: object = getattr(server, tool)  # pyright: ignore[reportAny] -- Tool names come from the declared schema table.
     assert callable(fn)
     declared = set(spec.fields())
-    hints = get_type_hints(fn)
+    hints = cast(dict[str, object], get_type_hints(fn))
     assert declared - set(hints) == omitted
     for name in declared & set(hints):
         field = spec.fields()[name]

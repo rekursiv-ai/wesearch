@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import cast
 from unittest.mock import patch
+
+from treekle import MutablePlainTree
 
 import pytest
 
@@ -21,12 +24,6 @@ from wesearch.paper.providers import (
     s2,
 )
 from wesearch.paper.types import PaperRecord
-
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from treekle import MutablePlainTree
 
 
 class TestCitations:
@@ -133,8 +130,10 @@ class TestCitations:
             },
         )
         assert paginate.call_args.kwargs["limit"] == 7
-        keep = paginate.call_args.kwargs["keep"]
-        assert callable(keep)
+        keep = cast(
+            Callable[[dict[str, MutablePlainTree]], bool],
+            paginate.call_args.kwargs["keep"],
+        )
         assert keep({"isInfluential": True, "citingPaper": {"year": 2020}})
 
     def test_openalex_citations_forwards_every_argument(self) -> None:

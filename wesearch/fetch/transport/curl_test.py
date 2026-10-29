@@ -23,7 +23,6 @@ from curl_cffi import (
     requests as cc_requests,
 )
 from curl_cffi.requests import Headers
-from treekle import from_plain
 
 import pytest
 
@@ -62,7 +61,7 @@ def lower_headers(kw: Mapping[str, object]) -> dict[str, str]:
       headers: Header names lower-cased, mapped to their values.
 
     """
-    headers = from_plain(kw.get("headers"), dict[str, str | None])
+    headers = cast(dict[str, str | None], kw["headers"])
     return {k.lower(): v for k, v in headers.items() if v is not None}
 
 
@@ -179,7 +178,7 @@ class TestFetchCurl:
                 headers={"Accept-Encoding": None, "User-Agent": None},
                 session=session,
             )
-        sent = from_plain(request.call_args.kwargs["headers"], dict[str, str | None])
+        sent = cast(dict[str, str | None], request.call_args.kwargs["headers"])
         assert sent["Accept-Encoding"] is None
         assert sent["User-Agent"] is None
 
@@ -229,14 +228,14 @@ class TestFetchCurl:
         self,
         session: FetchSession,
     ) -> None:
-        response = _response()
-        response.headers = Mock()
-        response.headers.items.return_value = [("set-cookie", "A=1, B=2")]
-
         def get_list(name: str) -> list[str]:
             return ["A=1", "B=2"] if name == "set-cookie" else []
 
-        response.headers.get_list.side_effect = get_list
+        response = _response()
+        response.headers = Mock(
+            items=Mock(return_value=[("set-cookie", "A=1, B=2")]),
+            get_list=Mock(side_effect=get_list),
+        )
         seen: list[dict[str, str]] = []
         with _serve(response):
             fetch_curl(
@@ -446,7 +445,7 @@ class TestThroughFetch:
                 session=session,
             )
         kwargs = request.call_args.kwargs
-        sent = from_plain(kwargs["headers"], dict[str, str])
+        sent = cast(dict[str, str], kwargs["headers"])
         assert [v for k, v in sent.items() if k.lower() == "cookie"] == [
             "a=1; b=2; CONSENT=YES+",
         ]

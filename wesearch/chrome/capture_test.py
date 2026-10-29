@@ -29,24 +29,29 @@ from wesearch.chrome.capture import (
 _CWD: Final = Path(__file__).resolve().parent
 
 
-# The second call must succeed: the timeout path reaps after killing, and a stub that
-# raises forever would hide a missing reap behind an exception the test itself supplied.
-def _popen_mock(*, timeout: bool = False) -> MagicMock:
-    """Return a ``Popen`` stub whose ``communicate`` times out on the first call."""
-    process = MagicMock()
-    process.pid = 4321
-    process.communicate.side_effect = (
-        [subprocess.TimeoutExpired(cmd="chrome", timeout=40.0), (b"", b"")]
-        if timeout
-        else [(b"", b"")]
-    )
-    return process
+# Handles are set in ``__init__``: typeshed gives the mock classes an ``Any`` base,
+# so a mock reached through another mock's attribute is ``Any``.
+class _Popen:
+    """A ``Popen`` result, with a typed handle on the ``communicate`` it receives."""
+
+    def __init__(self, *replies: tuple[bytes, bytes] | Exception) -> None:
+        self.pid = 4321
+        self.communicate = MagicMock(side_effect=list(replies or [(b"", b"")]))
+        self.process = MagicMock(pid=self.pid, communicate=self.communicate)
+
+    # The second call must succeed: the timeout path reaps after killing, and a stub
+    # that raises forever would hide a missing reap behind an exception the test
+    # itself supplied.
+    @classmethod
+    def timing_out(cls) -> _Popen:
+        """Return a ``Popen`` whose ``communicate`` times out on the first call."""
+        return cls(subprocess.TimeoutExpired(cmd="chrome", timeout=40.0), (b"", b""))
 
 
-def _fresh_popen_mock(*args: object, **kwargs: object) -> MagicMock:
+def _fresh_popen(*args: object, **kwargs: object) -> MagicMock:
     """Return a new stub per ``Popen`` call, for tests that drive Chrome twice."""
     del args, kwargs
-    return _popen_mock()
+    return _Popen().process
 
 
 class TestKillGroup:
@@ -63,24 +68,23 @@ class TestKillGroup:
 
 class TestDieWithParent:
     def test_arms_process_group_and_parent_death_signal(self) -> None:
-        libc = MagicMock()
+        prctl = MagicMock()
         with (
-            patch.object(capture, "_libc", libc),
+            patch.object(capture, "_libc", MagicMock(prctl=prctl)),
             patch.object(os, "setpgid") as setpgid,
         ):
             die_with_parent()
         setpgid.assert_called_once_with(0, 0)
-        libc.prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
+        prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
 
     def test_ignores_process_group_and_libc_errors(self) -> None:
-        libc = MagicMock()
+        prctl = MagicMock(side_effect=OSError)
         with (
-            patch.object(capture, "_libc", libc),
+            patch.object(capture, "_libc", MagicMock(prctl=prctl)),
             patch.object(os, "setpgid", side_effect=OSError),
         ):
-            libc.prctl.side_effect = OSError
             die_with_parent()
-        libc.prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
+        prctl.assert_called_once_with(1, signal.SIGKILL, 0, 0, 0)
 
     def test_skips_parent_death_signal_when_libc_is_unavailable(self) -> None:
         with patch.object(capture, "_libc", None), patch.object(os, "setpgid"):
@@ -93,7 +97,7 @@ class TestDriveChrome:
         # the wire; the server-side record is complete. Propagating the timeout
         # failed the parity suite over a browser shutdown nobody is testing.
         with (
-            patch("subprocess.Popen", return_value=_popen_mock(timeout=True)),
+            patch("subprocess.Popen", return_value=_Popen.timing_out().process),
             patch("os.killpg"),
             patch(
                 "wesearch.chrome.capture._chrome_binary",
@@ -109,9 +113,9 @@ class TestDriveChrome:
         we spawned reparents the rest to init, where they live on at ~70 MB
         each.
         """
-        process = _popen_mock(timeout=True)
+        chrome = _Popen.timing_out()
         with (
-            patch("subprocess.Popen", return_value=process) as popen,
+            patch("subprocess.Popen", return_value=chrome.process) as popen,
             patch("os.killpg") as killpg,
             patch(
                 "wesearch.chrome.capture._chrome_binary",
@@ -123,10 +127,10 @@ class TestDriveChrome:
         # Its own group leader, which is what lets one killpg reach every
         # process it forked.
         assert popen.call_args.kwargs["preexec_fn"] is die_with_parent
-        killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+        killpg.assert_called_once_with(chrome.pid, signal.SIGKILL)
         # Reaped after the kill: an unwaited child stays a zombie holding the
         # pipes this function opened.
-        assert process.communicate.call_count == 2
+        assert chrome.communicate.call_count == 2
 
     def test_a_kill_racing_chromes_own_exit_is_not_an_error(self) -> None:
         """Chrome exiting between the timeout and the kill is normal, not a fault.
@@ -136,7 +140,7 @@ class TestDriveChrome:
         failure in the parity suite.
         """
         with (
-            patch("subprocess.Popen", return_value=_popen_mock(timeout=True)),
+            patch("subprocess.Popen", return_value=_Popen.timing_out().process),
             patch("os.killpg", side_effect=ProcessLookupError),
             patch(
                 "wesearch.chrome.capture._chrome_binary",
@@ -147,7 +151,7 @@ class TestDriveChrome:
 
     def test_clean_exit_reports_no_timeout(self) -> None:
         with (
-            patch("subprocess.Popen", return_value=_popen_mock()),
+            patch("subprocess.Popen", return_value=_Popen().process),
             patch("os.killpg") as killpg,
             patch(
                 "wesearch.chrome.capture._chrome_binary",
@@ -166,7 +170,7 @@ class TestDriveChrome:
 
     def test_certificate_flag_only_when_requested(self) -> None:
         with (
-            patch("subprocess.Popen", side_effect=_fresh_popen_mock) as run,
+            patch("subprocess.Popen", side_effect=_fresh_popen) as run,
             patch(
                 "wesearch.chrome.capture._chrome_binary",
                 return_value="google-chrome-stable",
@@ -184,7 +188,7 @@ class TestDriveChrome:
         # where the harness runs as root (CI); a caller pointing this at a real
         # URL must not silently get an unsandboxed browser.
         with (
-            patch("subprocess.Popen", side_effect=_fresh_popen_mock) as run,
+            patch("subprocess.Popen", side_effect=_fresh_popen) as run,
             patch(
                 "wesearch.chrome.capture._chrome_binary",
                 return_value="google-chrome-stable",
@@ -198,9 +202,9 @@ class TestDriveChrome:
             assert "--no-sandbox" in argv
 
     def test_default_timeouts_streams_and_profile_prefix_are_exact(self) -> None:
-        process = _popen_mock()
+        chrome = _Popen()
         with (
-            patch("subprocess.Popen", return_value=process) as run,
+            patch("subprocess.Popen", return_value=chrome.process) as run,
             patch("wesearch.chrome.capture._chrome_binary", return_value="chrome"),
         ):
             assert drive_chrome("https://example.test/") is False
@@ -210,27 +214,25 @@ class TestDriveChrome:
         argv = cast(list[str], run.call_args.args[0])
         assert argv[4].startswith("--user-data-dir=")
         assert Path(argv[4].split("=", 1)[1]).name.startswith("chrome-capture-")
-        process.communicate.assert_called_once_with(timeout=40.0)
+        chrome.communicate.assert_called_once_with(timeout=40.0)
 
     def test_default_reap_timeout_and_suppression_are_exact(self) -> None:
-        process = MagicMock()
-        process.pid = 4321
-        process.communicate.side_effect = [
+        chrome = _Popen(
             subprocess.TimeoutExpired(cmd="chrome", timeout=40.0),
             subprocess.TimeoutExpired(cmd="chrome", timeout=10.0),
-        ]
+        )
         with (
-            patch("subprocess.Popen", return_value=process),
+            patch("subprocess.Popen", return_value=chrome.process),
             patch("os.killpg"),
             patch("wesearch.chrome.capture._chrome_binary", return_value="chrome"),
         ):
             assert drive_chrome("https://example.test/") is True
-        assert process.communicate.call_args_list[1].kwargs == {"timeout": 10.0}
+        assert chrome.communicate.call_args_list[1].kwargs == {"timeout": 10.0}
 
     def test_all_chrome_flags_and_timeouts_are_forwarded(self) -> None:
-        process = _popen_mock(timeout=True)
+        chrome = _Popen.timing_out()
         with (
-            patch("subprocess.Popen", return_value=process) as run,
+            patch("subprocess.Popen", return_value=chrome.process) as run,
             patch("os.killpg"),
             patch(
                 "wesearch.chrome.capture._chrome_binary",
@@ -261,8 +263,8 @@ class TestDriveChrome:
             "--dump-dom",
             "https://example.test/",
         ]
-        assert process.communicate.call_args_list[0].kwargs == {"timeout": 2}
-        assert process.communicate.call_args_list[1].kwargs == {"timeout": 3}
+        assert chrome.communicate.call_args_list[0].kwargs == {"timeout": 2}
+        assert chrome.communicate.call_args_list[1].kwargs == {"timeout": 3}
 
 
 @pytest.mark.cli_git
@@ -277,7 +279,7 @@ def test_a_killed_group_takes_the_forked_grandchild_with_it() -> None:
     try:
         assert process.stdout is not None
         stdout = process.stdout
-        grandchild = int(stdout.readline())
+        grandchild = int(cast(bytes, stdout.readline()))  # ty: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; ty already infers bytes.
         _kill_group(process)
 
         assert _died_within(grandchild, seconds=10.0), (
@@ -303,7 +305,7 @@ def test_a_child_dies_when_its_parent_is_sigkilled() -> None:
     try:
         assert parent.stdout is not None
         stdout = parent.stdout
-        child_pid = int(stdout.readline())
+        child_pid = int(cast(bytes, stdout.readline()))  # ty: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; ty already infers bytes.
         os.kill(parent.pid, signal.SIGKILL)
 
         assert _died_within(child_pid, seconds=10.0), (
@@ -473,13 +475,15 @@ class TestChromeAvailable:
         assert not capture._snap_confined(str(wrapper))
 
     def test_snap_path_check_uses_exact_prefix(self, tmp_path: Path) -> None:
-        resolved = MagicMock()
+        is_relative_to = MagicMock(return_value=False)
+        resolved = MagicMock(
+            is_relative_to=is_relative_to,
+            read_bytes=MagicMock(return_value=b"native"),
+        )
         resolved.name = "chromium"
-        resolved.is_relative_to.return_value = False
-        resolved.read_bytes.return_value = b"native"
         with patch.object(Path, "resolve", return_value=resolved):
             assert not capture._snap_confined(str(tmp_path / "chromium"))
-        resolved.is_relative_to.assert_called_once_with("/snap")
+        is_relative_to.assert_called_once_with("/snap")
 
     def test_a_native_binary_counts(self, tmp_path: Path) -> None:
         # Positive control for the byte scan: an ordinary executable is kept.

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http import client
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, Mock, call, patch
 
 import base64
@@ -21,7 +21,6 @@ import math
 
 from curl_cffi import requests as cc_requests
 from curl_cffi.requests import Headers
-from treekle import from_plain
 
 import pytest
 
@@ -295,12 +294,12 @@ class TestFetchRetry:
     """Retries on the stdlib transport, mocked at its connection."""
 
     def test_retries_on_500(self, session: FetchSession) -> None:
-        connection = _stdlib_connection(
+        connection = _StdlibConnection(
             _http_response(500, b"ISE"),
             _http_response(body=b"ok"),
         )
         with (
-            patch(_CONNECT, return_value=connection),
+            patch(_CONNECT, return_value=connection.mock),
             patch("wesearch.fetch.fetch.time.sleep"),
         ):
             assert (
@@ -313,9 +312,9 @@ class TestFetchRetry:
             )
 
     def test_no_retry_on_404(self, session: FetchSession) -> None:
-        connection = _stdlib_connection(_http_response(404, b"NF"))
+        connection = _StdlibConnection(_http_response(404, b"NF"))
         with (
-            patch(_CONNECT, return_value=connection),
+            patch(_CONNECT, return_value=connection.mock),
             pytest.raises(FetchError, match="404"),
         ):
             fetch.fetch(
@@ -329,21 +328,24 @@ class TestFetchRetry:
         # A Cloudflare 403 challenge page is compressed like any other body; a raw
         # FetchError.body cannot be told from a plain 404.
         html = b"<!DOCTYPE html><html>Just a moment...</html>"
-        connection = _stdlib_connection(
+        connection = _StdlibConnection(
             _http_response(
                 403,
                 zstd_compat.compress(html),
                 [("content-encoding", "zstd"), ("server", "cloudflare")],
             ),
         )
-        with patch(_CONNECT, return_value=connection), pytest.raises(FetchError) as exc:
+        with (
+            patch(_CONNECT, return_value=connection.mock),
+            pytest.raises(FetchError) as exc,
+        ):
             fetch.fetch("https://x.com", request=_stdlib(), session=session)
         assert exc.value.body == html
 
     def test_retries_on_network_error(self, session: FetchSession) -> None:
-        connection = _stdlib_connection(OSError("refused"), _http_response(body=b"ok"))
+        connection = _StdlibConnection(OSError("refused"), _http_response(body=b"ok"))
         with (
-            patch(_CONNECT, return_value=connection),
+            patch(_CONNECT, return_value=connection.mock),
             patch("wesearch.fetch.fetch.time.sleep"),
         ):
             assert (
@@ -368,17 +370,14 @@ class TestHeaderOrder:
         session: FetchSession,
         content: ContentParams | None = None,
     ) -> dict[str, str]:
-        connection = _stdlib_connection(_http_response(body=b"ok"))
-        with patch(_CONNECT, return_value=connection):
+        connection = _StdlibConnection(_http_response(body=b"ok"))
+        with patch(_CONNECT, return_value=connection.mock):
             fetch.fetch(
                 "https://example.com/",
                 request=_stdlib(content=content),
                 session=session,
             )
-        return from_plain(
-            connection.request.call_args.kwargs["headers"],
-            dict[str, str],
-        )
+        return cast(dict[str, str], connection.request.call_args.kwargs["headers"])
 
     def test_get_navigation_order(self, session: FetchSession) -> None:
         # The order a real Chrome navigation sends over HTTP/1.1: no Connection,
@@ -907,7 +906,9 @@ class TestIdentityLayer:
         ):
             assert fetch.fetch("https://x.example/", request=_curl()) == b"ok"
             assert fetch.fetch("https://y.example/", request=_curl()) == b"ok"
-        first, second = (c.kwargs["session"] for c in backend.call_args_list)
+        first, second = (
+            cast(FetchSession, c.kwargs["session"]) for c in backend.call_args_list
+        )
         assert first is default_session()
         assert second is first
         close.assert_not_called()
@@ -1053,8 +1054,7 @@ class TestEgressIp:
             )
         assert echo.call_args.args == ("https://echo.example",)
         assert echo.call_args.kwargs["session"] is session
-        request = echo.call_args.kwargs["request"]
-        assert isinstance(request, RequestParams)
+        request = cast(RequestParams, echo.call_args.kwargs["request"])
         assert request.content.headers == {}
         assert request.content.raw_headers is True
         assert request.retry.timeout_sec == 7.0
@@ -1063,8 +1063,7 @@ class TestEgressIp:
         echo = Mock(return_value=b"203.0.113.7")
         with patch("wesearch.fetch.fetch.fetch", echo):
             egress_ip(FetchSession(), v4_echoes=("https://echo.example",))
-        request = echo.call_args.kwargs["request"]
-        assert isinstance(request, RequestParams)
+        request = cast(RequestParams, echo.call_args.kwargs["request"])
         assert request.retry.timeout_sec == 5.0
 
     def test_probe_selects_v4_echoes_when_ipv6_is_false(self) -> None:
@@ -1105,8 +1104,7 @@ class TestEgressIp:
     def test_uses_v6_endpoints(self) -> None:
         mock = Mock(return_value=b"2001:db8::5")
         self._probe(mock, ipv6=True)
-        url = mock.call_args.args[0]
-        assert isinstance(url, str)
+        url = cast(str, mock.call_args.args[0])
         assert "ipv6" in url or "api64" in url
 
     def test_malformed_v6_reply_rejected(self) -> None:
@@ -2182,26 +2180,31 @@ def _http_response(
     headers: list[tuple[str, str]] | None = None,
 ) -> Mock:
     """Return an ``http.client`` response stand-in."""
-    response = Mock(spec=client.HTTPResponse)
-    response.status = status
-    response.read.side_effect = [body, b""]
-    response.isclosed.return_value = False
-    response.getheaders.return_value = headers or [("content-encoding", "identity")]
-    return response
+    return Mock(
+        spec=client.HTTPResponse,
+        status=status,
+        read=Mock(side_effect=[body, b""]),
+        isclosed=Mock(return_value=False),
+        getheaders=Mock(return_value=headers or [("content-encoding", "identity")]),
+    )
 
 
-def _stdlib_connection(*responses: Mock | Exception) -> Mock:
-    """Return a connection whose ``getresponse`` answers ``responses`` in order."""
-    connection = Mock()
-    connection.getresponse.side_effect = list(responses)
-    return connection
+# Handles are set in ``__init__``: typeshed gives the mock classes an ``Any`` base,
+# so a mock reached through another mock's attribute is ``Any``.
+class _StdlibConnection:
+    """A connection answering ``responses`` in order, with typed call handles."""
+
+    def __init__(self, *responses: Mock | Exception) -> None:
+        self.getresponse = Mock(side_effect=list(responses))
+        self.request = Mock()
+        self.mock = Mock(getresponse=self.getresponse, request=self.request)
 
 
 def _sent_headers(mock: Mock, index: int = 0) -> dict[str, str]:
     """Return the headers of a recorded transport call, ``None`` values dropped."""
-    headers = from_plain(
-        mock.call_args_list[index].kwargs["headers"],
+    headers = cast(
         dict[str, str | None],
+        mock.call_args_list[index].kwargs["headers"],
     )
     return {k: v for k, v in headers.items() if v is not None}
 
