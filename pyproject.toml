@@ -72,6 +72,8 @@ test = [
     # never enforced.
     "pytest-cov",
     "nodejs-wheel-binaries>=24.16.0",
+    # The MCP server's tests import the SDK; CI syncs groups, never extras.
+    "wesearch[mcp]",
 ]
 typecheck = [
     "basedpyright>=1.40.1",

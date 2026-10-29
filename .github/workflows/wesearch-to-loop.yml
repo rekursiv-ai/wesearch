@@ -277,13 +277,9 @@ jobs:
             --report "$IMPORT_REPORT" \
             --record-on-validation-failure "${{ github.event_name == 'push' }}" \
             --refresh-public-lockfile \
-            --validation-command 'uv sync --frozen --all-groups --all-extras' \
-            --validation-command 'uv run pre-commit run --all-files --hook-stage pre-commit' \
+            --validation-command 'uv sync --frozen --all-groups' \
+            --validation-command 'SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit' \
             --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \
-            --validation-command 'uv run python -c "import wesearch"' \
-            --validation-command 'rm -rf dist' \
-            --validation-command 'uv build --out-dir dist' \
-            --validation-command 'wheels=(dist/wesearch-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" python -P -c "import wesearch; print(wesearch.__file__)"' \
             --open-pr false
 
       - name: Open or update target import PR

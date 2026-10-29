@@ -1562,7 +1562,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.11"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#416be9fae67e6bb5ff41fc0a31f9da2dd6d2751e" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#f11aa075102f4935a114a84a4fa3ceff72d9de7b" }
 
 [[package]]
 name = "rpds-py"
@@ -2095,6 +2095,7 @@ dev = [
     { name = "ruff" },
     { name = "tqdm" },
     { name = "ty" },
+    { name = "wesearch", extra = ["mcp"] },
 ]
 lint = [
     { name = "codespell" },
@@ -2117,6 +2118,7 @@ pre-commit = [
     { name = "rekursiv-ai-typings" },
     { name = "ruff" },
     { name = "ty" },
+    { name = "wesearch", extra = ["mcp"] },
 ]
 stubs = [
     { name = "lxml-stubs" },
@@ -2130,6 +2132,7 @@ test = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "wesearch", extra = ["mcp"] },
 ]
 typecheck = [
     { name = "basedpyright" },
@@ -2179,6 +2182,7 @@ dev = [
     { name = "ruff" },
     { name = "tqdm" },
     { name = "ty", specifier = ">=0.0.84" },
+    { name = "wesearch", extras = ["mcp"] },
 ]
 lint = [
     { name = "codespell", specifier = ">=2.2.4" },
@@ -2201,6 +2205,7 @@ pre-commit = [
     { name = "rekursiv-ai-typings", git = "https://github.com/rekursiv-ai/typings?branch=main" },
     { name = "ruff" },
     { name = "ty", specifier = ">=0.0.84" },
+    { name = "wesearch", extras = ["mcp"] },
 ]
 stubs = [{ name = "lxml-stubs", specifier = ">=0.5.1" }]
 test = [
@@ -2212,6 +2217,7 @@ test = [
     { name = "pytest-cov" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "wesearch", extras = ["mcp"] },
 ]
 typecheck = [
     { name = "basedpyright", specifier = ">=1.40.1" },
