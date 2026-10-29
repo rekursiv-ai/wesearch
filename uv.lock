@@ -1561,8 +1561,8 @@ wheels = [
 
 [[package]]
 name = "rekursiv-ai-typings"
-version = "0.1.10"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#973cc577071ebf042a6b0e5cd5c9b0c5de50ddba" }
+version = "0.1.11"
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#249a884f2f53d041a58cb074f567452449008338" }
 
 [[package]]
 name = "rpds-py"

@@ -76,7 +76,7 @@ typecheck = [
     "basedpyright>=1.40.1",
     "pyrefly>=1.4.0",
     "ty>=0.0.84",
-    "rekursiv-ai-typings>=0.1.6",
+    "rekursiv-ai-typings>=0.1.11",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
