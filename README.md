@@ -11,19 +11,10 @@ A wascally web research toolkit for agents; web search, web fetch, and publicati
 ## Quick Start
 
 ```bash
-# Mac:
-#   # Required for quick install.
-#   brew install uv
-
-# Ubuntu/Debian:
-#   # Required for quick install.
-#   sudo apt-get install -y curl
-#   curl -LsSf https://astral.sh/uv/install.sh | sh
-
 uv add wesearch
-
-# Alternatively: python -m pip install wesearch
 ```
+
+See [Install](#install) for additional details.
 
 `wesearch` is a synchronous, batteries-included library for programmatic web access: run a
 search, fetch a page through a real-browser fingerprint, extract content, and look up scholarly
@@ -100,6 +91,28 @@ wesearch/
 ├── web.py           fetch_web(...): fetch + provider dispatch + extraction
 ├── profile.py       cross-process per-(egress_ip, domain) cookie jar
 └── scrape.py        get_element_content(html, selector)
+```
+
+## Install
+
+```bash
+uv add wesearch
+```
+
+If you're missing `uv`,
+- Mac
+  ```bash
+  brew install uv
+  ```
+- Linux
+  ```bash
+  sudo apt install -y curl
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+Or with pip,
+```bash
+python -m pip install wesearch
 ```
 
 ## Transports
