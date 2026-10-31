@@ -412,7 +412,8 @@ def test_a_404_after_a_redirect_is_unmarked_but_one_at_the_url_is_not(
     ],
 )
 def test_a_404_at_the_url_asked_for_is_not_unmarked(
-    requested: str, landed: str
+    requested: str,
+    landed: str,
 ) -> None:
     error = FetchError(landed, 404, {"content-type": "text/html"}, b"")
     assert not is_unmarked_block(error, requested=requested)

@@ -81,6 +81,19 @@ def test_a_page_that_only_needs_javascript_does_not_lock() -> None:
     assert challenged_urls() == []
 
 
+def test_a_page_that_only_needs_javascript_frees_the_probe(clock: _Clock) -> None:
+    # After a block, the first caller back is the probe; a JavaScript page says
+    # nothing about the block, so the next caller must not wait out its lease.
+    _block()
+    clock.now += 1.0
+    with (
+        pytest.raises(GoogleJavascriptRequiredError),
+        gated(_URL, egress="203.0.113.1", policies=_FAST),
+    ):
+        raise GoogleJavascriptRequiredError("enablejs")
+    _send()
+
+
 def test_an_ordinary_failure_does_not_lock() -> None:
     with pytest.raises(FetchError), gated(_URL, egress="", policies=_FAST):
         raise FetchError(_URL, 503, {}, b"")
