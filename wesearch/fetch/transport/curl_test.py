@@ -146,6 +146,7 @@ class TestFetchCurl:
                 ),
                 "Origin": "https://example.com",
                 "X-Test": "yes",
+                "Cache-Control": None,
             },
             data=b"payload",
             impersonate="chrome",
@@ -181,6 +182,30 @@ class TestFetchCurl:
         sent = cast(dict[str, str | None], request.call_args.kwargs["headers"])
         assert sent["Accept-Encoding"] is None
         assert sent["User-Agent"] is None
+
+    def test_curl_cffi_is_told_to_drop_a_header_chrome_sends_only_on_reload(
+        self,
+        session: FetchSession,
+    ) -> None:
+        with _serve(_response()) as request:
+            fetch_curl("https://example.com/", session=session)
+        sent = cast(dict[str, str | None], request.call_args.kwargs["headers"])
+        assert "Cache-Control" in sent
+        assert sent["Cache-Control"] is None
+
+    def test_a_cache_control_the_caller_sets_is_sent(
+        self,
+        session: FetchSession,
+    ) -> None:
+        with _serve(_response()) as request:
+            fetch_curl(
+                "https://example.com/",
+                headers={"cache-control": "no-cache"},
+                session=session,
+            )
+        sent = cast(dict[str, str | None], request.call_args.kwargs["headers"])
+        assert {k.lower(): v for k, v in sent.items()}["cache-control"] == "no-cache"
+        assert [k for k in sent if k.lower() == "cache-control"] == ["cache-control"]
 
     def test_a_status_of_400_raises(self, session: FetchSession) -> None:
         with _serve(_response(400, b"bad")), pytest.raises(FetchError) as error:

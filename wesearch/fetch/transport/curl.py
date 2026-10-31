@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import urlparse
 
 import functools
@@ -48,6 +48,11 @@ else:
 __all__ = ["curl_available", "fetch_curl"]
 
 logger = logging.getLogger(__name__)
+
+# What curl_cffi's impersonation sends that Chrome's navigation does not: since
+# 0.17 (chrome152) ``Cache-Control: max-age=0``, which Chrome sends only on a
+# reload (measured against a live Chrome).
+_CURL_ONLY: Final = ("Cache-Control",)
 
 
 def fetch_curl(
@@ -104,7 +109,11 @@ def fetch_curl(
     )
     # curl_cffi drops an impersonated header whose value is None (measured); the
     # merge alone cannot remove one curl adds itself.
-    removed = {name: value for name, value in headers.items() if value is None}
+    sent = {name.lower() for name in pending.headers}
+    removed = {
+        **{name: None for name in _CURL_ONLY if name.lower() not in sent},
+        **{name: value for name, value in headers.items() if value is None},
+    }
     while True:
         requested = pending.url
         try:
