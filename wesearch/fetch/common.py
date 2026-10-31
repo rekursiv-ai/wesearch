@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_PORTS",
     "ORIGIN_BOUND",
+    "DecompressionError",
     "PendingRequest",
     "bracket_ipv6",
     "cookie_header",
@@ -163,6 +164,10 @@ def origin(url: str) -> str:
     return f"{parsed.scheme}://{host_header(host, parsed.port, parsed.scheme)}"
 
 
+class DecompressionError(ValueError):
+    """A response body that will not decode by its ``Content-Encoding``."""
+
+
 def decompress(body: bytes, encoding: str) -> bytes:
     """Return ``body`` decoded per its ``Content-Encoding``.
 
@@ -174,12 +179,12 @@ def decompress(body: bytes, encoding: str) -> bytes:
       body: The decoded body.
 
     Raises:
-      ValueError: On an unknown encoding or a corrupt body.
+      DecompressionError: On an unknown encoding or a corrupt body.
 
     """
     for enc in reversed([tok.strip().lower() for tok in encoding.split(",")]):
         if enc not in ("", "identity", "gzip", "deflate", "br", "zstd"):
-            raise ValueError(f"Unknown Content-Encoding: {enc!r}")
+            raise DecompressionError(f"Unknown Content-Encoding: {enc!r}")
         if enc == "deflate":
             try:
                 body = zlib.decompress(body)
@@ -196,7 +201,7 @@ def decompress(body: bytes, encoding: str) -> bytes:
             elif enc == "zstd":
                 body = zstd_compat.decompress(body)
         except (OSError, ValueError, zlib.error, brotli.error) as e:
-            raise ValueError(f"Decompression failed ({enc}): {e}") from None
+            raise DecompressionError(f"Decompression failed ({enc}): {e}") from None
     return body
 
 

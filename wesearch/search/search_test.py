@@ -12,10 +12,13 @@ import json
 import logging
 import os
 
+from treekle import ReadError
+
 import bs4
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
+from wesearch.fetch.common import DecompressionError
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.mcp.schema import literal_values
 from wesearch.mcp.types import SearchParamsSchema
@@ -46,6 +49,7 @@ from wesearch.search.types import (
 )
 from wesearch.types.errors import (
     BotDetectionError,
+    CooldownError,
     FetchError,
     PuzzleChallengeError,
 )
@@ -1176,6 +1180,43 @@ class TestSearchFallbackChain:
         with context:
             assert search("q") == [_HIT]
         assert reached == ["duckduckgo", "searxng"]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            FetchError("https://searx.example/", 502, {}, b""),
+            CooldownError("cooling down", url="https://searx.example/"),
+            # The browser leg: it would not start, or not in this mode.
+            BrowserUnavailableError("Could not launch Chrome."),
+            TimeoutError("browser leg timed out"),
+            # A payload that changed shape: Brave's JSON, a SearXNG item.
+            json.JSONDecodeError("Expecting value", "<html>", 0),
+            ReadError("expected dict, got list"),
+            # The stdlib transport's corrupt response.
+            DecompressionError("Decompression failed (gzip): bad"),
+        ],
+    )
+    def test_a_backends_failure_inside_the_chain_moves_on(
+        self,
+        failure: Exception,
+    ) -> None:
+        context, reached = self._chain(searxng=failure, duckduckgo=[_HIT])
+        with context:
+            assert search("q") == [_HIT]
+        assert reached == ["searxng", "duckduckgo"]
+
+    @pytest.mark.parametrize(
+        "bug",
+        [ValueError("bad argument"), RuntimeError("bad state"), TypeError("bad type")],
+    )
+    def test_a_programming_error_in_a_backend_is_not_hidden_by_the_chain(
+        self,
+        bug: Exception,
+    ) -> None:
+        context, reached = self._chain(searxng=bug, duckduckgo=[_HIT])
+        with context, pytest.raises(type(bug)):
+            search("q")
+        assert reached == ["searxng"]
 
     def test_an_empty_answer_tries_the_next_backend(self) -> None:
         context, reached = self._chain(searxng=[], duckduckgo=[_HIT])

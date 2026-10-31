@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Literal
 from urllib.parse import urlparse
 
+import logging
 import re
 
 from wesearch.fetch import (
@@ -18,6 +19,8 @@ from wesearch.fetch import (
 )
 from wesearch.fetch.session import default_session
 
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "RedditPayload",

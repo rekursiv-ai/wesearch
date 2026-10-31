@@ -72,6 +72,14 @@ SITE_POLICIES: Final[tuple[SitePolicy, ...]] = (
         interval_sec=5.0,
         burst=5,
     ),
+    # A result link answers a client that follows more than ~3 quickly with a
+    # 3-second refresh page, and a 400 if followed sooner (measured 2026-10-30).
+    SitePolicy(
+        host="www.google.com",
+        path_prefix="/goto",
+        interval_sec=3.5,
+        burst=3,
+    ),
     # Scholar flags a fixed cadence: uniform 4-10s held ~23 requests per IP before a
     # CAPTCHA where a fixed interval at the same mean burned in ~21. Its bans last
     # roughly a day or two, so a probe sooner only renews one.
@@ -155,8 +163,11 @@ def gated(
         time.sleep(_admit(path, url, policy))
     try:
         yield
-    except BotDetectionError:
-        _trip(path, policy, challenge_url=url)
+    except BotDetectionError as block:
+        if block.blocks_ip:
+            _trip(path, policy, challenge_url=url)
+        elif tracked:
+            _release_probe(path)
         raise
     except FetchError as e:
         blocked = e.status == 429 or (e.status == 0 and policy.unreachable_blocks)

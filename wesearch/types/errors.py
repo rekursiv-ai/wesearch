@@ -6,11 +6,15 @@ from typing import ClassVar
 
 import shlex
 
+from wesearch.types.urls import without_userinfo
+
 
 __all__ = [
+    "AwsWafChallengeError",
     "BotDetectionError",
     "CloudflareChallengeError",
     "CooldownError",
+    "DataDomeChallengeError",
     "FetchError",
     "GoogleJavascriptRequiredError",
     "GoogleSorryError",
@@ -40,11 +44,13 @@ class FetchError(Exception):
         self.status = status
         self.headers = headers
         self.body = body
+        # A message reaches logs and tool output, so it names the URL bare.
+        shown, _ = without_userinfo(url)
         if status == 0:
             reason = body.decode(errors="replace").strip() or "connection failed"
-            super().__init__(f"connection failed: {url}: {reason}")
+            super().__init__(f"connection failed: {shown}: {reason}")
         else:
-            super().__init__(f"HTTP {status}: {url}")
+            super().__init__(f"HTTP {status}: {shown}")
 
 
 class BotDetectionError(FetchError):
@@ -55,10 +61,14 @@ class BotDetectionError(FetchError):
         curl cannot, so the domain should route to the browser from now on.
         False for a block that is about the IP or needs a human; routing those
         to the browser only moves the same failure onto the slower transport.
+      blocks_ip: Whether the site refused this IP, so the gate cools it down.
 
     """
 
     browser_clears: ClassVar[bool] = False
+    # Whether the site refused this IP, so the gate holds it shut while it
+    # recovers. A page that only needs JavaScript refused nobody.
+    blocks_ip: ClassVar[bool] = True
 
     guidance = (
         "The site served an automated-access block. Retry later or from a "
@@ -86,8 +96,9 @@ class BotDetectionError(FetchError):
     @classmethod
     def recovery(cls, url: str) -> str:
         """Return how to clear the block on ``url`` by hand."""
+        shown, _ = without_userinfo(url)
         return (
-            f"Run `zendriver {shlex.quote(url)}` and solve the challenge; "
+            f"Run `zendriver {shlex.quote(shown)}` and solve the challenge; "
             "the site unlocks once its page loads."
         )
 
@@ -102,7 +113,8 @@ class BotDetectionError(FetchError):
           message: User-facing explanation.
 
         """
-        return f"Fetch blocked: {url} -- {cls.guidance} {cls.recovery(url)}"
+        shown, _ = without_userinfo(url)
+        return f"Fetch blocked: {shown} -- {cls.guidance} {cls.recovery(url)}"
 
 
 class PuzzleChallengeError(BotDetectionError):
@@ -127,13 +139,33 @@ class CloudflareChallengeError(BotDetectionError):
     )
 
 
+class AwsWafChallengeError(BotDetectionError):
+    """AWS WAF served its JavaScript challenge ("verify that you're not a robot")."""
+
+    browser_clears = True
+
+    guidance = (
+        "AWS WAF served its JavaScript challenge. It clears by running the page "
+        "JS in a real browser engine."
+    )
+
+
+class DataDomeChallengeError(BotDetectionError):
+    """DataDome served its interstitial ("Please enable JS and disable any ad blocker")."""
+
+    guidance = (
+        "DataDome served its interstitial, which refuses headless browsers too. "
+        "It needs a person to load the page in the fetch browser, or another IP."
+    )
+
+
 class GoogleSorryError(BotDetectionError):
     """Google served its automated-traffic refusal page."""
 
     guidance = (
         "Google served its /sorry page after classifying this IP's traffic as "
-        "automated. Rotate the egress IP; it typically clears on its own within "
-        "a few hours to ~a day."
+        "automated. Solving its CAPTCHA once in the fetch browser clears it for "
+        "later fetches; otherwise it lifts on its own within hours to a day."
     )
 
 
@@ -150,6 +182,7 @@ class GoogleJavascriptRequiredError(BotDetectionError):
     """Google Search served its JavaScript-required shell."""
 
     browser_clears = True
+    blocks_ip = False
 
     guidance = (
         "Google served its enablejs shell (an HTTP-200 page with no results that "

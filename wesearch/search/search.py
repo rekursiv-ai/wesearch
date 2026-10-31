@@ -20,6 +20,9 @@ import json
 import logging
 import sys
 
+from treekle import ReadError
+
+from wesearch.fetch.common import DecompressionError
 from wesearch.search.brave import brave
 from wesearch.search.cache import cached_search
 from wesearch.search.duckduckgo import duckduckgo
@@ -205,6 +208,8 @@ def search(
       SearchError: When the named backend, or every backend in the chain, failed.
 
     """
+    if num_results < 0:
+        raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
     if categories != "general" and backend not in (None, "searxng"):
         # An EXPLICIT backend still errors. sagent used to overwrite it, so
         # ``backend="duckduckgo", categories="science"`` silently ran against
@@ -255,8 +260,14 @@ def search(
             continue
         except (
             FetchError,
+            # The browser leg would not start, or not in this mode; or it timed out.
             OSError,
+            # A payload that changed shape: JSON that is not, an item of the wrong
+            # type, a body that will not decompress. Any other ValueError or a
+            # RuntimeError is a bug, which the chain must not hide.
             json.JSONDecodeError,
+            ReadError,
+            DecompressionError,
         ) as e:
             if len(chain) == 1:
                 raise SearchError(f"{name} search failed: {e}") from e
