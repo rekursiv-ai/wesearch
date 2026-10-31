@@ -3,6 +3,12 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.1.16 - 2026-10-30
+
+### Changed
+
+- Fetch classifies firewall walls and routes blocked pages accordingly.
+
 ## 0.1.15 - 2026-10-29
 
 ### Removed
