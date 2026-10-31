@@ -14,6 +14,8 @@ into the submodule that defines the name:
   and ``Extractor`` vocabularies.
 - ``wesearch.types.errors`` -- the exception hierarchy every layer raises
   and every caller catches.
+- ``wesearch.types.urls`` -- ``without_userinfo``, which keeps a URL's
+  credentials on the request and out of everything shown.
 """
 
 from __future__ import annotations

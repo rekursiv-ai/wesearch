@@ -11,10 +11,16 @@ from wesearch.fetch.challenge import (
     _text,
     classify_challenge,
     classify_http_error,
+    is_shell,
+    is_unmarked_block,
+    redirects_soon,
+    visible_chars,
 )
 from wesearch.types.errors import (
+    AwsWafChallengeError,
     BotDetectionError,
     CloudflareChallengeError,
+    DataDomeChallengeError,
     FetchError,
     PuzzleChallengeError,
 )
@@ -114,11 +120,329 @@ def test_turnstile_wins_over_generic_widget() -> None:
         '<div id="challenge-spinner"></div>',
         '<div id="cf-please-wait"></div>',
         '<div id="turnstile-wrapper"></div>',
-        "<input name='cf-turnstile-response' value='x'>",
     ],
 )
 def test_cloudflare_structural_markup_on_success(markup: str) -> None:
     assert classify_challenge(markup, on_success_body=True) is CloudflareChallengeError
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<div class="cf-turnstile" data-sitekey="0x4aaaaaae1j7knkm6din4x9">',
+        "<input name='cf-turnstile-response' value='x'>",
+    ],
+)
+def test_success_body_turnstile_widget_is_content(markup: str) -> None:
+    # Verbatim from a TechSpot article, which embeds Turnstile in its comment
+    # form: reading the widget as a wall failed every fetch of the site, and
+    # held the browser leg in its settle loop for half its budget.
+    body = f"<html><head><title>Article | TechSpot</title></head><body>{markup}"
+    assert classify_challenge(body, on_success_body=True) is None
+    assert classify_challenge(body) is CloudflareChallengeError
+
+
+_ARTICLE = "<p>" + "Alphabet reported quarterly revenue of $127.6bn. " * 60 + "</p>"
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<div id="cf-challenge-running"></div>',
+        '<div class="cf-turnstile" data-sitekey="x"></div>',
+        '<div class="g-recaptcha" data-sitekey="x"></div>',
+        "<script src='/cdn-cgi/challenge-platform/scripts/jsd/main.js'></script>",
+    ],
+)
+def test_markers_on_a_page_with_content_are_not_a_wall(markup: str) -> None:
+    # Each marker list grew one false wall at a time; a page with an article is
+    # its own proof that the block did not happen, whatever widget it embeds.
+    body = f"<html><head><title>News</title></head><body>{_ARTICLE}{markup}"
+    assert classify_challenge(body) is None
+    assert classify_challenge(body, on_success_body=True) is None
+    assert classify_challenge(f"<html><body>{markup}") is not None
+
+
+def test_text_hidden_from_the_reader_does_not_make_a_wall_content() -> None:
+    hidden = f"<script>{_ARTICLE}</script><style>{_ARTICLE}</style><!--{_ARTICLE}-->"
+    body = f"<html><body>{hidden}<div id='cf-challenge-running'></div>"
+    assert classify_challenge(body, on_success_body=True) is CloudflareChallengeError
+
+
+def test_cloudflare_interstitial_prose_fits_the_wall_budget() -> None:
+    # The visible text of Cloudflare's managed-challenge page, with its Ray ID.
+    body = (
+        "<html><head><title>Just a moment...</title></head><body>"
+        "<h1>www.example.com</h1><h2>Verify you are human by completing the "
+        "action below.</h2><div id='cf-challenge-running'></div><p>www.example.com "
+        "needs to review the security of your connection before proceeding.</p>"
+        "<noscript>Enable JavaScript and cookies to continue</noscript>"
+        "<footer>Ray ID: 8f2a1b3c4d5e6f70 Performance &amp; security by "
+        "Cloudflare</footer></body></html>"
+    )
+    # A fivefold margin: Cloudflare can grow its prose without the rule missing it.
+    assert visible_chars(body) * 5 < 2_000
+    assert classify_challenge(body.replace("Just a moment...", "x")) is (
+        CloudflareChallengeError
+    )
+
+
+def test_title_proves_a_wall_whatever_the_page_carries() -> None:
+    body = f"<html><head><title>Just a moment...</title></head><body>{_ARTICLE}"
+    assert classify_challenge(body, on_success_body=True) is CloudflareChallengeError
+
+
+# The markup of the pages that broke a fetch on 2026-10-30, cut to what decides it.
+
+# TechSpot embeds Turnstile in a newsletter form; every article fetch failed as a
+# Cloudflare wall.
+_ARTICLE_WITH_TURNSTILE = (
+    f"<!DOCTYPE html><html><head><title>News | TechSpot</title></head><body>"
+    f'{_ARTICLE}<form><div class="cf-turnstile" data-sitekey="0x4AAAAAAE1J7knkm6DIN4X9">'
+    "</div></form></body></html>"
+)
+# Reddit's network security refusing this IP: a bare HTML 403, no marker.
+_REDDIT_403 = (
+    "<body class=theme-beta><div><h1>You've been blocked by network security.</h1>"
+    "<p>If you think you've been blocked by mistake, file a ticket below.</p></div>"
+    "</body>"
+)
+# AWS WAF's challenge: AWS docs served it with a 405, Semantic Scholar and IMDb
+# with a 202.
+_AWS_WAF = (
+    "<!DOCTYPE html><html><head><title></title>"
+    '<script src="https://x.token.awswaf.com/challenge.js"></script></head><body>'
+    "<script>AwsWafIntegration.getToken().then(() => location.reload())</script>"
+    "<noscript>JavaScript is disabled. In order to continue, we need to verify that "
+    "you're not a robot.</noscript></body></html>"
+)
+# DataDome's interstitial: Reuters and WSJ answered curl and Chrome with a 401.
+_DATADOME = (
+    "<html><head><title>reuters.com</title></head><body>"
+    "<p>Please enable JS and disable any ad blocker</p>"
+    '<script src="https://ct.captcha-delivery.com/i.js"></script></body></html>'
+)
+# PyTorch's docs: an unversioned page redirects by script and meta refresh.
+_REDIRECT_STUB = (
+    "<!DOCTYPE html><title>Redirecting&hellip;</title>"
+    '<script>location.replace("../2.15/x.html")</script>'
+    '<meta http-equiv="refresh" content="0; url=../2.15/x.html">'
+)
+# Kaggle: an empty mount point its scripts fill.
+_APP_SHELL = (
+    "<!DOCTYPE html><html><head><title>Kaggle</title>"
+    '<script src="/static/app.js"></script></head><body><div id="root"></div>'
+    "</body></html>"
+)
+
+
+def test_an_article_embedding_turnstile_is_content() -> None:
+    assert classify_challenge(_ARTICLE_WITH_TURNSTILE, on_success_body=True) is None
+    assert classify_challenge(_ARTICLE_WITH_TURNSTILE) is None
+
+
+def test_a_firewalls_bare_403_is_an_unmarked_block() -> None:
+    # No marker names it, so only its shape -- a bare HTML 403 -- earns another try.
+    error = classify_http_error(
+        "https://oauth.example/",
+        403,
+        {"content-type": "text/html; charset=UTF-8"},
+        _REDDIT_403.encode(),
+    )
+    assert type(error) is FetchError
+    assert is_unmarked_block(error, requested="https://oauth.example/")
+
+
+@pytest.mark.parametrize(
+    ("body", "on_success", "expected"),
+    [
+        (_AWS_WAF, False, AwsWafChallengeError),
+        (_AWS_WAF, True, AwsWafChallengeError),
+        (_DATADOME, False, DataDomeChallengeError),
+    ],
+)
+def test_a_firewall_interstitial_is_classified(
+    body: str,
+    on_success: bool,
+    expected: type[BotDetectionError],
+) -> None:
+    assert classify_challenge(body, on_success_body=on_success) is expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A Brave result snippet naming DataDome's challenge host.
+        b'{"web":{"results":[{"description":"blocked by captcha-delivery.com"}]}}',
+        # A feed item quoting Cloudflare's markup in escaped HTML.
+        (
+            b"<?xml version='1.0'?><rss><channel><item><description>"
+            b'&lt;div id="cf-challenge-running"&gt;</description></item></channel></rss>'
+        ),
+        b"%PDF-1.7 AwsWafIntegration.getToken()",
+        # Feeds without a prolog, or with a comment before the root.
+        b'<rss version="2.0"><channel><title>Just a moment...</title></channel></rss>',
+        (
+            b'<feed xmlns="http://www.w3.org/2005/Atom"><title>cf-challenge</title>'
+            b'<entry><content>&lt;div id="cf-challenge-running"&gt;</content></entry></feed>'
+        ),
+        (
+            b"<?xml version='1.0'?>\n<!-- generator: x -->\n<!-- v2 -->\n"
+            b"<rss><channel><item><title>Just a moment...</title></item></channel></rss>"
+        ),
+        b"<!-- cached --><rdf:RDF><item>AwsWafIntegration</item></rdf:RDF>",
+    ],
+)
+def test_a_non_html_success_body_is_never_a_wall(body: bytes) -> None:
+    # The curl body of every automatic request is classified, APIs and feeds
+    # too; a false wall would send the API to Chrome and pin its domain there.
+    assert classify_challenge(body, on_success_body=True) is None
+
+
+def test_html_is_recognized_past_a_byte_order_mark_and_without_a_doctype() -> None:
+    wall = "\ufeff<head><title>Just a moment...</title></head>".encode()
+    assert classify_challenge(wall, on_success_body=True) is CloudflareChallengeError
+
+
+def test_xhtml_behind_an_xml_prolog_is_html() -> None:
+    wall = (
+        b'<?xml version="1.0" encoding="utf-8"?>\n<!-- served as xhtml -->\n'
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        b"<title>Just a moment...</title></head></html>"
+    )
+    assert classify_challenge(wall, on_success_body=True) is CloudflareChallengeError
+
+
+def test_a_firewall_script_on_a_page_of_content_is_a_beacon() -> None:
+    body = f"<script>AwsWafIntegration.getToken()</script>{_ARTICLE}"
+    assert classify_challenge(body, on_success_body=True) is None
+
+
+@pytest.mark.parametrize(
+    ("body", "shell"),
+    [(_REDIRECT_STUB, True), (_APP_SHELL, True), (_ARTICLE_WITH_TURNSTILE, False)],
+)
+def test_a_page_without_content_is_a_shell(body: str, shell: bool) -> None:
+    assert is_shell(body.encode()) is shell
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b'{"a": 1}', b"<?xml version='1.0'?><rss/>", b"plain text"],
+)
+def test_only_html_can_be_a_shell(body: bytes) -> None:
+    assert not is_shell(body)
+
+
+@pytest.mark.parametrize(
+    ("page", "soon"),
+    [
+        (
+            '<meta http-equiv="refresh" content="0;url=/httpservice/retry/enablejs">',
+            True,
+        ),
+        ("<META HTTP-EQUIV=Refresh CONTENT='3; URL=../2.15/x.html'>", True),
+        ('<meta http-equiv="refresh" content="60;url=/next">', False),
+        ('<meta http-equiv="refresh" content="300">', False),
+        ("<p>refresh content=0;url=/x</p>", False),
+    ],
+)
+def test_only_an_imminent_meta_refresh_redirects_soon(page: str, soon: bool) -> None:
+    assert redirects_soon(page) is soon
+
+
+def test_a_redirect_stub_redirects_soon() -> None:
+    # Chrome read PyTorch's stub before its refresh fired.
+    assert redirects_soon(_REDIRECT_STUB)
+
+
+@pytest.mark.parametrize("body", [b"", b" \r\n\t"])
+def test_an_empty_success_is_a_shell(body: bytes) -> None:
+    # AliExpress serves curl an empty 200; the browser renders the store.
+    assert is_shell(body)
+
+
+@pytest.mark.parametrize(
+    ("body", "shell"),
+    [
+        # A short page with nothing to run is the whole page; rendering it only
+        # adds a browser that can fail where curl succeeded.
+        (b"<!doctype html><html><body><p>OK</p></body></html>", False),
+        (b"<html><body>Page moved.</body></html>", False),
+        # A script or an imminent refresh is what produces the real page.
+        (b'<html><body><div id=root></div><script src="/a.js"></script>', True),
+        (b'<html><meta http-equiv="refresh" content="0;url=/next"></html>', True),
+        # A refresh far off is not a redirect worth rendering for.
+        (b'<html><meta http-equiv="refresh" content="300;url=/n"></html>', False),
+    ],
+)
+def test_a_shell_is_a_page_something_will_replace(body: bytes, shell: bool) -> None:
+    assert is_shell(body) is shell
+
+
+def test_visible_chars_skip_hidden_elements_in_any_case() -> None:
+    assert visible_chars(b"<SCRIPT>x x</SCRIPT><p>ab cd</p><!-- e -->") == 4
+
+
+@pytest.mark.parametrize(
+    ("landed", "unmarked"),
+    [
+        # operations.nfl.com, 2026-10-30: curl is redirected to a 404 route the
+        # browser never sees; Chrome gets the page with a 200.
+        ("https://operations.nfl.com/v2/operations?_rsc", True),
+        ("https://operations.nfl.com/", False),
+    ],
+)
+def test_a_404_after_a_redirect_is_unmarked_but_one_at_the_url_is_not(
+    landed: str,
+    unmarked: bool,
+) -> None:
+    error = FetchError(landed, 404, {"content-type": "text/html"}, b"")
+    assert is_unmarked_block(error, requested="https://operations.nfl.com/") is unmarked
+
+
+@pytest.mark.parametrize(
+    ("requested", "landed"),
+    [
+        # ``fetch`` strips the credentials and appends ``params`` before sending,
+        # so the URL a plain 404 names differs from the caller's in those parts.
+        ("https://u:p@search.example/x", "https://search.example/x"),
+        ("https://search.example/x", "https://search.example/x?page=2"),
+        ("https://Search.Example/x#top", "https://search.example/x"),
+    ],
+)
+def test_a_404_at_the_url_asked_for_is_not_unmarked(
+    requested: str, landed: str
+) -> None:
+    error = FetchError(landed, 404, {"content-type": "text/html"}, b"")
+    assert not is_unmarked_block(error, requested=requested)
+
+
+@pytest.mark.parametrize(
+    ("status", "content_type", "unmarked"),
+    [
+        (403, "text/html", True),
+        (403, "TEXT/HTML; charset=utf-8", True),
+        (401, "text/html", True),
+        (405, "text/html", True),
+        (503, "text/html", True),
+        (403, "application/json", False),
+        (404, "text/html", False),
+        (429, "text/html", False),
+        (500, "text/html", False),
+    ],
+)
+def test_unmarked_block_is_an_html_refusal_only(
+    status: int,
+    content_type: str,
+    unmarked: bool,
+) -> None:
+    error = FetchError("https://x.com", status, {"Content-Type": content_type}, b"")
+    assert is_unmarked_block(error, requested="https://x.com") is unmarked
+    assert not is_unmarked_block(
+        FetchError("https://x.com", 403, {}, b""),
+        requested="https://x.com",
+    )
 
 
 def test_cloudflare_title_on_success() -> None:

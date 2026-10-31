@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element, ParseError
 
 import html
+import logging
 import re
 
 from wesearch.fetch import (
@@ -29,7 +30,9 @@ from wesearch.fetch.html_to_text import html_to_text
 from wesearch.fetch.providers import google_news, reddit, x
 from wesearch.fetch.providers.fallback import fetch_with_reader_fallback
 from wesearch.fetch.providers.reader_proxy import fetch_reader_proxy
+from wesearch.types.errors import FetchError
 from wesearch.types.params import NO_BODY, NoBody
+from wesearch.types.urls import without_userinfo
 
 
 if TYPE_CHECKING:
@@ -44,6 +47,9 @@ else:
 
     _defused_etree = lazy_import("defusedxml.ElementTree")  # 7ms.
     _defused_common = lazy_import("defusedxml.common")  # 1ms.
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -77,9 +83,12 @@ def fetch_web(
 ) -> FetchResult:
     """Fetch a URL and render its response to clean text.
 
-    A GET goes to the matching site provider (Reddit, Google News, X), else
-    through a ladder that retries 403/429/503 via the reader proxy. A POST is
-    fetched directly. The body is rendered by kind: an RSS/Atom feed to
+    A GET goes to the matching site provider (Reddit, Google News, X); when
+    there is none, or it fails, the page is fetched like any other: curl, then
+    the browser for a bot wall, a page a script or refresh fills, or a
+    firewall's bare refusal, then the reader proxy for a failure another IP
+    can clear. A POST is fetched directly. The body is rendered by kind: an
+    RSS/Atom feed to
     markdown, reader-proxy markdown and JSON as-is, Reddit JSON via its
     formatters, and HTML via ``policy.extractor``.
 
@@ -116,7 +125,8 @@ def fetch_web(
     text = _extract_text(
         body,
         kind=kind,
-        url=url,
+        # The base for relative links, which land in the text: never credentials.
+        url=without_userinfo(url)[0],
         extractor=(policy or PolicyParams()).extractor,
     )
     if max_chars is None:
@@ -137,29 +147,19 @@ def _fetch_body(
     """Fetch a URL and classify the response for downstream extraction."""
     policy = PolicyParams() if policy is None else policy
     if method == "GET":
-        if reddit.matches(url):
-            body, payload = reddit.fetch_reddit(url, policy=policy, session=session)
-            # The public export serves only the RSS payload; the JSON ones need OAuth.
-            kind = {
-                "rss": "rss",
-            }[payload]
-            _raise_success_challenge(url, body)
-            return body, kind
-        if google_news.matches(url):
-            body, news_payload = google_news.fetch_google_news(
+        # A site provider is a better route to the page, never the only one: when
+        # it fails, the page is fetched like any other.
+        try:
+            routed = _fetch_via_provider(url, policy=policy, session=session)
+        except FetchError:
+            logger.info(
+                "Provider route failed for %s; fetching it.",
                 url,
-                policy=policy,
-                session=session,
+                exc_info=True,
             )
-            news_kind = "rss" if news_payload == "rss" else "html"
-            _raise_success_challenge(url, body)
-            return body, news_kind
-        if x.matches(url):
-            return fetch_reader_proxy(
-                url,
-                policy=policy,
-                session=session,
-            ), "markdown"
+            routed = None
+        if routed is not None:
+            return routed
         body, via_proxy = fetch_with_reader_fallback(
             url,
             policy=policy,
@@ -181,6 +181,34 @@ def _fetch_body(
     )
     _raise_success_challenge(url, body)
     return body, "html"
+
+
+def _fetch_via_provider(
+    url: str,
+    *,
+    policy: PolicyParams,
+    session: FetchSession | None,
+) -> tuple[bytes, str] | None:
+    """Fetch ``url`` through its site's provider; ``None`` when no provider owns it."""
+    if reddit.matches(url):
+        body, payload = reddit.fetch_reddit(url, policy=policy, session=session)
+        # The public export serves only the RSS payload; the JSON ones need OAuth.
+        kind = {
+            "rss": "rss",
+        }[payload]
+        _raise_success_challenge(url, body)
+        return body, kind
+    if google_news.matches(url):
+        body, news_payload = google_news.fetch_google_news(
+            url,
+            policy=policy,
+            session=session,
+        )
+        _raise_success_challenge(url, body)
+        return body, "rss" if news_payload == "rss" else "html"
+    if x.matches(url):
+        return fetch_reader_proxy(url, policy=policy, session=session), "markdown"
+    return None
 
 
 def _raise_success_challenge(url: str, body: bytes) -> None:
@@ -332,8 +360,7 @@ def _append_rss_item(item: Element[str], lines: list[str]) -> None:
     if link:
         lines.append(link)
     # The first cluster entry duplicates the item title; siblings follow.
-    description = _child_text(item, "description")
-    cluster = _parse_rss_cluster(description) if description else []
+    cluster = _parse_rss_cluster(_child_text(item, "description"))
     for sibling_title, sibling_link, sibling_source in cluster[1:]:
         suffix = f" -- {sibling_source}" if sibling_source else ""
         lines.append(f"- [{sibling_title}]({sibling_link}){suffix}")

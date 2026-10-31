@@ -19,7 +19,8 @@ from wesearch.fetch import (
     RequestParams,
     fetch,
 )
-from wesearch.types.errors import FetchError
+from wesearch.fetch.challenge import is_wall_title
+from wesearch.types.errors import CloudflareChallengeError, FetchError
 
 
 __all__ = [
@@ -92,4 +93,8 @@ def fetch_reader_proxy(
     # The proxy reports its own failure inside a 200 body.
     if re.search(rb"Warning:\s*Target URL returned error \d{3}", body, re.IGNORECASE):
         raise FetchError(url, 502, {}, body[:200])
+    # And renders a wall the target served it as if it were the page (Quora).
+    title = re.match(rb"\s*Title:\s*(.*)", body)
+    if title is not None and is_wall_title(title[1].decode(errors="replace")):
+        raise CloudflareChallengeError(url=url, status=200, body=body[:2000])
     return body

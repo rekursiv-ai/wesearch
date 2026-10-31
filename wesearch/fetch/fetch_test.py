@@ -14,9 +14,9 @@ from http import client
 from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, Mock, call, patch
 
-import base64
 import importlib
 import inspect
+import logging
 import math
 
 from curl_cffi import requests as cc_requests
@@ -36,10 +36,10 @@ from wesearch.fetch import (
 )
 from wesearch.fetch.fetch import (
     _send,
-    _without_userinfo,
     egress_ip,
     resolve_transport,
 )
+from wesearch.fetch.gate import gated
 from wesearch.fetch.session import default_session
 from wesearch.fetch.transport import transport_routing, zendriver
 from wesearch.fetch.types import Closable, CurlKey, Fetch
@@ -66,6 +66,21 @@ if TYPE_CHECKING:
 # A public egress, so ``fetch`` never probes for one.
 _EGRESS = "203.0.113.1"
 
+# Markup from pages that broke a fetch on 2026-10-30, cut to what decides it:
+# Kaggle's app shell, PyTorch's redirect stub, and AWS WAF's challenge.
+_APP_SHELL = (
+    b'<!DOCTYPE html><html><head><script src="/app.js"></script></head>'
+    b'<body><div id="root"></div></body></html>'
+)
+_REDIRECT_STUB = (
+    b"<!DOCTYPE html><title>Redirecting&hellip;</title>"
+    b'<meta http-equiv="refresh" content="0; url=../2.15/x.html">'
+)
+_AWS_WAF_WALL = (
+    b"<!DOCTYPE html><html><head><title></title></head><body>"
+    b"<script>AwsWafIntegration.getToken()</script></body></html>"
+)
+
 
 @pytest.fixture(name="session")
 def session_fixture() -> Iterator[FetchSession]:
@@ -85,35 +100,29 @@ def test_fetch_uses_transport_package_layout() -> None:
         importlib.import_module(f"wesearch.fetch.transport.{module}")
 
 
-class TestWithoutUserinfo:
-    def test_no_userinfo(self) -> None:
-        assert _without_userinfo("https://example.com/p?q=1") == (
-            "https://example.com/p?q=1",
-            "",
-        )
+class TestCredentialedUrls:
+    """A ``user:pass@`` URL authenticates the request and appears nowhere else."""
 
-    def test_user_pass_stripped_and_encoded(self) -> None:
-        url, auth = _without_userinfo("https://u:p@example.com:8443/x")
-        assert url == "https://example.com:8443/x"
-        assert auth == "Basic " + base64.b64encode(b"u:p").decode()
-
-    def test_pct_decoded_credentials(self) -> None:
-        url, auth = _without_userinfo("https://u%40x:p%3Aw@example.com/")
-        assert url == "https://example.com/"
-        assert auth == "Basic " + base64.b64encode(b"u@x:p:w").decode()
-
-    def test_user_only(self) -> None:
-        url, auth = _without_userinfo("https://u@example.com/")
-        assert url == "https://example.com/"
-        assert auth == "Basic " + base64.b64encode(b"u:").decode()
-
-    def test_password_only_and_at_sign_in_password(self) -> None:
-        assert _without_userinfo("https://:pass@example.com/path")[1] == (
-            "Basic OnBhc3M="
-        )
-        assert _without_userinfo("https://u:p@ss@example.com/path")[0] == (
-            "https://example.com/path"
-        )
+    def test_a_block_and_the_gate_name_the_url_without_its_credentials(
+        self,
+        session: FetchSession,
+    ) -> None:
+        with (
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                side_effect=PuzzleChallengeError("challenge served"),
+            ),
+            patch("wesearch.fetch.fetch.gated", wraps=gated) as gate,
+            pytest.raises(PuzzleChallengeError) as error,
+        ):
+            fetch.fetch(
+                "https://u:secret@walled.example/x",
+                request=_curl(),
+                session=session,
+            )
+        assert "secret" not in str(error.value)
+        assert error.value.url == "https://walled.example/x"
+        assert gate.call_args.args == ("https://walled.example/x",)
 
 
 class TestUrlParams:
@@ -310,6 +319,68 @@ class TestFetchRetry:
                 )
                 == b"ok"
             )
+
+    @pytest.mark.parametrize(
+        ("status", "retried"),
+        [
+            (0, True),
+            (429, True),
+            (500, True),
+            (502, True),
+            (503, True),
+            (504, True),
+            (403, False),
+            (430, False),
+            (501, False),
+            (505, False),
+        ],
+    )
+    def test_only_a_transient_status_retries(
+        self,
+        session: FetchSession,
+        status: int,
+        retried: bool,
+    ) -> None:
+        backend = Mock(side_effect=[FetchError("u", status, {}, b""), b"ok"])
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", backend),
+            patch("wesearch.fetch.fetch.time.sleep"),
+        ):
+            if retried:
+                assert (
+                    fetch.fetch(
+                        "https://example.com",
+                        request=_curl(retry=RetryParams(retries=1)),
+                        session=session,
+                    )
+                    == b"ok"
+                )
+            else:
+                with pytest.raises(FetchError):
+                    fetch.fetch(
+                        "https://example.com",
+                        request=_curl(retry=RetryParams(retries=1)),
+                        session=session,
+                    )
+        assert backend.call_count == 1 + retried
+
+    def test_a_cookie_that_cannot_be_saved_is_logged_not_raised(
+        self,
+        session: FetchSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with (
+            _serve(_response(200, b"ok", [("set-cookie", "a=1; Path=/")])),
+            patch.object(session.profiles, "save", side_effect=OSError("disk full")),
+            caplog.at_level(logging.WARNING, logger="wesearch.fetch.fetch"),
+        ):
+            assert (
+                fetch.fetch("https://jar.example/", request=_curl(), session=session)
+                == b"ok"
+            )
+        assert [r.getMessage() for r in caplog.records] == [
+            "could not save cookies for jar.example",
+        ]
 
     def test_no_retry_on_404(self, session: FetchSession) -> None:
         connection = _StdlibConnection(_http_response(404, b"NF"))
@@ -531,6 +602,24 @@ class TestOnResponse:
 
 class TestRedirectIdentityScoping:
     """Cross-origin redirects re-scope every origin-bound identity element."""
+
+    def test_a_kept_google_result_link_lands_on_its_target(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # Google search keeps a result under its ``/goto`` link when the link did
+        # not resolve; fetching it must land on the page, not Google's 302.
+        with _serve(
+            _response(302, b"", [("location", "https://arxiv.org/abs/1706.03762")]),
+            _response(content=b"<title>Attention Is All You Need</title>"),
+        ) as request:
+            body = fetch.fetch(
+                "https://www.google.com/goto?url=CAESWwHr",
+                request=_curl(),
+                session=session,
+            )
+        assert body == b"<title>Attention Is All You Need</title>"
+        assert request.call_args_list[1].args[1] == "https://arxiv.org/abs/1706.03762"
 
     def test_302_post_downgrades_to_bodyless_get(self, session: FetchSession) -> None:
         # A 301/302 POST becomes a bodyless GET; only 307/308 keep the method.
@@ -1478,7 +1567,7 @@ class TestBrowserBackend:
 
 
 class TestCurlThenZendriverBackend:
-    """``transport="curl-then-zendriver"``: curl first, zendriver only on a bot block."""
+    """``transport="curl-then-zendriver"``: curl first, zendriver on a block."""
 
     def test_curl_then_zendriver_inherits_zendriver_restrictions(self) -> None:
         with pytest.raises(
@@ -1544,6 +1633,226 @@ class TestCurlThenZendriverBackend:
         via.assert_called_once()
         remember.assert_called_once_with("walled.example")
 
+    @pytest.mark.parametrize(
+        ("content_type", "browser", "expected"),
+        [
+            # A firewall's bare HTML 403 that the browser gets past: learned.
+            ("text/html; charset=utf-8", b"rendered", b"rendered"),
+            # The site refuses the browser too: its own 403, so nothing learned.
+            ("text/html", FetchError("u", 403, {}, b"no"), FetchError),
+            # An API's JSON 403 is a bad key; Chrome would only render it.
+            ("application/json", b"unused", FetchError),
+        ],
+    )
+    def test_a_bare_html_403_gets_one_browser_try(
+        self,
+        session: FetchSession,
+        content_type: str,
+        browser: bytes | FetchError,
+        expected: bytes | type[FetchError],
+    ) -> None:
+        refused = FetchError("u", 403, {"Content-Type": content_type}, b"Denied")
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", side_effect=refused),
+            patch.object(zendriver, "fetch_zendriver", side_effect=[browser]) as via,
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+        ):
+            if isinstance(expected, bytes):
+                assert (
+                    fetch.fetch(
+                        "https://akamai.example/",
+                        request=_curl_then_zendriver(),
+                        session=session,
+                    )
+                    == expected
+                )
+            else:
+                with pytest.raises(expected) as error:
+                    fetch.fetch(
+                        "https://akamai.example/",
+                        request=_curl_then_zendriver(),
+                        session=session,
+                    )
+                assert error.value.status == 403
+        assert [call.args[0] for call in via.call_args_list] == (
+            ["https://akamai.example/"] if "html" in content_type else []
+        )
+        assert remember.call_count == isinstance(expected, bytes)
+        if remember.called:
+            remember.assert_called_once_with("akamai.example")
+
+    @pytest.mark.parametrize(
+        ("landed", "rendered"),
+        [
+            # operations.nfl.com, 2026-10-30: curl alone is sent to a 404 route.
+            ("https://ops.example/v2/ops?_rsc", True),
+            ("https://ops.example/", False),
+        ],
+    )
+    def test_a_404_reached_by_redirect_gets_one_browser_try(
+        self,
+        session: FetchSession,
+        landed: str,
+        rendered: bool,
+    ) -> None:
+        missing = FetchError(landed, 404, {"content-type": "text/html"}, b"Not found")
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", side_effect=missing),
+            patch.object(zendriver, "fetch_zendriver", return_value=b"page") as via,
+            patch.object(transport_routing, "remember_zendriver_domain"),
+        ):
+            if rendered:
+                assert (
+                    fetch.fetch(
+                        "https://ops.example/",
+                        request=_curl_then_zendriver(),
+                        session=session,
+                    )
+                    == b"page"
+                )
+            else:
+                with pytest.raises(FetchError):
+                    fetch.fetch(
+                        "https://ops.example/",
+                        request=_curl_then_zendriver(),
+                        session=session,
+                    )
+        assert via.call_count == rendered
+
+    def test_a_short_page_with_nothing_to_run_never_reaches_the_browser(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # Curl already has the whole page; a browser could only fail where curl
+        # succeeded.
+        page = b"<!doctype html><html><body><p>OK</p></body></html>"
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                side_effect=FetchError("u", 0, {}, b"timed out"),
+            ) as via,
+        ):
+            assert (
+                fetch.fetch(
+                    "https://short.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == page
+            )
+        via.assert_not_called()
+
+    def test_a_failed_render_raises_rather_than_passing_off_the_shell(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # The shell has no content; returning it as the page hid a timed-out
+        # render as a success.
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=_APP_SHELL),
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                side_effect=FetchError("https://app.example/", 0, {}, b"timed out"),
+            ),
+            pytest.raises(FetchError, match="connection failed"),
+        ):
+            fetch.fetch(
+                "https://app.example/",
+                request=_curl_then_zendriver(),
+                session=session,
+            )
+
+    def test_a_shell_is_kept_where_no_browser_can_run(
+        self,
+        session: FetchSession,
+    ) -> None:
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=_REDIRECT_STUB),
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                side_effect=zendriver.BrowserUnavailableError("no Chrome"),
+            ),
+        ):
+            assert (
+                fetch.fetch(
+                    "https://docs.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == _REDIRECT_STUB
+            )
+
+    @pytest.mark.parametrize(
+        ("rendered", "expected"),
+        [
+            (b"<html><body>" + b"word " * 200 + b"</body></html>", "rendered"),
+            (b"<html><body>tiny</body></html>", "shell"),
+        ],
+    )
+    def test_a_shell_is_rendered_and_the_fuller_page_wins(
+        self,
+        session: FetchSession,
+        rendered: bytes,
+        expected: str,
+    ) -> None:
+        shell = _REDIRECT_STUB
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=shell),
+            patch.object(zendriver, "fetch_zendriver", side_effect=[rendered]) as via,
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+        ):
+            body = fetch.fetch(
+                "https://docs.example/",
+                request=_curl_then_zendriver(),
+                session=session,
+            )
+        assert body == (rendered if expected == "rendered" else shell)
+        assert [call.args[0] for call in via.call_args_list] == [
+            "https://docs.example/",
+        ]
+        remember.assert_not_called()
+
+    def test_a_page_with_content_is_not_rendered(self, session: FetchSession) -> None:
+        page = b"<!doctype html><p>" + b"word " * 200 + b"</p>"
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
+            patch.object(zendriver, "fetch_zendriver") as via,
+        ):
+            assert (
+                fetch.fetch(
+                    "https://ok.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == page
+            )
+        via.assert_not_called()
+
+    def test_a_wall_served_with_a_success_status_goes_to_the_browser(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # Semantic Scholar and IMDb serve AWS WAF's challenge with a 202.
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=_AWS_WAF_WALL),
+            patch.object(zendriver, "fetch_zendriver", return_value=b"paper") as via,
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+        ):
+            assert (
+                fetch.fetch(
+                    "https://waf.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == b"paper"
+            )
+        via.assert_called_once()
+        remember.assert_called_once_with("waf.example")
+
     def test_raw_headers_request_still_runs_the_body_validator(
         self,
         session: FetchSession,
@@ -1572,6 +1881,37 @@ class TestCurlThenZendriverBackend:
                 session=session,
             )
         assert seen == [b"<form id=x>"]
+
+    def test_a_validator_block_names_the_page_to_clear_it_on(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # A provider's validator sees only the body, so its error named no page
+        # and told nobody to open the browser that clears it.
+        def validate_body(body: bytes) -> None:
+            raise PuzzleChallengeError("challenge served", body=body)
+
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"<form id=x>"),
+            pytest.raises(PuzzleChallengeError) as error,
+        ):
+            fetch.fetch(
+                "https://raw.example/",
+                request=RequestParams(
+                    content=ContentParams(
+                        headers={"User-Agent": "x"},
+                        raw_headers=True,
+                    ),
+                    observe=ObserveParams(body_validator=validate_body),
+                ),
+                session=session,
+            )
+        assert error.value.url == "https://raw.example/"
+        assert error.value.body == b"<form id=x>"
+        assert str(error.value) == (
+            "challenge served Run `zendriver https://raw.example/` and solve the "
+            "challenge; the site unlocks once its page loads."
+        )
 
     def test_success_body_challenge_falls_back_and_remembers_domain(
         self,

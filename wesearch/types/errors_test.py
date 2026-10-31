@@ -26,6 +26,17 @@ class TestFetchErrorConstruction:
         assert err.body == b"missing"
         assert str(err) == "HTTP 404: https://x.com/doc"
 
+    def test_a_message_never_carries_credentials(self) -> None:
+        # The ``url`` attribute is the caller's own input; the message reaches
+        # logs, tool output, and reports.
+        assert str(FetchError("https://u:secret@x.com/d", 404, {}, b"")) == (
+            "HTTP 404: https://x.com/d"
+        )
+        assert "secret" not in str(FetchError("https://u:secret@x.com/", 0, {}, b""))
+        blocked = PuzzleChallengeError("walled", url="https://u:secret@x.com/")
+        assert "secret" not in str(blocked)
+        assert "secret" not in PuzzleChallengeError.explain("https://u:secret@x.com/")
+
     def test_connection_error_decodes_and_strips_body(self) -> None:
         err = FetchError("https://x.com/doc", 0, {}, b"  refused\n")
         assert str(err) == "connection failed: https://x.com/doc: refused"

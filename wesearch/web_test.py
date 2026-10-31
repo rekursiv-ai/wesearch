@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from defusedxml import ElementTree
 
@@ -146,15 +146,87 @@ def test_fetch_web_reddit_rss_renders_feed() -> None:
     assert "/u/commenter" in result.text
 
 
-def test_fetch_web_reddit_error_surfaces() -> None:
-    """A FetchError from the Reddit provider propagates to the caller."""
-    err = FetchError(url="https://x", status=403, headers={}, body=b"blocked")
+@pytest.mark.parametrize(
+    ("provider", "url"),
+    [
+        ("reddit.fetch_reddit", "https://reddit.com/r/foo/comments/abc"),
+        ("google_news.fetch_google_news", "https://news.google.com/"),
+        ("fetch_reader_proxy", "https://x.com/user/status/1"),
+    ],
+)
+def test_a_failed_provider_route_falls_back_to_fetching_the_page(
+    provider: str,
+    url: str,
+) -> None:
+    # A provider is a better route, not the only one: Reddit's RSS, Google
+    # News's feed, and the reader proxy each fail in ways the page does not.
+    err = FetchError(url=url, status=403, headers={}, body=b"blocked")
     with (
-        patch("wesearch.web.reddit.fetch_reddit", side_effect=err),
-        pytest.raises(FetchError) as exc_info,
+        patch(f"wesearch.web.{provider}", side_effect=err),
+        patch(
+            "wesearch.web.fetch_with_reader_fallback",
+            return_value=(b"<html><body>page</body></html>", False),
+        ) as generic,
+    ):
+        result = fetch_web(url)
+    assert result.text.strip() == "page"
+    assert generic.call_args.args == (url,)
+
+
+def test_an_x_page_curl_gets_as_a_shell_is_rendered_by_the_shared_ladder() -> None:
+    # X serves curl a 200 JavaScript shell. With the reader proxy unavailable,
+    # the page must still come back rendered, by the same path as any site.
+    shell = (
+        b"<!DOCTYPE html><html><body><div id=react-root></div>"
+        b'<script src="/main.js"></script></body></html>'
+    )
+    post = b"<!DOCTYPE html><html><body><article>" + b"post text " * 80
+    with (
+        patch(
+            "wesearch.web.fetch_reader_proxy",
+            side_effect=FetchError("u", 0, {}, b"third-party render not allowed"),
+        ),
+        patch("wesearch.fetch.fetch.fetch_curl", return_value=shell),
+        patch(
+            "wesearch.fetch.transport.zendriver.fetch_zendriver",
+            return_value=post,
+        ) as browser,
+    ):
+        result = fetch_web(
+            "https://x.com/user/status/1",
+            session=FetchSession(egress="203.0.113.1"),
+        )
+    assert "post text" in result.text
+    assert browser.call_args.args == ("https://x.com/user/status/1",)
+
+
+def test_the_fallback_keeps_the_callers_transport() -> None:
+    # No per-site transport: a shell X serves curl is rendered by the shared
+    # retry ladder in ``fetch``, like any other site's.
+    with (
+        patch(
+            "wesearch.web.fetch_reader_proxy",
+            side_effect=FetchError("u", 0, {}, b""),
+        ),
+        patch(
+            "wesearch.web.fetch_with_reader_fallback",
+            return_value=(b"<p>post</p>", False),
+        ) as generic,
+    ):
+        fetch_web("https://x.com/u/status/1", policy=PolicyParams(transport="curl"))
+    assert generic.call_args == call(
+        "https://x.com/u/status/1",
+        policy=PolicyParams(transport="curl"),
+        session=None,
+    )
+
+
+def test_a_non_fetch_failure_in_a_provider_is_not_swallowed() -> None:
+    with (
+        patch("wesearch.web.reddit.fetch_reddit", side_effect=ValueError("bad")),
+        pytest.raises(ValueError, match="bad"),
     ):
         fetch_web("https://reddit.com/r/foo/comments/abc")
-    assert exc_info.value.status == 403
 
 
 def test_fetch_web_google_news_routes_to_rss() -> None:
@@ -186,6 +258,20 @@ def test_fetch_web_google_news_html_payload() -> None:
     assert result.kind == "html"
     assert result.text.strip() == "article"
     assert "<body>" not in result.text
+
+
+def test_links_in_the_text_never_carry_the_urls_credentials() -> None:
+    # SearXNG behind Basic auth, 2026-10-30: the probe's report printed the
+    # password inside every relative link the page had.
+    with patch(
+        "wesearch.web.fetch_with_reader_fallback",
+        return_value=(b'<html><body><a href="/about">About</a></body></html>', False),
+    ) as generic:
+        result = fetch_web("https://u:secret@search.example/")
+    assert "secret" not in result.text
+    assert "https://search.example/about" in result.text
+    # The request itself still authenticates.
+    assert generic.call_args.args == ("https://u:secret@search.example/",)
 
 
 def test_fetch_web_x_routes_to_markdown() -> None:

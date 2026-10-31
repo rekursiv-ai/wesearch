@@ -8,7 +8,7 @@ import pytest
 
 from wesearch.fetch import FetchSession, PolicyParams, RequestParams, RetryParams
 from wesearch.fetch.providers import reader_proxy
-from wesearch.types.errors import FetchError
+from wesearch.types.errors import CloudflareChallengeError, FetchError
 
 
 class TestThirdPartyConsent:
@@ -101,6 +101,43 @@ class TestFetch:
         with patch.object(reader_proxy, "fetch", fake_fetch):
             reader_proxy.fetch_reader_proxy("https://x.com/a", policy=PolicyParams())
         assert seen["headers"] == {"Authorization": "Bearer jina_secret"}
+
+    @pytest.mark.parametrize(
+        ("title", "walled"),
+        [("Just a moment...", True), ("Just a moment: a history", False)],
+    )
+    def test_a_rendered_cloudflare_wall_raises(self, title: str, walled: bool) -> None:
+        # Verbatim shape of the proxy's render of Quora on 2026-10-30.
+        body = (
+            f"Title: {title}\n\nURL Source: https://quora.com/\n\n"
+            "Markdown Content:\nVerify you are human."
+        ).encode()
+
+        def fake_fetch(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
+            return body
+
+        with patch.object(reader_proxy, "fetch", fake_fetch):
+            if not walled:
+                assert (
+                    reader_proxy.fetch_reader_proxy(
+                        "https://quora.com/",
+                        policy=PolicyParams(),
+                    )
+                    == body
+                )
+                return
+            with pytest.raises(CloudflareChallengeError) as raised:
+                reader_proxy.fetch_reader_proxy(
+                    "https://quora.com/",
+                    policy=PolicyParams(),
+                )
+        assert raised.value.url == "https://quora.com/"
 
     def test_soft_fail_sentinel_raises(self) -> None:
         soft = b"A" * 200 + b"Warning: Target URL returned error 404 while fetching"

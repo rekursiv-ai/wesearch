@@ -479,6 +479,7 @@ async def _drive(
     on_redirect: Callable[[str], None] = ignore,
     on_response: Callable[[int, dict[str, str], str], None] = ignore,
     allow_private_hosts: bool = False,
+    shell_wait_sec: float = 5.0,
 ) -> bytes:
     """Run :func:`_load` on ``browser`` through a stub pool."""
     return await _load(
@@ -493,6 +494,8 @@ async def _drive(
         on_redirect=on_redirect,
         on_response=on_response,
         allow_private_hosts=allow_private_hosts,
+        shell_wait_sec=shell_wait_sec,
+        shell_poll_sec=0.01,
     )
 
 
@@ -856,6 +859,71 @@ def test_load_unwraps_the_real_chrome_viewer_markup() -> None:
     assert _load_page(browser) == payload.encode()
 
 
+_FILLED = "<html><body><p>" + "word " * 200 + "</p></body></html>"
+_APP_SHELL = (
+    '<html><body><div id=root></div><script src="/app.js"></script></body></html>'
+)
+
+
+def test_load_waits_for_a_script_to_fill_a_shell() -> None:
+    """A page whose content a script fills in place must be read once filled.
+
+    claude.com, 2026-10-30: under load, Chrome reported the page complete
+    before its scripts ran, and 13 of 16 renders returned 13 visible chars.
+    No navigation follows hydration, so only re-reading sees it.
+    """
+
+    class _HydratingTab(_ScriptedTab):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        @override
+        async def get_content(self) -> str:
+            self.reads += 1
+            return _APP_SHELL if self.reads < 3 else _FILLED
+
+    tab = _HydratingTab()
+    body = asyncio.run(_drive(_browser_with(tab), timeout_sec=10.0, shell_wait_sec=2.0))
+    assert body == _FILLED.encode()
+    assert tab.reads == 3
+
+
+def test_load_returns_an_app_shell_that_never_fills_at_its_budget() -> None:
+    browser = _FakeBrowser(content=_APP_SHELL)
+    started = time.monotonic()
+    body = asyncio.run(_drive(browser, timeout_sec=10.0, shell_wait_sec=0.2))
+    assert body == _APP_SHELL.encode()
+    assert 0.2 <= time.monotonic() - started < 2.0
+
+
+def test_load_does_not_wait_on_a_short_page_with_no_script() -> None:
+    page = "<html><body>tiny</body></html>"
+    browser = _FakeBrowser(content=page)
+    started = time.monotonic()
+    body = asyncio.run(_drive(browser, timeout_sec=10.0, shell_wait_sec=5.0))
+    assert body == page.encode()
+    assert time.monotonic() - started < 1.0
+
+
+def test_load_judges_a_viewed_json_payload_not_chromes_wrapper() -> None:
+    """A JSON result naming a vendor must not hold the settle to its deadline.
+
+    The wrapper is HTML, so the payload's ``captcha-delivery.com`` read as a
+    DataDome wall and the settle polled for half the budget before returning.
+    """
+    payload = '{"results": [{"snippet": "blocked by captcha-delivery.com"}]}'
+    browser = _FakeBrowser(
+        content=(
+            '<html><head><meta name="color-scheme" content="light dark">'
+            f"</head><body><pre>{payload}</pre></body></html>"
+        ),
+    )
+    assert _load_page(browser, timeout_sec=30.0) == payload.encode()
+    assert browser.last_tab is not None
+    assert browser.last_tab.content_reads == 1
+
+
 def test_load_leaves_real_html_alone() -> None:
     """A genuine page containing a ``<pre>`` must not be reduced to it."""
     content = "<html><body><h1>Title</h1><pre>code sample</pre></body></html>"
@@ -1131,6 +1199,20 @@ def test_load_allows_embedded_captcha_on_rendered_page() -> None:
 # -- _load page guard: redirect hops, pinning, credentials -------------------
 
 
+def _paused_patterns(tab: _FakeTab) -> list[dict[str, str]]:
+    """Return the request patterns the tab's ``Fetch.enable`` paused on."""
+    enable = next(
+        c
+        for c in tab.wire_commands
+        if from_plain(c.get("method"), str, default="") == "Fetch.enable"
+    )
+    return from_plain(
+        from_plain(enable.get("params"), dict[str, object], default={}).get("patterns"),
+        list[dict[str, str]],
+        default=[],
+    )
+
+
 def _continued_headers(tab: _FakeTab) -> dict[str, str]:
     """Return the headers the guard released a continued request with."""
     payload = next(
@@ -1208,8 +1290,9 @@ def _request_paused(
     headers: dict[str, str] | None = None,
     *,
     request_id: str = "req-1",
+    resource_type: network.ResourceType = network.ResourceType.DOCUMENT,
 ) -> fetch.RequestPaused:
-    """Return a real ``RequestPaused`` for a main-frame document request."""
+    """Return a real ``RequestPaused``, by default for a main-frame document."""
     request = network.Request(
         url=url,
         method="GET",
@@ -1221,7 +1304,7 @@ def _request_paused(
         request_id=fetch.RequestId(request_id),
         request=request,
         frame_id=page.FrameId("main"),
-        resource_type=network.ResourceType.DOCUMENT,
+        resource_type=resource_type,
         response_error_reason=None,
         response_status_code=None,
         response_status_text=None,
@@ -1301,6 +1384,42 @@ class TestBrowserHonorsPrivateHostsPerHop:
         assert "authorization" not in _extra_http_headers(tab)
         # A non-credential header is not the hazard and must still travel.
         assert _extra_http_headers(tab).get("accept") == "text/html"
+
+    def test_a_same_origin_subresource_carries_credentials_and_is_not_a_hop(
+        self,
+    ) -> None:
+        """A site behind Basic auth must get its CSS and scripts authenticated.
+
+        SearXNG behind Basic auth, 2026-10-30: its CSS answered an unauthenticated
+        request 401, Chrome waited on a login prompt, and the load timed out.
+        """
+        hops: list[str] = []
+        browser = _FakeBrowser(
+            paused_events=[
+                _request_paused(
+                    "https://public.example/static/app.css",
+                    resource_type=network.ResourceType.STYLESHEET,
+                ),
+            ],
+        )
+        tab = self._run(
+            browser,
+            headers={"Authorization": "Basic dTpw"},
+            on_redirect=hops.append,
+            max_redirects=0,
+        )
+        assert _continued_headers(tab)["authorization"] == "Basic dTpw"
+        assert hops == []
+        # No resource type: Chrome rejects some of the enum's values in a filter.
+        assert {
+            "urlPattern": "https://public.example/*",
+            "requestStage": "Request",
+        } in _paused_patterns(tab)
+
+    def test_without_credentials_only_documents_are_paused(self) -> None:
+        assert _paused_patterns(self._run(_FakeBrowser())) == [
+            {"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"},
+        ]
 
     def test_caller_headers_survive_a_same_origin_hop(self) -> None:
         # Same origin is what the header was seeded FOR.
@@ -1664,6 +1783,40 @@ def test_load_returns_promptly_when_the_wall_clears_off_loop(
         assert runner.run(go()) < 0.5
 
 
+def test_load_waits_for_an_imminent_meta_refresh() -> None:
+    # Google's enablejs page, 2026-10-30: the first read landed before its
+    # zero-second refresh fired, so the search returned the stub.
+    stub = '<html><meta http-equiv="refresh" content="0;url=/next"></html>'
+    real = "<html><title>Results</title>ten results</html>"
+
+    class _RefreshingTab(_ScriptedTab):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        @override
+        async def get_content(self) -> str:
+            self.reads += 1
+            if self.reads == 1:
+                for handler in self.handlers:
+                    handler(_main_frame_navigated())
+                return stub
+            return real
+
+    tab = _RefreshingTab()
+    body = asyncio.run(_drive(_browser_with(tab), timeout_sec=2.0))
+    assert body == real.encode()
+    assert tab.reads == 2
+
+
+def test_load_returns_a_slow_meta_refresh_page_at_once() -> None:
+    page = '<html><meta http-equiv="refresh" content="300;url=/next">news</html>'
+    browser = _FakeBrowser(content=page)
+    assert _load_page(browser, timeout_sec=30.0) == page.encode()
+    assert browser.last_tab is not None
+    assert browser.last_tab.content_reads == 1
+
+
 def test_load_bounds_a_stalled_document_parse() -> None:
     """The settle budget must bound the whole settle, parse included."""
     wall = "<html><title>Just a moment...</title></html>"
@@ -1941,8 +2094,10 @@ def test_pool_rejects_mode_change_for_live_profile(connects: _Connects) -> None:
 
         async def go() -> None:
             await pool.browser(_PROFILE, headless=True)
+            # A browser that cannot serve this mode is unavailable to the caller,
+            # so a search moves on to its next backend.
             with pytest.raises(
-                RuntimeError,
+                zendriver.BrowserUnavailableError,
                 match=(
                     r"^"
                     + re.escape(
@@ -1976,7 +2131,10 @@ def test_pool_serializes_concurrent_mode_changes(connects: _Connects) -> None:
     finally:
         pool.shutdown()
     assert len(connects.browsers) == 1
-    assert sum(isinstance(result, RuntimeError) for result in results) == 1
+    assert (
+        sum(isinstance(result, zendriver.BrowserUnavailableError) for result in results)
+        == 1
+    )
 
 
 def test_pool_reconnects_a_dead_connection(connects: _Connects) -> None:
@@ -2661,6 +2819,19 @@ def test_devtools_port_reads_the_singleton_owner_command(tmp_path: Path) -> None
         + f"--user-data-dir={profile}\0".encode()
         + b"--remote-debugging-port=4567\0"
         + b"about:blank\0",
+    )
+    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
+
+
+def test_devtools_port_takes_the_pid_after_a_dashed_hostname(tmp_path: Path) -> None:
+    # Chrome names the lock ``<hostname>-<pid>``, and hostnames carry dashes.
+    profile = tmp_path / "profile"
+    process = tmp_path / "proc" / "123"
+    profile.mkdir()
+    process.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("my-dev-box-123")
+    (process / "cmdline").write_text(
+        f"chrome --user-data-dir={profile} --remote-debugging-port=4567",
     )
     assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
 

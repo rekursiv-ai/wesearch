@@ -22,6 +22,19 @@ from wesearch.search.types import SearchError, SearchResult
 from wesearch.types.errors import PuzzleChallengeError
 
 
+def test_duckduckgos_challenge_page_is_a_puzzle() -> None:
+    # The page DuckDuckGo served this IP's curl with a 202 on 2026-10-30, cut to
+    # what decides it.
+    body = (
+        b"<!DOCTYPE html><html><head><title>DuckDuckGo</title></head><body>"
+        b'<form id="challenge-form" action="//duckduckgo.com/anomaly.js">'
+        b"<div>Unfortunately, bots use DuckDuckGo too.</div></form></body></html>"
+    )
+    with pytest.raises(PuzzleChallengeError):
+        _duckduckgo_validate_body(body)
+    assert _duckduckgo_parse(body.decode(), 10) == []
+
+
 _HTML = """
 <div id="links">
   <div class="result web-result">

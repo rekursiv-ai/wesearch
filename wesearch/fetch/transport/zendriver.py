@@ -39,7 +39,12 @@ import warnings
 
 from treekle import from_plain
 
-from wesearch.fetch.challenge import classify_challenge, classify_http_error
+from wesearch.fetch.challenge import (
+    classify_challenge,
+    classify_http_error,
+    is_shell,
+    redirects_soon,
+)
 from wesearch.fetch.common import (
     ORIGIN_BOUND,
     cookie_header,
@@ -242,7 +247,7 @@ class BrowserPool:
           browser: The connection.
 
         Raises:
-          RuntimeError: When the live connection has the other mode.
+          BrowserUnavailableError: When the live connection has the other mode.
 
         """
         key = str(profile_dir.resolve())  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
@@ -260,7 +265,7 @@ class BrowserPool:
             )
             if existing is not None and live:
                 if existing[0] != headless:
-                    raise RuntimeError(
+                    raise BrowserUnavailableError(
                         "Cannot change Zendriver launch mode for a live profile.",
                     )
                 return existing[1]
@@ -380,6 +385,8 @@ def main() -> int:
     return 0
 
 
+# ``shell_wait_sec`` bounds the wait for a script to fill a page that loaded
+# empty, which is re-read every ``shell_poll_sec``.
 async def _load(
     pool: BrowserPool,
     url: str,
@@ -393,6 +400,8 @@ async def _load(
     on_redirect: Callable[[str], None],
     on_response: Callable[[int, dict[str, str], str], None],
     allow_private_hosts: bool,
+    shell_wait_sec: float = 5.0,
+    shell_poll_sec: float = 0.25,
 ) -> bytes:
     """Load ``url`` in a new tab, closed after; report and return its page."""
     loop = asyncio.get_running_loop()
@@ -412,6 +421,10 @@ async def _load(
         if not isinstance(event, zendriver.cdp.fetch.RequestPaused):
             return
         target = event.request.url
+        if event.resource_type != zendriver.cdp.network.ResourceType.DOCUMENT:
+            # Paused only to carry the credentials (below); not a navigation.
+            _send(loop, tab, _with_credentials(event, credentials))
+            return
         is_hop = _wire_url(target) != _wire_url(position[0])
         position[0] = target
         refuse = zendriver.cdp.fetch.fail_request(
@@ -435,23 +448,7 @@ async def _load(
         if not credentials or origin(target) != origin(url):
             _send(loop, tab, zendriver.cdp.fetch.continue_request(event.request_id))
             return
-        replaced = {name.lower() for name in credentials}
-        kept = {
-            k: v
-            for k, v in from_plain(event.request.headers, dict[str, str]).items()
-            if k.lower() not in replaced
-        }
-        _send(
-            loop,
-            tab,
-            zendriver.cdp.fetch.continue_request(
-                event.request_id,
-                headers=[
-                    zendriver.cdp.fetch.HeaderEntry(name=k, value=v)
-                    for k, v in (kept | credentials).items()
-                ],
-            ),
-        )
+        _send(loop, tab, _with_credentials(event, credentials))
 
     def on_document(event: object, *_unused: object) -> None:
         if (
@@ -502,6 +499,9 @@ async def _load(
             register(zendriver.cdp.page.FrameNavigated, on_navigated)
             # Pages only: pausing every subresource stalls heavy pages past the
             # timeout.
+            # With credentials, the origin's subresources are paused too: a site
+            # behind Basic auth answers its CSS with a 401, and Chrome then waits
+            # on a login prompt that never comes, so the load times out.
             await tab.send(
                 zendriver.cdp.fetch.enable(
                     patterns=[
@@ -509,6 +509,16 @@ async def _load(
                             url_pattern="*",
                             resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
                             request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
+                        ),
+                        *(
+                            [
+                                zendriver.cdp.fetch.RequestPattern(
+                                    url_pattern=f"{origin(url)}/*",
+                                    request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
+                                ),
+                            ]
+                            if credentials
+                            else []
                         ),
                     ],
                 ),
@@ -527,22 +537,36 @@ async def _load(
                 )
             await tab.get(url)
             await tab.wait_for_ready_state("complete")
-            # A challenge's script loads the real page after its own load
-            # completes; mid-parse that page is an empty <head>, so wait for its
-            # ready state too. Half the budget, so a page still walled returns its
-            # wall, not a timeout. ``on_success_body``: a rendered page's CAPTCHA
-            # widget (a login form's) is not a wall.
+            # A challenge's script, and a meta refresh (Google's enablejs page,
+            # PyTorch's docs), load the real page after their own load completes;
+            # mid-parse that page is an empty <head>, so wait for its ready state
+            # too. Half the budget, so a page still walled returns its wall, not a
+            # timeout. ``on_success_body``: a rendered page's CAPTCHA widget (a
+            # login form's) is not a wall.
             deadline = loop.time() + timeout_sec / 2
+            shell_deadline = loop.time() + min(shell_wait_sec, timeout_sec / 2)
             while True:
                 # Before the read: a navigation between read and wait must count.
                 navigated.clear()
                 page = await tab.get_content()
+                payload = _unwrap_viewer(page)
                 remaining = deadline - loop.time()
-                if (
-                    classify_challenge(page, on_success_body=True) is None
-                    or remaining <= 0
-                ):
+                walled = classify_challenge(
+                    payload,
+                    on_success_body=True,
+                ) is not None or redirects_soon(page)
+                # Ready state "complete" can come before an app's scripts fill the
+                # page in place, with no navigation to wait on.
+                filling = (
+                    not walled
+                    and is_shell(payload.encode())
+                    and loop.time() < shell_deadline
+                )
+                if remaining <= 0 or not (walled or filling):
                     break
+                if filling:
+                    await asyncio.sleep(shell_poll_sec)
+                    continue
                 try:
                     await asyncio.wait_for(navigated.wait(), timeout=remaining)
                     await asyncio.wait_for(
@@ -584,19 +608,46 @@ async def _load(
     for hop_status, hop_headers, hop_url in pages[:-1]:
         on_response(hop_status, hop_headers, hop_url)
     on_response(status, received, landed)
-    # Chrome wraps a non-HTML response in its own viewer page; unwrap the payload.
-    # Chrome's JSON formatter mounts empty divs after the </pre>.
-    viewer = re.match(
-        r"^<html[^>]*>\s*<head>.*?color-scheme.*?</head>\s*"
-        r"<body[^>]*>\s*<pre[^>]*>(?P<payload>.*)</pre>"
-        r"(?:\s*<div[^>]*></div>)*\s*</body>\s*</html>$",
-        page.strip(),
-        re.DOTALL | re.IGNORECASE,
-    )
-    content = (unescape(viewer.group("payload")) if viewer else page).encode()
+    content = _unwrap_viewer(page).encode()
     if status >= 400:
         raise classify_http_error(landed, status, received, content)
     return content
+
+
+def _with_credentials(
+    event: zendriver.cdp.fetch.RequestPaused,
+    credentials: dict[str, str],
+) -> object:
+    """Return the command continuing ``event``'s request with ``credentials``."""
+    replaced = {name.lower() for name in credentials}
+    kept = {
+        k: v
+        for k, v in from_plain(event.request.headers, dict[str, str]).items()
+        if k.lower() not in replaced
+    }
+    return zendriver.cdp.fetch.continue_request(
+        event.request_id,
+        headers=[
+            zendriver.cdp.fetch.HeaderEntry(name=k, value=v)
+            for k, v in (kept | credentials).items()
+        ],
+    )
+
+
+def _unwrap_viewer(
+    page: str,
+    *,
+    # Chrome's JSON formatter mounts empty divs after the </pre>.
+    viewer: re.Pattern[str] = re.compile(
+        r"^<html[^>]*>\s*<head>.*?color-scheme.*?</head>\s*"
+        r"<body[^>]*>\s*<pre[^>]*>(?P<payload>.*)</pre>"
+        r"(?:\s*<div[^>]*></div>)*\s*</body>\s*</html>$",
+        re.DOTALL | re.IGNORECASE,
+    ),
+) -> str:
+    """Return the payload Chrome wraps a non-HTML response in, else ``page``."""
+    match = viewer.match(page.strip())
+    return unescape(match["payload"]) if match else page
 
 
 def _wire_url(url: str) -> str:
@@ -644,12 +695,14 @@ def _devtools_port(
         if command_file.is_file() or platform != "darwin":
             command = command_file.read_bytes().replace(b"\0", b" ").decode()
         else:
+            # pragma: no mutate start -- ``check=None`` is as falsy as ``False``.
             ps = subprocess.run(  # noqa: S603 -- PID is parsed as an integer.
                 ["/bin/ps", "-p", str(pid), "-o", "command="],
                 capture_output=True,
                 text=True,
                 check=False,
             )
+            # pragma: no mutate end
             if ps.returncode:
                 return None
             command = ps.stdout
@@ -657,8 +710,7 @@ def _devtools_port(
         return None
 
     def flag(marker: str) -> str:
-        _, found, rest = command.partition(marker)
-        return rest.partition(" --")[0].strip() if found else ""
+        return command.partition(marker)[2].partition(" --")[0].strip()
 
     if flag("--user-data-dir=") != str(profile_dir.resolve()):
         return None

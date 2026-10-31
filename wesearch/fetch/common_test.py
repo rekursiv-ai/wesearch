@@ -16,6 +16,7 @@ import pytest
 from wesearch.chrome.headers import chrome_client_hints
 from wesearch.fetch.common import (
     ORIGIN_BOUND,
+    DecompressionError,
     PendingRequest,
     bracket_ipv6,
     cookie_header,
@@ -578,6 +579,20 @@ class TestDecompress:
         )
         assert not frame[4] & 0b1110_0000  # No content size, not single-segment.
         assert decompress(frame, "zstd") == b"hello world " * 1000
+
+    @pytest.mark.parametrize(
+        ("body", "encoding"),
+        [(b"not gzip", "gzip"), (b"x", "compress")],
+    )
+    def test_an_undecodable_body_raises_its_own_type(
+        self,
+        body: bytes,
+        encoding: str,
+    ) -> None:
+        # A corrupt response is a failure of that one fetch, which a caller tells
+        # from a programming error by its type.
+        with pytest.raises(DecompressionError):
+            decompress(body, encoding)
 
     def test_zstd_garbage_raises(self) -> None:
         with pytest.raises(ValueError, match="Decompression failed"):

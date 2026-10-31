@@ -11,14 +11,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 
-import base64
 import ipaddress
 import json
 import logging
 import time
 
+from wesearch.fetch.challenge import (
+    classify_challenge,
+    is_shell,
+    is_unmarked_block,
+    visible_chars,
+)
 from wesearch.fetch.common import cookie_header, merge_headers
 from wesearch.fetch.gate import gated
 from wesearch.fetch.session import default_session
@@ -33,8 +38,8 @@ from wesearch.types.params import (
     RequestParams,
     RetryParams,
     Transport,
-    no_cookies,
 )
+from wesearch.types.urls import without_userinfo
 
 
 if TYPE_CHECKING:
@@ -92,10 +97,25 @@ def fetch(
     session = default_session() if session is None else session
     # Raw requests probe the egress itself, so they must not wait on one.
     egress = session.egress if params.content.raw_headers else egress_ip(session)
-    with gated(url, egress=egress):
-        if not params.content.raw_headers:
-            return _fetch_as_profile(url, params, session=session)
-        return _send(url, params, session=session, profile_cookies=False)
+    # The gate files the URL a person clears a block at; never its credentials.
+    bare, _ = without_userinfo(url)
+    with gated(bare, egress=egress):
+        try:
+            if not params.content.raw_headers:
+                return _fetch_as_profile(url, params, session=session)
+            return _send(url, params, session=session, profile_cookies=False)
+        except BotDetectionError as block:
+            if block.url:
+                raise
+            # A provider's body validator sees only bytes; without the page its
+            # error cannot say where a person clears the block.
+            raise type(block)(
+                str(block),
+                url=bare,
+                status=block.status,
+                headers=block.headers,
+                body=block.body,
+            ) from block
 
 
 def resolve_transport(
@@ -218,11 +238,31 @@ def _fetch_as_profile(
     if transport == "curl-then-zendriver":
         # The browser clears blocks curl cannot; anything else it would not help.
         try:
-            return _fetch_as_profile(url, _on(params, "curl"), session=session)
+            body = _fetch_as_profile(url, _on(params, "curl"), session=session)
         except BotDetectionError as block:
-            if domain and block.browser_clears:
+            browser_clears = block.browser_clears
+        except FetchError as error:
+            # Learned only once the browser gets past it: until then the
+            # refusal may be the site's own.
+            if not is_unmarked_block(error, requested=url):
+                raise
+            body = _fetch_as_profile(url, _on(params, "zendriver"), session=session)
+            if domain:
                 transport_routing.remember_zendriver_domain(domain)
-            return _fetch_as_profile(url, _on(params, "zendriver"), session=session)
+            return body
+        else:
+            # A 200 or 202 can be a wall (AWS WAF) or a shell only JavaScript fills.
+            wall = classify_challenge(body, on_success_body=True)
+            if wall is None:
+                return (
+                    _render_shell(url, body, params, session=session)
+                    if is_shell(body)
+                    else body
+                )
+            browser_clears = wall.browser_clears
+        if domain and browser_clears:
+            transport_routing.remember_zendriver_domain(domain)
+        return _fetch_as_profile(url, _on(params, "zendriver"), session=session)
     params = _on(params, transport)
     try:
         return _send(url, params, session=session, profile_cookies=True)
@@ -239,6 +279,29 @@ def _fetch_as_profile(
         return _send(url, params, session=session, profile_cookies=True)
 
 
+# A render that fails raises: the shell has no content, so returning it would pass the
+# failure off as the page. Only where no browser can run at all is the shell, curl's
+# whole view of the page, returned.
+def _render_shell(
+    url: str,
+    shell: bytes,
+    params: RequestParams,
+    *,
+    session: FetchSession,
+) -> bytes:
+    """Return the browser's render of ``url`` when it has more text than ``shell``."""
+    try:
+        rendered = _fetch_as_profile(url, _on(params, "zendriver"), session=session)
+    except zendriver.BrowserUnavailableError:
+        logger.warning(
+            "No browser to render %s; keeping its shell.",
+            url,
+            exc_info=True,
+        )
+        return shell
+    return rendered if visible_chars(rendered) > visible_chars(shell) else shell
+
+
 def _on(params: RequestParams, transport: Transport) -> RequestParams:
     """Return ``params`` with ``transport``."""
     return replace(params, policy=replace(params.policy, transport=transport))
@@ -252,7 +315,7 @@ def _send(
     profile_cookies: bool,
 ) -> bytes:
     """Send ``params`` once, with retries, filing the cookies each response sets."""
-    url, credentials = _without_userinfo(url)
+    url, credentials = without_userinfo(url)
     parts = urlsplit(url)
     if params.content.params:
         query = urlencode(params.content.params)
@@ -275,13 +338,15 @@ def _send(
         headers["Authorization"] = credentials
 
     def stored_cookies(host: str) -> Mapping[str, str]:
-        if not profile_cookies:
-            return no_cookies(host)
-        profile = session.profiles.load(session.egress, host)
-        return no_cookies(host) if profile is None else profile.cookies
+        profile = (
+            session.profiles.load(session.egress, host) if profile_cookies else None
+        )
+        return dict[str, str]() if profile is None else profile.cookies
 
     headers.update(content.headers)
-    stored = stored_cookies(parts.hostname or "")
+    stored = (
+        dict[str, str]() if parts.hostname is None else stored_cookies(parts.hostname)
+    )
     if stored or content.cookies:
         # In any case: "cookie" beside "Cookie" sends two headers, a bot tell.
         # Later pairs win: the profile, then the caller's header, then ``cookies=``.
@@ -289,10 +354,10 @@ def _send(
             {k: v for k, v in headers.items() if v is not None},
             {},
         )
-        cookie = cookie_header(
-            {"Cookie": f"{cookie_header({}, stored)}; {written}"},
-            content.cookies,
-        )
+        # pragma: no mutate start -- cookie_header reads the name in any case.
+        under_caller = {"Cookie": f"{cookie_header({}, stored)}; {written}"}
+        # pragma: no mutate end
+        cookie = cookie_header(under_caller, content.cookies)
         headers = merge_headers({}, {**headers, "Cookie": cookie}) | {
             k: v for k, v in headers.items() if v is None
         }
@@ -301,18 +366,18 @@ def _send(
         "stdlib": fetch_stdlib,
         "zendriver": zendriver.fetch_zendriver,
     }
+    # The caller resolved ``auto`` already, except for a raw request, which only
+    # curl sends whatever its method; so only curl's availability is left.
     transport = resolve_transport(
         params.policy.transport,
-        method=content.method,
         raw_headers=content.raw_headers,
-        has_body=content.has_body,
     )
     landed: dict[str, dict[str, str]] = {}
 
     def on_response(status: int, received: dict[str, str], hop: str) -> None:
-        if (set_cookie := received.get("set-cookie", "")) and (
-            host := urlparse(hop).hostname or ""
-        ):
+        set_cookie = received.get("set-cookie")
+        host = urlparse(hop).hostname
+        if set_cookie is not None and host is not None:
             landed.setdefault(host, {}).update(parse_set_cookie(set_cookie))
         params.observe.on_response(status, received)
 
@@ -359,17 +424,3 @@ def _send(
             except OSError:
                 logger.warning("could not save cookies for %s", host, exc_info=True)
     return body_out
-
-
-def _without_userinfo(url: str) -> tuple[str, str]:
-    """Return ``url`` without ``user:pass@`` and the Basic credential it carried."""
-    parsed = urlparse(url)
-    username, password = parsed.username or "", parsed.password or ""
-    if not (username or password):
-        return url, ""
-    pair = f"{unquote(username)}:{unquote(password)}"
-    netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
-    return (
-        parsed._replace(netloc=netloc).geturl(),
-        f"Basic {base64.b64encode(pair.encode()).decode()}",
-    )

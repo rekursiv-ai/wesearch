@@ -11,7 +11,12 @@ import time
 import pytest
 
 from wesearch.fetch.gate import SitePolicy, challenged_urls, clear_host, gated
-from wesearch.types.errors import CooldownError, FetchError, PuzzleChallengeError
+from wesearch.types.errors import (
+    CooldownError,
+    FetchError,
+    GoogleJavascriptRequiredError,
+    PuzzleChallengeError,
+)
 
 
 _URL = "https://probe.example/search?q=x"
@@ -62,6 +67,18 @@ def test_a_rate_limit_locks_the_site() -> None:
         raise FetchError(_URL, 429, {}, b"")
     with pytest.raises(CooldownError):
         _send(egress="")
+
+
+def test_a_page_that_only_needs_javascript_does_not_lock() -> None:
+    # Google's enablejs page refused nobody: locking Google for 15 minutes on it
+    # failed every search after one render that read the page too early.
+    with (
+        pytest.raises(GoogleJavascriptRequiredError),
+        gated(_URL, egress="", policies=_FAST),
+    ):
+        raise GoogleJavascriptRequiredError("enablejs")
+    _send(egress="")
+    assert challenged_urls() == []
 
 
 def test_an_ordinary_failure_does_not_lock() -> None:

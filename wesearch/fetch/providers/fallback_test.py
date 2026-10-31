@@ -8,6 +8,7 @@ import pytest
 
 from wesearch.fetch import FetchSession, PolicyParams, RequestParams
 from wesearch.fetch.providers import fallback
+from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 
 
@@ -137,6 +138,61 @@ class TestFallback:
             )
         assert exc.value.status == status
         assert called == []
+
+    @pytest.mark.parametrize(
+        "primary",
+        [
+            # Reddit's network security refusing this IP: a bare HTML 403.
+            FetchError(
+                "https://s.example/",
+                403,
+                {"content-type": "text/html; charset=UTF-8"},
+                b"<body><h1>You've been blocked by network security.</h1></body>",
+            ),
+            FetchError("https://s.example/", 0, {}, b"connection reset"),
+            BrowserUnavailableError("Could not launch Chrome: it exited with code 1."),
+        ],
+    )
+    def test_a_failure_another_ip_can_clear_reaches_the_proxy(
+        self,
+        primary: FetchError | OSError,
+    ) -> None:
+        def fail(
+            url: str,
+            *,
+            request: object,
+            session: FetchSession | None = None,
+        ) -> bytes:
+            del url, request, session
+            raise primary
+
+        with (
+            patch.object(fallback, "fetch", fail),
+            patch.object(fallback, "fetch_reader_proxy", return_value=b"# md"),
+        ):
+            assert fallback.fetch_with_reader_fallback(
+                "https://s.example/",
+                policy=PolicyParams(),
+            ) == (b"# md", True)
+
+    def test_a_browser_that_will_not_start_surfaces_when_the_proxy_fails(
+        self,
+    ) -> None:
+        primary = BrowserUnavailableError("Could not launch Chrome.")
+        with (
+            patch.object(fallback, "fetch", side_effect=primary),
+            patch.object(
+                fallback,
+                "fetch_reader_proxy",
+                side_effect=FetchError("u", 0, {}, b"off"),
+            ),
+            pytest.raises(BrowserUnavailableError) as raised,
+        ):
+            fallback.fetch_with_reader_fallback(
+                "https://s.example/",
+                policy=PolicyParams(),
+            )
+        assert raised.value is primary
 
     @pytest.mark.parametrize("status", [404, 500, 401])
     def test_non_bot_wall_raises_immediately(self, status: int) -> None:
