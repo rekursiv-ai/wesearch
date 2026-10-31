@@ -150,7 +150,7 @@ def gated(
     if not host:
         yield
         return
-    policy = _policy_for(host, parsed.path or "/", policies)
+    policy = _site_policy(host, parsed.path or "/", policies)
     path = (
         data_dir()
         / "rekursiv-ai"
@@ -230,7 +230,7 @@ def challenged_urls() -> list[str]:
     return list(dict.fromkeys(p.read_text() for p in recorded))
 
 
-def _policy_for(host: str, path: str, policies: Sequence[SitePolicy]) -> SitePolicy:
+def _site_policy(host: str, path: str, policies: Sequence[SitePolicy]) -> SitePolicy:
     """Return the longest-prefix policy for ``host``/``path``, else the default."""
     matches = [p for p in policies if p.host == host and path.startswith(p.path_prefix)]
     return max(matches, key=lambda p: len(p.path_prefix), default=SitePolicy(host=host))

@@ -79,7 +79,7 @@ def main(
         extra = {
             mag
             for mag in mag_pairs
-            if not _identity_of(s2_mag[mag]) & _identity_of(oa_mag[mag])
+            if not _doi_identity(s2_mag[mag]) & _doi_identity(oa_mag[mag])
         }
         totals["doi"] += len(by_doi)
         totals["arxiv"] += len(by_arxiv)
@@ -215,7 +215,7 @@ def _raw_mag_openalex(query: str) -> dict[str, str]:
     return out
 
 
-def _identity_of(doi: str) -> set[str]:
+def _doi_identity(doi: str) -> set[str]:
     """Keys a bare DOI string contributes under the shipped identity rule."""
     if not doi:
         return set()

@@ -3,6 +3,12 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- `wesearch.paper.fetch.oa_url_of` is `open_access_url`.
+
 ## 0.1.16 - 2026-10-30
 
 ### Changed

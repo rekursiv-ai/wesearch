@@ -40,7 +40,7 @@ __all__ = [
     "batch_oa_urls",
     "download",
     "download_open",
-    "oa_url_of",
+    "open_access_url",
 ]
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def looks_like_pdf(
     return len(content) >= min_pdf_bytes and content[: len(pdf_magic)] == pdf_magic
 
 
-def oa_url_of(paper: dict[str, MutablePlainTree]) -> str | None:
+def open_access_url(paper: dict[str, MutablePlainTree]) -> str | None:
     """Extract a non-empty ``openAccessPdf.url`` from an S2 paper record.
 
     Args:
@@ -102,7 +102,7 @@ def batch_oa_urls(
         papers = s2.batch(wire_ids, "openAccessPdf", session=session)
     except Exception:  # noqa: BLE001 -- any backend failure permits the per-id fallback.
         return None
-    return [oa_url_of(p) if p is not None else None for p in papers]
+    return [open_access_url(p) if p is not None else None for p in papers]
 
 
 def download(
@@ -287,4 +287,4 @@ def _s2_oa_lookup(
         )
     except Exception:  # noqa: BLE001 -- any lookup failure means no discoverable OA copy.
         return None
-    return oa_url_of(data)
+    return open_access_url(data)

@@ -101,15 +101,15 @@ class TestLooksLikePdf:
 class TestOaUrlOf:
     def test_present_returns_url(self) -> None:
         paper: dict[str, MutablePlainTree] = {"openAccessPdf": {"url": "http://x/pdf"}}
-        assert fetch.oa_url_of(paper) == "http://x/pdf"
+        assert fetch.open_access_url(paper) == "http://x/pdf"
 
     def test_missing_returns_none(self) -> None:
         paper: dict[str, MutablePlainTree] = {"title": "no oa"}
-        assert fetch.oa_url_of(paper) is None
+        assert fetch.open_access_url(paper) is None
 
     def test_empty_url_returns_none(self) -> None:
         paper: dict[str, MutablePlainTree] = {"openAccessPdf": {"url": ""}}
-        assert fetch.oa_url_of(paper) is None
+        assert fetch.open_access_url(paper) is None
 
 
 class TestBatchOaUrls:
