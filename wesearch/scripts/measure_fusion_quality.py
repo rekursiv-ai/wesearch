@@ -3,7 +3,7 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
-  python3 -m wesearch.scripts.measure_fusion_quality "$@"
+  python3 -P -m wesearch.scripts.measure_fusion_quality "$@"
 Report live fused-search duplication and limit adherence.
 
 Two properties the unit tests cannot observe, because both depend on what the

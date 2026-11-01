@@ -95,7 +95,7 @@ def test_direct_executable_reexecutes_as_module() -> None:
     )
 
     assert result.returncode == 0
-    assert "python3 -m wesearch.fetch.transport.zendriver --help" in result.stderr
+    assert "python3 -P -m wesearch.fetch.transport.zendriver --help" in result.stderr
     assert "RuntimeWarning" not in result.stderr
 
 
