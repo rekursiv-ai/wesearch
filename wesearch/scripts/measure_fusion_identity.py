@@ -3,7 +3,7 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
-  python3 -m wesearch.scripts.measure_fusion_identity "$@"
+  python3 -P -m wesearch.scripts.measure_fusion_identity "$@"
 Measure which identifier namespaces actually join records across backends.
 
 Answers one question before ``PaperRecord`` grows a field: does adding an

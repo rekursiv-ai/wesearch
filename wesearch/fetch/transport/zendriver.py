@@ -3,7 +3,7 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
-  python3 -m wesearch.fetch.transport.zendriver "$@"
+  python3 -P -m wesearch.fetch.transport.zendriver "$@"
 Fetch in a real headless Chrome, for pages behind JavaScript or a bot challenge.
 
 One Chrome per profile serves every process on the host; each fetch runs in its

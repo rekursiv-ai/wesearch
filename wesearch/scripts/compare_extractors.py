@@ -3,7 +3,7 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
-  python3 -m wesearch.scripts.compare_extractors "$@"
+  python3 -P -m wesearch.scripts.compare_extractors "$@"
 Compare HTML-to-text converters on real pages: how much they cut, what they lose.
 
 ``fetch_web`` renders a page for a language model, so a converter is good when it
