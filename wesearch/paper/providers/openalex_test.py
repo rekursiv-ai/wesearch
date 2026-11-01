@@ -828,7 +828,7 @@ class TestExactInternals:
     def test_get_builds_exact_request(self) -> None:
         fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with (
-            patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
+            patch.dict("os.environ", {"OPENALEX_API_KEY": "", "OPENALEX_EMAIL": ""}),
             patch("wesearch.paper.providers.openalex.fetch", fetch),
         ):
             result = openalex._get(
@@ -850,7 +850,7 @@ class TestExactInternals:
     def test_get_defaults_are_exact(self) -> None:
         fetch = _RecordingFetch(json.dumps({"ok": True}).encode())
         with (
-            patch.dict("os.environ", {"OPENALEX_API_KEY": ""}),
+            patch.dict("os.environ", {"OPENALEX_API_KEY": "", "OPENALEX_EMAIL": ""}),
             patch("wesearch.paper.providers.openalex.fetch", fetch),
         ):
             assert openalex._get("/works", {"filter": "x"}) == {"ok": True}
