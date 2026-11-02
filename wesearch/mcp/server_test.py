@@ -18,9 +18,12 @@ import pytest
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
-from mcp import Client
+from mcp import Client, ClientSession
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from treekle import from_plain
+
+import fastjsonschema
+import mcp.types as mcp_types
 
 from wesearch.fetch import FetchSession
 from wesearch.mcp import server
@@ -496,6 +499,38 @@ _SESSION_CALLS: list[tuple[str, dict[str, object], tuple[object, str, object]]] 
 ]
 
 
+@pytest.fixture
+def fast_output_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check each tool result against its output schema with fastjsonschema.
+
+    mcp's client imports jsonschema for its first check: 720 ms, 614 of them
+    ``rfc3987_syntax`` building an IRI grammar these schemas never use.
+    """
+    compiled: dict[str, Callable[[object], object]] = {}
+
+    async def validate(
+        self: ClientSession,
+        name: str,
+        result: mcp_types.CallToolResult,
+    ) -> None:
+        if name not in compiled:
+            listed = await self.list_tools()
+            [tool] = [tool for tool in listed.tools if tool.name == name]
+            schema = tool.output_schema
+            compiled[name] = (
+                _accept if schema is None else fastjsonschema.compile(schema)
+            )
+        _ = compiled[name](cast(object, result.structured_content))
+
+    monkeypatch.setattr(ClientSession, "validate_tool_result", validate)
+
+
+def _accept(content: object) -> object:
+    """Stand in for a tool that declares no output schema."""
+    return content
+
+
+@pytest.mark.usefixtures("fast_output_validation")
 def test_every_tool_shares_one_session_per_server_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -627,6 +627,15 @@ wheels = [
 ]
 
 [[package]]
+name = "fastjsonschema"
+version = "2.22.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/33/a4/9473c7c3b87009d9c1d74034e4a0f6a35ff0d42dd0f9866d0c3ec4e9217b/fastjsonschema-2.22.2.tar.gz", hash = "sha256:72064e12356a7d6ef02165be2946b9abadbdf238536e07eb587e3dbaa33099cf", size = 385171, upload-time = "2026-08-15T19:47:08.853Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/82/2755c7c982086f00d4dab85bc120ec35045a9fc2191893a6ce79afe94443/fastjsonschema-2.22.2-py3-none-any.whl", hash = "sha256:0fb3915616adac85ccfdd737d26be1089845d2019819505b42d39888458f74d4", size = 27413, upload-time = "2026-08-15T19:47:04.406Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "4.2.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1623,7 +1632,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.12"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#3651494417287f50302ef3b75cac15c7d3badb31" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#db47f27a1c2789eb3e381a51038242b780d299ac" }
 
 [[package]]
 name = "rpds-py"
@@ -2146,6 +2155,7 @@ dev = [
     { name = "basedpyright" },
     { name = "codespell" },
     { name = "cryptography" },
+    { name = "fastjsonschema" },
     { name = "hypothesis" },
     { name = "ipython" },
     { name = "lxml-stubs" },
@@ -2171,6 +2181,7 @@ pre-commit = [
     { name = "basedpyright" },
     { name = "codespell" },
     { name = "cryptography" },
+    { name = "fastjsonschema" },
     { name = "hypothesis" },
     { name = "lxml-stubs" },
     { name = "nodejs-wheel-binaries" },
@@ -2191,6 +2202,7 @@ stubs = [
 ]
 test = [
     { name = "cryptography" },
+    { name = "fastjsonschema" },
     { name = "hypothesis" },
     { name = "nodejs-wheel-binaries" },
     { name = "pytest" },
@@ -2233,6 +2245,7 @@ dev = [
     { name = "basedpyright", specifier = ">=1.40.2" },
     { name = "codespell", specifier = ">=2.4.3" },
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "fastjsonschema", specifier = ">=2.22.2" },
     { name = "hypothesis", specifier = ">=6.170.14" },
     { name = "ipython", specifier = ">=9.18.0" },
     { name = "lxml-stubs", specifier = ">=0.5.1" },
@@ -2258,6 +2271,7 @@ pre-commit = [
     { name = "basedpyright", specifier = ">=1.40.2" },
     { name = "codespell", specifier = ">=2.4.3" },
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "fastjsonschema", specifier = ">=2.22.2" },
     { name = "hypothesis", specifier = ">=6.170.14" },
     { name = "lxml-stubs", specifier = ">=0.5.1" },
     { name = "nodejs-wheel-binaries", specifier = ">=24.19.0" },
@@ -2276,6 +2290,7 @@ pre-commit = [
 stubs = [{ name = "lxml-stubs", specifier = ">=0.5.1" }]
 test = [
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "fastjsonschema", specifier = ">=2.22.2" },
     { name = "hypothesis", specifier = ">=6.170.14" },
     { name = "nodejs-wheel-binaries", specifier = ">=24.19.0" },
     { name = "pytest", specifier = ">=9.2.0" },
