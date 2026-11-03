@@ -695,14 +695,12 @@ def _devtools_port(
         if command_file.is_file() or platform != "darwin":
             command = command_file.read_bytes().replace(b"\0", b" ").decode()
         else:
-            # pragma: no mutate start -- ``check=None`` is as falsy as ``False``.
             ps = subprocess.run(  # noqa: S603 -- PID is parsed as an integer.
                 ["/bin/ps", "-p", str(pid), "-o", "command="],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            # pragma: no mutate end
             if ps.returncode:
                 return None
             command = ps.stdout
