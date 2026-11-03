@@ -1,5 +1,6 @@
 # NEVER EDIT THIS FILE!
-# uv sync --all-groups --all-extras --frozen
+# uv sync --all-groups --frozen  # cu132 aka "cuda"
+# uv sync --all-groups --frozen --no-group cuda --extra cpu
 
 [project]
 name = "wesearch"
@@ -43,6 +44,47 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cpu = [
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
+cu126 = [
+    "jax[cuda12] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
+cu128 = [
+    "jax[cuda12] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
+cu130 = [
+    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
+cu132 = [
+    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
+cu134 = [
+    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
 # The MCP server (wesearch-mcp) exposes wesearch tools to agent clients. The SDK
 # is the only thing it adds; everything its tools call is a core dependency.
 mcp = ["mcp>=2.3.0"]
@@ -52,6 +94,13 @@ wesearch-mcp = "wesearch.mcp.server:main"
 zendriver = "wesearch.fetch.transport.zendriver:main"
 
 [dependency-groups]
+cuda = [
+    "jax[cuda13] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch",
+    "torchao",
+    "torchaudio",
+    "torchvision",
+]
 # NEVER ADD MORE DEPENDENCIES!
 
 debug = [
@@ -701,6 +750,22 @@ formats = "ipynb,py:percent"
 
 [tool.uv]
 package = true
+default-groups = ["dev", "cuda"]
+conflicts = [[
+    {extra = "cpu"},
+    {extra = "cu126"},
+    {extra = "cu128"},
+    {extra = "cu130"},
+    {extra = "cu132"},
+    {extra = "cu134"},
+], [
+    {group = "cuda"},
+    {extra = "cpu"},
+    {extra = "cu126"},
+    {extra = "cu128"},
+    {extra = "cu130"},
+    {extra = "cu134"},
+]]
 environments = [
     "sys_platform == 'linux'",
     "sys_platform == 'darwin'",
@@ -716,6 +781,9 @@ members = []
 
 [tool.uv.pip]
 compile-bytecode = true
+
+# [[tool.uv.index]]
+# url = "https://pypi.together.ai/"
 
 [tool.uv.sources]
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
