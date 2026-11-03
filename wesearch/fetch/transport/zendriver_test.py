@@ -3553,8 +3553,12 @@ def _interrupt_watch(
 
     monkeypatch.setattr(zendriver, "challenged_urls", list)
     monkeypatch.setattr(asyncio, "sleep", interrupted)
-    with pytest.raises(KeyboardInterrupt):
-        asyncio.run(zendriver._watch_window("about:blank", cast(Browser, browser)))
+
+    async def watch() -> None:
+        with pytest.raises(KeyboardInterrupt):
+            await zendriver._watch_window("about:blank", cast(Browser, browser))
+
+    asyncio.run(watch())
 
 
 def test_an_interrupted_window_stops_chrome_and_reraises(
