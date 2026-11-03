@@ -14,7 +14,7 @@ import pytest
 
 
 # The MCP server needs the optional [mcp] extra. Skip the whole module when it is
-# absent (e.g. a plain `uv run pytest` without --all-extras) instead of erroring
+# absent (e.g. a plain `uv run --frozen pytest`) instead of erroring
 # on collection; CI installs the extra and exercises these tests.
 pytest.importorskip("mcp.server")
 
