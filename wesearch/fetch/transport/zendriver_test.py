@@ -2884,9 +2884,7 @@ def test_devtools_port_reads_the_macos_profile_owner(
         check: bool,
     ) -> subprocess.CompletedProcess[str]:
         assert args == ["/bin/ps", "-p", "123", "-o", "command="]
-        assert capture_output
-        assert text
-        assert not check
+        assert (capture_output, text, check) == (True, True, False)
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
