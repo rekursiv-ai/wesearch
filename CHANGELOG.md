@@ -15,6 +15,11 @@ All notable wesearch changes are documented here. This project follows
   header that curl_cffi 0.17's Chrome target adds to every request; a caller's
   own `Cache-Control` is still sent.
 
+### Removed
+
+- `wesearch.notify.send_gnome_alert` and `send_gnome_alert_async`, which no
+  code called and whose `dbus-next` dependency the package never declared.
+
 ## 0.1.16 - 2026-10-30
 
 ### Changed
