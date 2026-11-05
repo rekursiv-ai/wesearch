@@ -128,8 +128,12 @@ python -m pip install wesearch
 A persistent per-`(egress_ip, domain)` cookie profile is loaded and saved
 transparently. Every `fetch` is paced host-wide per site and IP (`fetch/gate.py` holds the
 per-site table). A block locks the site briefly; one caller then probes it, a success
-unlocks every caller, and a failure doubles the lock. Run `zendriver` to clear blocks by
-hand: it opens a tab per challenge-locked site, and each site you load there is unlocked. Search results are cached host-wide for an hour, and a domain
+unlocks every caller, and a failure doubles the lock. Run `webrowser` to clear
+blocks by hand: it opens a tab per challenge-locked site, and each site you load
+there is unlocked. Run `webrowser URL` to open a specific page or sign in;
+`webrowser` shares Chrome's profile and cookies with browser tools and fetches.
+The command was previously named `zendriver`; the transport name remains
+`"zendriver"`. Search results are cached host-wide for an hour, and a domain
 learned to need the browser is re-probed after a week.
 
 Check backend health with `python -m wesearch.tools` (add `--processes 12` to load-test the

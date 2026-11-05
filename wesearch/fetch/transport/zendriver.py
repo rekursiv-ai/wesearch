@@ -1,18 +1,13 @@
-#!/bin/sh
-# ruff: noqa: EXE003, D300, D205, T201 -- Polyglot shell/Python script.
-# fmt: off
-'''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
-  python3 -P -m wesearch.fetch.transport.zendriver "$@"
-Fetch in a real headless Chrome, for pages behind JavaScript or a bot challenge.
+"""Fetch in a real headless Chrome, for pages behind JavaScript or a bot challenge.
 
 One Chrome per profile serves every process on the host; each fetch runs in its
 own tab, and the profile keeps Chrome's cookies.
 
-Run ``zendriver URL`` to open URL in a visible Chrome on the same profile, to
+Run ``webrowser URL`` to open URL in a visible Chrome on the same profile, to
 see what a fetch saw, clear a block, or log in.
-'''
-# fmt: on
+"""
+
+# ruff: noqa: T201 -- Browser command lifecycle output.
 
 from __future__ import annotations
 
@@ -492,7 +487,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        prog="zendriver",
+        prog="webrowser",
         description=(
             "Open a URL in a visible Chrome on the profile the zendriver "
             "transport fetches with, to see what a fetch saw or to log in. "
@@ -502,9 +497,9 @@ def main() -> int:
         # Placeholders: a real site here would be a recipe for getting past it.
         epilog=(
             "Examples:\n"
-            "  zendriver https://the-site-that-failed.example/\n"
-            "  zendriver https://login.example/  # seat a session cookie\n"
-            "  zendriver # opens blank; navigate by hand"
+            "  webrowser https://the-site-that-failed.example/\n"
+            "  webrowser https://login.example/  # seat a session cookie\n"
+            "  webrowser # opens blank; navigate by hand"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1228,8 +1223,3 @@ class _RequestGuard:
             if tasks or self._errors:
                 await self._tab.send(zendriver.cdp.page.stop_loading())
             await self._tab.send(zendriver.cdp.fetch.disable())
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-# vim: ft=python

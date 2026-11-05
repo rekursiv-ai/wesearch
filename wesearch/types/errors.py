@@ -98,7 +98,7 @@ class BotDetectionError(FetchError):
         """Return how to clear the block on ``url`` by hand."""
         shown, _ = without_userinfo(url)
         return (
-            f"Run `zendriver {shlex.quote(shown)}` and solve the challenge; "
+            f"Run `webrowser {shlex.quote(shown)}` and solve the challenge; "
             "the site unlocks once its page loads."
         )
 
