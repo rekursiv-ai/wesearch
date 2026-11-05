@@ -808,7 +808,7 @@ def test_browser_mode_control_reaches_library(
     assert isinstance(result, mcp_types.CallToolResult)
     assert seen[0]["mode"] == mode
     assert seen[0]["restart"] is restart
-    data = from_plain(result.structured_content, dict[str, object])
+    data = from_plain(cast(object, result.structured_content), dict[str, object])
     assert data["mode"] == mode
     assert data["restarted"] is restart
     assert "consent" in (server.web_browser.__doc__ or "")
