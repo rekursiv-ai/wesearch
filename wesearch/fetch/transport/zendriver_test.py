@@ -3385,6 +3385,7 @@ class _ChromeProcess:
     def __init__(self, *, returncode: int | None = None) -> None:
         self.returncode = returncode
         self.killed = False
+        self.waited = False
 
     def poll(self) -> int | None:
         return self.returncode
@@ -3393,6 +3394,7 @@ class _ChromeProcess:
         self.killed = True
 
     def wait(self) -> int:
+        self.waited = True
         return -9
 
 
@@ -3420,23 +3422,27 @@ def test_shared_chrome_attaches_to_a_running_chrome_instead_of_launching(
 
 @pytest.mark.parametrize("headless", [True, False])
 @pytest.mark.parametrize("uid", [0, 1000])
+@pytest.mark.parametrize("restore_session", [False, True])
 def test_shared_chrome_launches_detached_when_no_chrome_answers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     headless: bool,
     uid: int,
+    restore_session: bool,
 ) -> None:
     """The shared Chrome must survive its launcher's exit and Ctrl-C."""
-    profile = tmp_path / "profile"
+    profile = tmp_path / "parent" / "profile"
     captured: dict[str, object] = {}
-    (profile).mkdir()
+    process = _ChromeProcess()
+    profile.mkdir(parents=True)
     (profile / "DevToolsActivePort").write_text("1\n/stale\n")
 
     def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
         captured["args"] = args
         captured.update(kwargs)
+        assert not (profile / "DevToolsActivePort").exists()
         (profile / "DevToolsActivePort").write_text("6789\n/devtools/browser/x\n")
-        return _ChromeProcess()
+        return process
 
     def answers(port: int) -> bool:
         return port == 6789
@@ -3453,11 +3459,25 @@ def test_shared_chrome_launches_detached_when_no_chrome_answers(
     )
     monkeypatch.setattr(os, "geteuid", lambda: uid)
 
-    assert zendriver._shared_chrome(profile, headless=headless) == 6789
+    assert (
+        zendriver._start_shared_chrome(
+            profile,
+            headless=headless,
+            restore_session=restore_session,
+        )
+        == 6789
+    )
     assert captured["start_new_session"] is True
+    assert captured["stdin"] == subprocess.DEVNULL
+    assert captured["stdout"] == subprocess.DEVNULL
+    assert captured["stderr"] == subprocess.DEVNULL
+    assert zendriver._launched == [process]
     args = cast(list[str], captured["args"])
     assert args[0] == "/native/chrome"
-    assert args[-2:] == ["--remote-debugging-port=0", "about:blank"]
+    assert args[-2:] == [
+        "--remote-debugging-port=0",
+        "--restore-last-session" if restore_session else "about:blank",
+    ]
     assert f"--user-data-dir={profile}" in args
     assert ("--headless=new" in args) is headless
     # Chrome's sandbox refuses to run as root.
@@ -3503,10 +3523,13 @@ def test_shared_chrome_waits_for_a_reported_port_to_answer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    profile = tmp_path / "profile"
+    profile = tmp_path / "parent" / "profile"
 
     def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
-        del args, kwargs
+        del kwargs
+        assert profile.is_dir()
+        assert args[0] == "/fake/chrome"
+        assert args[-1] == "about:blank"
         (profile / "DevToolsActivePort").write_text("4242\n/devtools/browser/x\n")
         return _ChromeProcess()
 
@@ -3523,8 +3546,39 @@ def test_shared_chrome_waits_for_a_reported_port_to_answer(
     monkeypatch.setattr(zendriver, "_port_answers", port_answers)
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
     monkeypatch.setattr(time, "sleep", sleeps.append)
+    assert zendriver._start_shared_chrome(profile, headless=True) == 4242
+    assert sleeps == [0.05]
+
+
+@pytest.mark.parametrize("ready_after", [3.0, 9.95])
+def test_shared_chrome_waits_for_slow_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ready_after: float,
+) -> None:
+    profile = tmp_path / "profile"
+    process = _ChromeProcess()
+    clock = iter([0.0, 0.0, ready_after])
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        (profile / "DevToolsActivePort").write_text("4242\n/devtools/browser/x\n")
+
+    monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
+    monkeypatch.setattr(subprocess, "Popen", partial(_popen, process))
+    monkeypatch.setattr(zendriver, "_launched", [])
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
+    monkeypatch.setattr(
+        zendriver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(clock), sleep=sleep),
+    )
     assert zendriver._shared_chrome(profile, headless=True) == 4242
     assert sleeps == [0.05]
+    assert not process.killed
+    assert not process.waited
 
 
 def test_shared_chrome_reports_a_chrome_that_exits(
@@ -3555,9 +3609,39 @@ def test_shared_chrome_kills_a_chrome_that_never_reports_a_port(
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
     monkeypatch.setattr(time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(time, "sleep", _no_sleep)
-    with pytest.raises(zendriver.BrowserUnavailableError, match="did not come up"):
+    with pytest.raises(zendriver.BrowserUnavailableError) as exc:
         zendriver._shared_chrome(tmp_path / "profile", headless=True)
+    assert str(exc.value) == "Could not launch Chrome: DevTools did not come up in 10s."
     assert process.killed
+    assert process.waited
+
+
+@pytest.mark.parametrize("contents", ["", "not-a-port"])
+def test_shared_chrome_waits_for_a_complete_port_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    profile = tmp_path / "profile"
+    sleeps: list[float] = []
+
+    def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
+        del args, kwargs
+        (profile / "DevToolsActivePort").write_text(contents)
+        return _ChromeProcess()
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        (profile / "DevToolsActivePort").write_text("4242\n/devtools/browser/x\n")
+
+    monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
+    monkeypatch.setattr(zendriver, "_launched", [])
+    monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    monkeypatch.setattr(time, "sleep", sleep)
+    assert zendriver._shared_chrome(profile, headless=True) == 4242
+    assert sleeps == [0.05]
 
 
 def test_shared_chrome_reports_a_missing_chrome(
