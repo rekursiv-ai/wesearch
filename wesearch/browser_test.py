@@ -776,7 +776,8 @@ def test_real_cli_mode_lifecycle(
                 profile_dir=profile,
             )
             try:
-                assert watching.wait(20)
+                # Chrome's launch alone may take 60s (zendriver._launch's budget).
+                assert watching.wait(90)
                 assert not running.done()
                 assert api.browser("mode", session=sibling).mode == "headed"
                 headed = pool.run(pool.browser(profile, headless=True))
