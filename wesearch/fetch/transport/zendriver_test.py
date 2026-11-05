@@ -72,6 +72,7 @@ def _stub_browser_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # A string target: `zendriver` names this package's transport module here.
     monkeypatch.setattr("zendriver.core.config.find_executable", find_fake_browser)
+    monkeypatch.setattr("zendriver.core.util.free_port", lambda: 4242)
     monkeypatch.setattr(zendriver, "chrome_binary", lambda: None)
 
 
@@ -1864,12 +1865,58 @@ async def test_request_guard_surfaces_private_request_before_release(
             )
             await guard.drain()
 
-    with pytest.raises(ValueError, match="non-public"):
+    if kind == network.ResourceType.DOCUMENT:
+        with pytest.raises(ValueError, match="non-public"):
+            await go()
+    else:
         await go()
     assert tab.failed_requests == ["req-1"]
     assert not tab.continued_requests
     assert not tab.paused_handlers
     assert not tab.closed
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        network.ResourceType.DOCUMENT,
+        network.ResourceType.SCRIPT,
+        network.ResourceType.IMAGE,
+        network.ResourceType.XHR,
+    ],
+)
+@pytest.mark.parametrize("address", ["0.0.0.0", "127.0.0.1", "169.254.169.254"])  # noqa: S104 -- DNS sinkhole fixture, not a listener.
+def test_load_blocks_sinkholed_requests_without_losing_the_page(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: network.ResourceType,
+    address: str,
+) -> None:
+    resolve = socket.getaddrinfo
+
+    def sinkhole(host: str, port: int | None) -> Sequence[tuple[object, ...]]:
+        return resolve(address if host == "sinkhole.example" else host, port)
+
+    monkeypatch.setattr(socket, "getaddrinfo", sinkhole)
+    browser = _FakeBrowser(
+        paused_events=[
+            _request_paused("https://sinkhole.example/", resource_type=kind),
+        ],
+    )
+    if kind == network.ResourceType.DOCUMENT:
+        with pytest.raises(
+            ValueError,
+            match=re.escape(f"non-public address {address}"),
+        ):
+            _load_page(browser)
+    else:
+        assert _load_page(browser) == b"<html>ok</html>"
+    tab = browser.last_tab
+    assert tab is not None
+    assert tab.failed_requests == ["req-1"]
+    assert not tab.continued_requests
+    assert ("Page.stopLoading" in [c["method"] for c in tab.wire_commands]) is (
+        kind == network.ResourceType.DOCUMENT
+    )
 
 
 @pytest.mark.asyncio
@@ -1920,12 +1967,19 @@ async def test_request_guard_refuses_non_web_documents_and_file_resources(
     kind: network.ResourceType,
 ) -> None:
     tab = _FakeTab(content="ok", href="https://public.example/")
-    with pytest.raises(ValueError, match="Unsupported URL scheme"):
+
+    async def go() -> None:
         async with zendriver.guard_requests(
             cast(Tab, tab),
             deadline=asyncio.get_running_loop().time() + 1,
         ):
             tab.pause_request(_request_paused(url, resource_type=kind))
+
+    if kind == network.ResourceType.DOCUMENT:
+        with pytest.raises(ValueError, match="Unsupported URL scheme"):
+            await go()
+    else:
+        await go()
     assert tab.failed_requests == ["req-1"]
     assert not tab.continued_requests
 
@@ -3463,14 +3517,14 @@ def test_shared_chrome_launches_detached_when_no_chrome_answers(
     (profile / "DevToolsActivePort").write_text("1\n/stale\n")
 
     def popen(args: list[str], **kwargs: object) -> _ChromeProcess:
+        assert "--remote-debugging-port=0" not in args
         captured["args"] = args
         captured.update(kwargs)
         assert not (profile / "DevToolsActivePort").exists()
-        (profile / "DevToolsActivePort").write_text("6789\n/devtools/browser/x\n")
         return process
 
     def answers(port: int) -> bool:
-        return port == 6789
+        return port == 4242
 
     monkeypatch.setattr(zendriver, "_devtools_port", _port_4242)
     monkeypatch.setattr(subprocess, "Popen", popen)
@@ -3490,7 +3544,7 @@ def test_shared_chrome_launches_detached_when_no_chrome_answers(
             headless=headless,
             restore_session=restore_session,
         )
-        == 6789
+        == 4242
     )
     assert captured["start_new_session"] is True
     assert captured["stdin"] == subprocess.DEVNULL
@@ -3499,9 +3553,9 @@ def test_shared_chrome_launches_detached_when_no_chrome_answers(
     assert zendriver._launched == [process]
     args = cast(list[str], captured["args"])
     assert args[0] == "/native/chrome"
-    assert args[-2:] == [
-        "--remote-debugging-port=0",
-        "--restore-last-session" if restore_session else "about:blank",
+    assert args[-1] == ("--restore-last-session" if restore_session else "about:blank")
+    assert [arg for arg in args if arg.startswith("--remote-debugging-port=")] == [
+        "--remote-debugging-port=4242",
     ]
     assert f"--user-data-dir={profile}" in args
     assert ("--headless=new" in args) is headless
@@ -3538,6 +3592,7 @@ def test_shared_chrome_launches_chrome_for_testing_with_a_mock_keychain(
     monkeypatch.setattr(zendriver, "_port_answers", partial(int.__eq__, 6789))
     monkeypatch.setattr(zendriver, "_launched", [])
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "/cache/CfT")
+    monkeypatch.setattr("zendriver.core.util.free_port", lambda: 6789)
 
     zendriver._shared_chrome(profile, headless=True)
     assert captured[0][0] == "/cache/CfT"
@@ -3595,7 +3650,12 @@ def test_shared_chrome_waits_for_slow_startup(
     monkeypatch.setattr(subprocess, "Popen", partial(_popen, process))
     monkeypatch.setattr(zendriver, "_launched", [])
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
-    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
+
+    def answers(port: int) -> bool:
+        assert port == 4242
+        return bool(sleeps)
+
+    monkeypatch.setattr(zendriver, "_port_answers", answers)
     monkeypatch.setattr(
         zendriver,
         "time",
@@ -3633,6 +3693,7 @@ def test_shared_chrome_kills_a_chrome_that_never_reports_a_port(
     monkeypatch.setattr(subprocess, "Popen", partial(_popen, process))
     monkeypatch.setattr(zendriver, "_launched", [])
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_nowhere)
     monkeypatch.setattr(time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(time, "sleep", _no_sleep)
     with pytest.raises(zendriver.BrowserUnavailableError) as exc:
@@ -3643,7 +3704,7 @@ def test_shared_chrome_kills_a_chrome_that_never_reports_a_port(
 
 
 @pytest.mark.parametrize("contents", ["", "not-a-port"])
-def test_shared_chrome_waits_for_a_complete_port_file(
+def test_shared_chrome_does_not_read_a_port_file_for_an_explicit_port(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     contents: str,
@@ -3667,7 +3728,7 @@ def test_shared_chrome_waits_for_a_complete_port_file(
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
     monkeypatch.setattr(time, "sleep", sleep)
     assert zendriver._shared_chrome(profile, headless=True) == 4242
-    assert sleeps == [0.05]
+    assert sleeps == []
 
 
 def test_shared_chrome_reports_a_missing_chrome(

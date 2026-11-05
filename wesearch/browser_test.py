@@ -835,6 +835,11 @@ def test_real_mode_roundtrip_preserves_profile_and_reconnects(tmp_path: Path) ->
             assert switched.restarted
             assert api.browser("mode", session=sibling).mode == mode
             assert api.browser("tabs", session=sibling).tabs
+            chrome = pool.run(
+                pool.browser(sibling.profile_dir, headless=sibling.headless),
+            )
+            if mode == "headed":
+                assert pool.run(chrome.tabs[0].evaluate("navigator.webdriver")) is False
             unchanged = api.browser("mode", mode=mode, session=sibling)
             assert unchanged.mode == mode
             assert not unchanged.restarted
