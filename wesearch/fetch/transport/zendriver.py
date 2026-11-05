@@ -564,8 +564,16 @@ async def _load(
             # Off-loop: a plain ``set()`` would not wake the waiter.
             loop.call_soon_threadsafe(navigated.set)
 
-    async with asyncio.timeout(timeout_sec):
-        browser = await pool.browser(profile_dir, headless=headless)
+    try:
+        async with asyncio.timeout(timeout_sec):
+            browser = await pool.browser(profile_dir, headless=headless)
+    except TimeoutError as error:
+        # Not a timed-out page: callers fall back only from an absent browser, and
+        # the launch goes on for the next call.
+        raise BrowserUnavailableError(
+            f"Chrome was still starting after {timeout_sec:g}s.",
+        ) from error
+    async with asyncio.timeout_at(request_deadline):
         connection = browser.connection
         if connection is None:
             raise BrowserUnavailableError("The browser has no DevTools connection.")
@@ -958,7 +966,8 @@ def _switch_mode(
             desired = True if headless is None else headless
             _start_shared_chrome(profile_dir, headless=desired)
             return desired, False
-        actual = pool.run(_read_mode(port), timeout_sec=5)
+        # A cold Chrome accepts connections up to 6s before it first answers one.
+        actual = pool.run(_read_mode(port), timeout_sec=15)
         if headless is None or actual == headless:
             return actual, False
         if not restart:
@@ -1035,7 +1044,12 @@ def _start_shared_chrome(
     except OSError as error:
         raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
     _launched.append(process)
-    deadline = time.monotonic() + 10.0
+    # Paging Chrome in from a cold disk took fresh CI runners up to 24s, against
+    # 0.2s warm, and a kill makes the next launch pay most of that again. Callers
+    # stop waiting at their own deadlines; this bound only frees the launch lock
+    # from a Chrome that will never answer.
+    budget_sec = 60
+    deadline = time.monotonic() + budget_sec
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise BrowserUnavailableError(
@@ -1049,7 +1063,7 @@ def _start_shared_chrome(
     process.kill()
     process.wait()
     raise BrowserUnavailableError(
-        "Could not launch Chrome: DevTools did not come up in 10s.",
+        f"Could not launch Chrome: DevTools did not come up in {budget_sec}s.",
     )
 
 

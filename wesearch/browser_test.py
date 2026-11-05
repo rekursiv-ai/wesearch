@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent import futures
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeVar
 
 import asyncio
 import base64
@@ -727,7 +727,7 @@ def headed_display(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
                 ready.register(display.stdout, selectors.EVENT_READ)
                 if not ready.select(timeout=10):
                     pytest.fail("Xvfb did not report a display within 10 seconds.")
-            number = cast(bytes, display.stdout.readline()).decode().strip()  # ty: ignore[redundant-cast] -- basedpyright's typeshed declares Popen.stdout as IO[Any]; ty infers bytes.
+            number = os.read(display.stdout.fileno(), 32).decode().strip()
             if not number.isdecimal():
                 pytest.fail("Xvfb exited without reporting a display number.")
             monkeypatch.setenv("DISPLAY", f":{number}")
@@ -818,9 +818,12 @@ def test_real_mode_roundtrip_preserves_profile_and_reconnects(tmp_path: Path) ->
         assert original.tabs
         pool = zendriver.get_browser_pool(sibling)
         pool.run(_seed_mode_cookie(pool, sibling))
+        pool.run(_retitle_tabs(pool, sibling))
         with pytest.raises(api.BrowserError, match="restart=True"):
             api.browser("mode", mode="headed", session=session)
-        assert api.browser("tabs", session=sibling) == original
+        # By id alone: a tab's title is the page's to change, and Chrome reports a
+        # fresh tab's as "" until its first navigation commits.
+        assert _tab_ids(api.browser("tabs", session=sibling)) == _tab_ids(original)
         for mode in ("headed", "headless"):
             switched = api.browser(
                 "mode",
@@ -836,6 +839,17 @@ def test_real_mode_roundtrip_preserves_profile_and_reconnects(tmp_path: Path) ->
             assert unchanged.mode == mode
             assert not unchanged.restarted
             assert pool.run(_read_mode_cookie(pool, sibling)) == "retained"
+
+
+def _tab_ids(result: api.BrowserResult) -> list[str]:
+    return [tab.tab_id for tab in result.tabs]
+
+
+async def _retitle_tabs(pool: zendriver.BrowserPool, session: FetchSession) -> None:
+    chrome = await pool.browser(session.profile_dir, headless=session.headless)
+    await chrome.update_targets()
+    for tab in chrome.tabs:
+        await tab.evaluate("document.title = 'retitled'")
 
 
 async def _seed_mode_cookie(pool: zendriver.BrowserPool, session: FetchSession) -> None:
