@@ -22,6 +22,7 @@ import tempfile
 
 __all__ = [
     "chrome_available",
+    "chrome_binary",
     "die_with_parent",
     "drive_chrome",
 ]
@@ -45,7 +46,7 @@ _libc = _load_libc()
 
 def chrome_available() -> bool:
     """Whether a Chrome binary that honors ``--user-data-dir`` is on ``PATH``."""
-    return _chrome_binary() is not None
+    return chrome_binary() is not None
 
 
 def drive_chrome(
@@ -75,7 +76,7 @@ def drive_chrome(
       RuntimeError: When no Chrome binary is available.
 
     """
-    binary = _chrome_binary()
+    binary = chrome_binary()
     if binary is None:
         raise RuntimeError("No Chrome binary found on PATH.")
     timed_out = False
@@ -137,8 +138,13 @@ def die_with_parent() -> None:
         _libc.prctl(1, signal.SIGKILL, 0, 0, 0)
 
 
-def _chrome_binary() -> str | None:
-    """Return the first usable Chrome binary name, or ``None``."""
+def chrome_binary() -> str | None:
+    """Return the first usable Chrome binary name, or ``None``.
+
+    Returns:
+        binary: Native Chrome launcher name on PATH, or None when unavailable.
+
+    """
     for name in (
         "google-chrome-stable",
         "google-chrome",

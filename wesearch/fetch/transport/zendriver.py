@@ -39,6 +39,7 @@ import warnings
 
 from treekle import from_plain
 
+from wesearch.chrome.capture import chrome_binary
 from wesearch.fetch.challenge import (
     classify_challenge,
     classify_http_error,
@@ -1012,7 +1013,7 @@ def _start_shared_chrome(
         user_data_dir=str(profile_dir),
         # Chrome's sandbox refuses to run as root.
         sandbox=os.geteuid() != 0,
-        browser_executable_path=executable,
+        browser_executable_path=executable or chrome_binary() or "",
         browser_args=["--use-mock-keychain"] if executable else [],
         host="127.0.0.1",
     )

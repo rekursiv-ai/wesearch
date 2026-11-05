@@ -72,6 +72,7 @@ def _stub_browser_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # A string target: `zendriver` names this package's transport module here.
     monkeypatch.setattr("zendriver.core.config.find_executable", find_fake_browser)
+    monkeypatch.setattr(zendriver, "chrome_binary", lambda: None)
 
 
 # A fake profile dir; the browser is mocked in every test, so it is never
@@ -1769,8 +1770,8 @@ class TestBrowserHonorsPrivateHostsPerHop:
         browser = _FakeBrowser(
             href="https://a.example/start",
             paused_events=[
-                _request_paused("https://b.example/next"),
-                _request_paused("https://a.example/start"),
+                _request_paused("https://b.example/next", request_id="hop-1"),
+                _request_paused("https://a.example/start", request_id="hop-2"),
             ],
         )
         seen: list[str] = []
@@ -3418,10 +3419,12 @@ def test_shared_chrome_attaches_to_a_running_chrome_instead_of_launching(
 
 
 @pytest.mark.parametrize("headless", [True, False])
+@pytest.mark.parametrize("uid", [0, 1000])
 def test_shared_chrome_launches_detached_when_no_chrome_answers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     headless: bool,
+    uid: int,
 ) -> None:
     """The shared Chrome must survive its launcher's exit and Ctrl-C."""
     profile = tmp_path / "profile"
@@ -3443,17 +3446,22 @@ def test_shared_chrome_launches_detached_when_no_chrome_answers(
     monkeypatch.setattr(zendriver, "_port_answers", answers)
     monkeypatch.setattr(zendriver, "_launched", [])
     monkeypatch.setattr(zendriver, "_chrome_for_testing", lambda: "")
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        zendriver,
+        "chrome_binary",
+        lambda: "/native/chrome",
+    )
+    monkeypatch.setattr(os, "geteuid", lambda: uid)
 
     assert zendriver._shared_chrome(profile, headless=headless) == 6789
     assert captured["start_new_session"] is True
     args = cast(list[str], captured["args"])
-    assert args[0] == "/fake/chrome"
+    assert args[0] == "/native/chrome"
     assert args[-2:] == ["--remote-debugging-port=0", "about:blank"]
     assert f"--user-data-dir={profile}" in args
     assert ("--headless=new" in args) is headless
     # Chrome's sandbox refuses to run as root.
-    assert "--no-sandbox" in args
+    assert ("--no-sandbox" in args) is (uid == 0)
     assert "--remote-debugging-host=127.0.0.1" in args
     assert "--use-mock-keychain" not in args
     assert not any(
