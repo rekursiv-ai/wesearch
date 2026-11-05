@@ -7,6 +7,8 @@ All notable wesearch changes are documented here. This project follows
 
 ### Changed
 
+- **Breaking:** the `zendriver` console script is renamed `webrowser`.
+  Chrome's profile and cookies are unchanged; the transport remains `zendriver`.
 - `wesearch.paper.fetch.oa_url_of` is `open_access_url`.
 
 ### Fixed

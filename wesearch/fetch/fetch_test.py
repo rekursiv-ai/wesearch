@@ -1909,7 +1909,7 @@ class TestCurlThenZendriverBackend:
         assert error.value.url == "https://raw.example/"
         assert error.value.body == b"<form id=x>"
         assert str(error.value) == (
-            "challenge served Run `zendriver https://raw.example/` and solve the "
+            "challenge served Run `webrowser https://raw.example/` and solve the "
             "challenge; the site unlocks once its page loads."
         )
 

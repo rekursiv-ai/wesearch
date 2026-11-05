@@ -88,17 +88,17 @@ _VENDOR_TRANSACTION_CALL = Transaction[object].__call__
 
 
 @pytest.mark.cli_python_subprocess
-def test_direct_executable_reexecutes_as_module() -> None:
-    script = _CWD / "zendriver.py"
+def test_webrowser_executable_uses_shared_browser_command() -> None:
+    script = _CWD.parents[3] / "bin" / "webrowser"
     result = subprocess.run(  # noqa: S603 -- fixed argv: this repo's own script.
-        ["/bin/sh", "-x", str(script), "--help"],
+        [str(script), "--help"],
         capture_output=True,
         text=True,
         check=False,
     )
 
     assert result.returncode == 0
-    assert "python3 -P -m wesearch.fetch.transport.zendriver --help" in result.stderr
+    assert result.stdout.startswith("usage: webrowser [-h] [url]\n")
     assert "RuntimeWarning" not in result.stderr
 
 
@@ -4753,7 +4753,7 @@ def test_main_prints_lifecycle_and_opens_url(
 
     profile = data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver"
     monkeypatch.setattr(zendriver, "open_window", open_window)
-    monkeypatch.setattr(sys, "argv", ["zendriver", "https://example.com/"])
+    monkeypatch.setattr(sys, "argv", ["webrowser", "https://example.com/"])
     assert zendriver.main() == 0
     assert opened == [("https://example.com/", profile)]
     assert capsys.readouterr().out == (
@@ -4770,12 +4770,12 @@ def test_main_defaults_to_a_blank_page(monkeypatch: pytest.MonkeyPatch) -> None:
         opened.append(url)
 
     monkeypatch.setattr(zendriver, "open_window", open_window)
-    monkeypatch.setattr(sys, "argv", ["zendriver"])
+    monkeypatch.setattr(sys, "argv", ["webrowser"])
     zendriver.main()
     assert opened == ["about:blank"]
 
 
-@pytest.mark.parametrize("prog", ["zendriver", "different-name"])
+@pytest.mark.parametrize("prog", ["webrowser", "different-name"])
 def test_main_help_is_exact(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -4786,7 +4786,7 @@ def test_main_help_is_exact(
         zendriver.main()
     assert error.value.code == 0
     assert capsys.readouterr().out == (
-        "usage: zendriver [-h] [url]\n\n"
+        "usage: webrowser [-h] [url]\n\n"
         "Open a URL in a visible Chrome on the profile the zendriver transport fetches "
         "with, to see what a fetch saw or to log in. Cookies you set persist for later "
         "fetches. Close the window when done.\n\n"
@@ -4795,9 +4795,9 @@ def test_main_help_is_exact(
         "options:\n"
         "  -h, --help  show this help message and exit\n\n"
         "Examples:\n"
-        "  zendriver https://the-site-that-failed.example/\n"
-        "  zendriver https://login.example/  # seat a session cookie\n"
-        "  zendriver # opens blank; navigate by hand\n"
+        "  webrowser https://the-site-that-failed.example/\n"
+        "  webrowser https://login.example/  # seat a session cookie\n"
+        "  webrowser # opens blank; navigate by hand\n"
     )
 
 

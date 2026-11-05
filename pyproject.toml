@@ -45,7 +45,7 @@ dependencies = [
 
 [project.scripts]
 wesearch-mcp = "wesearch.mcp.server:main"
-zendriver = "wesearch.fetch.transport.zendriver:main"
+webrowser = "wesearch.fetch.transport.zendriver:main"
 
 [dependency-groups]
 
