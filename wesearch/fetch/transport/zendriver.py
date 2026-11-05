@@ -1035,7 +1035,7 @@ def _start_shared_chrome(
     except OSError as error:
         raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
     _launched.append(process)
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise BrowserUnavailableError(
@@ -1049,7 +1049,7 @@ def _start_shared_chrome(
     process.kill()
     process.wait()
     raise BrowserUnavailableError(
-        "Could not launch Chrome: DevTools did not come up in 3s.",
+        "Could not launch Chrome: DevTools did not come up in 10s.",
     )
 
 
