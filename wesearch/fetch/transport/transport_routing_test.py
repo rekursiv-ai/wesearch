@@ -20,32 +20,24 @@ from wesearch.lib.userdirs import state_dir
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def test_default_path_uses_per_user_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_default_path_uses_per_user_state() -> None:
     """A remembered domain lands in the per-user state file, not anywhere else.
 
     Asserted by writing through the real code path and reading the file back.
     Comparing two hand-built ``state_dir(...)`` expressions instead compares an
     expression to itself and passes against any implementation.
     """
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     remember_zendriver_domain("walled.example")
     expected = state_dir() / "rekursiv-ai" / "wesearch" / "zendriver-domains.txt"
     assert expected.is_file()
     assert "walled.example" in expected.read_text().split()
 
 
-def test_default_remember_does_not_modify_bundled_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_default_remember_does_not_modify_bundled_manifest() -> None:
     bundled = _CWD / "zendriver-domains.txt"
     # The bundled default list is optional; read defensively so this asserts
     # "the bundle is never mutated" whether it is present or absent.
     before = bundled.read_bytes() if bundled.exists() else None
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
     remember_zendriver_domain("learned.example")
 

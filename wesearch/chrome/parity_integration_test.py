@@ -233,21 +233,16 @@ def test_case_variant_cookie_header_not_duplicated_on_wire(
 
 @pytest.mark.browser_chrome
 @_needs_chrome
-def test_browser_backend_fetches_live_page(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_browser_backend_fetches_live_page() -> None:
     """The opt-in browser backend renders a live page headless.
 
     Drives the public API with ``transport="zendriver"`` against a real site
     through a throwaway profile dir, proving the zendriver backend launches
     Chrome and returns rendered bytes. Chrome-gated; skipped without a binary.
 
-    The throwaway profile is redirected through ``XDG_DATA_HOME`` -- the seam
-    ``data_dir`` actually reads -- so the operator's real logged-in Chrome
-    profile is never touched.
+    The shared ``isolate_user_dirs`` fixture redirects the profile, so the
+    operator's real logged-in Chrome profile is never touched.
     """
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     body: bytes | None = None
     try:
         body = fetch(
