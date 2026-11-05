@@ -18,13 +18,15 @@ Examples:
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Protocol, cast, get_args
 
 import argparse
 import time
 
+from wesearch.browser import BrowserError, browser
 from wesearch.fetch.transport import zendriver
+from wesearch.fetch.types import FetchSession
 from wesearch.search.search import search
 from wesearch.search.types import SearchBackends
 
@@ -51,6 +53,20 @@ def main() -> int:
         ok, detail, elapsed = _probe_shared_browser(flags.processes, flags.url)
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} {'browser':<11} {elapsed:5.1f}s  {detail}")
+    if flags.threads:
+        ok, detail, elapsed = _probe_shared_browser(
+            flags.threads,
+            flags.url,
+            threads=True,
+        )
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {'browser':<11} {elapsed:5.1f}s  {detail}")
+    if flags.browser_actions:
+        ok, detail, elapsed = _probe_browser_actions()
+        failures += not ok
+        print(
+            f"{'ok  ' if ok else 'FAIL'} {'browser-actions':<11} {elapsed:5.1f}s  {detail}",
+        )
     return failures
 
 
@@ -60,7 +76,9 @@ class Flags(Protocol):
     backends: list[str]
     query: str
     processes: int
+    threads: int
     url: str
+    browser_actions: bool
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -84,9 +102,20 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         help="Fan this many processes over the shared Chrome (0 skips).",
     )
     parser.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="Also probe N concurrent fetches sharing one browser connection.",
+    )
+    parser.add_argument(
         "--url",
         default="https://example.com/",
         help="Page each browser process fetches.",
+    )
+    parser.add_argument(
+        "--browser-actions",
+        action="store_true",
+        help="Exercise a synthetic httpbin form, screenshots, and persistent tabs.",
     )
 
 
@@ -113,14 +142,83 @@ def _probe_backend(backend: str, query: str) -> tuple[bool, str, float]:
     return True, f"{len(results)} results; first {results[0].url}", elapsed
 
 
-def _probe_shared_browser(processes: int, url: str) -> tuple[bool, str, float]:
-    """Fetch ``url`` from ``processes`` processes at once through the shared Chrome."""
+def _probe_shared_browser(
+    workers: int,
+    url: str,
+    *,
+    threads: bool = False,
+) -> tuple[bool, str, float]:
+    """Fetch ``url`` concurrently through one connection or independent processes."""
     started = time.monotonic()
-    with ProcessPoolExecutor(processes) as pool:
-        landed = list(pool.map(_browser_fetch, [url] * processes))
+    executor = ThreadPoolExecutor if threads else ProcessPoolExecutor
+    with executor(workers) as pool:
+        landed = list(pool.map(_browser_fetch, [url] * workers))
     elapsed = time.monotonic() - started
     ok = sum(landed)
-    return ok == processes, f"{ok}/{processes} processes fetched {url}", elapsed
+    kind = "threads" if threads else "processes"
+    return ok == workers, f"{ok}/{workers} {kind} fetched {url}", elapsed
+
+
+def _probe_browser_actions() -> tuple[bool, str, float]:
+    """Exercise a public synthetic form across persistent browser connections."""
+    started = time.monotonic()
+    try:
+        _exercise_browser_actions()
+    except (BrowserError, ValueError, OSError) as error:
+        return (
+            False,
+            f"{type(error).__name__}: {error}"[:160],
+            time.monotonic() - started,
+        )
+    return (
+        True,
+        "persistent tab; fill, press, click, PNG, submitted value, close passed",
+        time.monotonic() - started,
+    )
+
+
+def _exercise_browser_actions() -> None:
+    """Submit only synthetic public data; preserve every pre-existing tab."""
+    with FetchSession() as session:
+        before = {tab.tab_id for tab in browser("tabs", session=session).tabs}
+        opened = browser("open", url="https://httpbin.org/forms/post", session=session)
+        if opened.tab is None:
+            raise ValueError("Open returned no tab")
+        tab_id = opened.tab.tab_id
+    with FetchSession() as session:
+        try:
+            browser("inspect", tab_id=tab_id, session=session)
+            browser(
+                "fill",
+                tab_id=tab_id,
+                selector="input[name=custname]",
+                text="wesearch-canary",
+                session=session,
+            )
+            browser(
+                "press",
+                tab_id=tab_id,
+                selector="input[name=custname]",
+                key="Tab",
+                session=session,
+            )
+            browser(
+                "click",
+                tab_id=tab_id,
+                selector="input[name=size][value=small]",
+                session=session,
+            )
+            image = browser("screenshot", tab_id=tab_id, session=session).screenshot
+            if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("Screenshot returned no PNG")
+            echoed = browser("click", tab_id=tab_id, selector="button", session=session)
+            if "wesearch-canary" not in echoed.text:
+                raise ValueError("Submitted form did not echo the filled value")
+        finally:
+            browser("close", tab_id=tab_id, session=session)
+        after = {tab.tab_id for tab in browser("tabs", session=session).tabs}
+        if before - after or tab_id in after:
+            raise ValueError("Probe changed unrelated tabs or failed to close its tab")
 
 
 def _browser_fetch(url: str) -> bool:

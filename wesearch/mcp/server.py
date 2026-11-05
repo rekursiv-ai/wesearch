@@ -33,15 +33,25 @@ try:
     from mcp.server import MCPServer
     from mcp.server.mcpserver import Context
     from mcp.server.mcpserver.exceptions import ToolError
+    from mcp.server.mcpserver.utilities.types import Image
+    from mcp.types import CallToolResult, TextContent
 except ImportError as e:  # pragma: no cover -- depends on the install's extras.
     # A bare ModuleNotFoundError names `mcp`, not the extra that supplies it.
     raise ImportError(
         "The wesearch MCP server requires the 'mcp' extra: pip install wesearch[mcp]",
     ) from e
 
+from treekle import json_dumps
+
+from wesearch import browser
 from wesearch.fetch import FetchSession
 from wesearch.lib.userdirs import cache_dir
-from wesearch.mcp.types import FetchParamsSchema, SearchParamsSchema
+from wesearch.mcp.types import (
+    BrowserParamsSchema,
+    FetchParamsSchema,
+    SearchParamsSchema,
+    browser_data,
+)
 from wesearch.paper import (
     authors,
     details,
@@ -475,6 +485,75 @@ def web_fetch(
         "truncated": result.truncated,
         "kind": result.kind,
     }
+
+
+@mcp.tool()
+@_surface_errors
+@_append_doc(BrowserParamsSchema.asset_markdown())
+def web_browser(
+    action: browser.BrowserAction,
+    *,
+    tab_id: str = "",
+    url: str = "",
+    selector: str = "",
+    text: str = "",
+    key: str = "",
+    mode: browser.BrowserMode | None = None,
+    restart: bool = False,
+    max_chars: int = 20_000,
+    timeout_sec: float = 30,
+    ctx: Context[FetchSession] | None = None,
+) -> CallToolResult:
+    """Interact with the existing persistent Chrome; tabs survive calls and disconnects.
+
+    Reads need no approval. Obtain user approval before purchases, accepting terms,
+    account changes, or other consequential externally visible actions. Use tab ids
+    and CSS selectors from inspection; no arbitrary JavaScript is accepted.
+    Action='mode' reports actual mode or requests headed/headless. Obtain user
+    consent before restarting or interrupting shared Chrome. A mode change requires
+    restart=True, invalidates tab ids, restores tabs best-effort, and keeps the profile.
+
+    Args:
+      action: Browser action; see the parameter list below.
+      tab_id: Stable tab target id, except for tabs/open/mode.
+      url: Public HTTP(S) destination for open/navigate.
+      selector: CSS selector for click/fill/press.
+      text: Replacement field contents for fill; may be sensitive.
+      key: Key for press; see the parameter list below.
+      mode: Requested headed/headless mode; omit to report actual mode.
+      restart: Permit shared Chrome restart for a mode change after user consent.
+      max_chars: Maximum inspected text length.
+      timeout_sec: Entire action deadline in seconds.
+      ctx: The request, injected by the server; not a client argument.
+
+    Returns:
+      result: Structured tab and inspection metadata, with native PNG image content
+        for screenshots. Screenshot bytes are never returned as text or files.
+
+    """
+    result = browser.browser(
+        action,
+        tab_id=tab_id,
+        url=url,
+        selector=selector,
+        text=text,
+        key=key,
+        mode=mode,
+        restart=restart,
+        max_chars=max_chars,
+        timeout_sec=timeout_sec,
+        session=_session(ctx),
+    )
+    data = browser_data(result)
+    response = CallToolResult(
+        content=[TextContent(type="text", text=json_dumps(data))],
+        structured_content=data,
+    )
+    if result.screenshot:
+        response.content.append(
+            Image(data=result.screenshot, format="png").to_image_content(),
+        )
+    return response
 
 
 def main() -> int:
