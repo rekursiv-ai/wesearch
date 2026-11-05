@@ -410,29 +410,44 @@ class TestConcurrentSafety:
         got = _loaded(stores[0], "1.2.3.4", "x.com")
         assert set(got.cookies) == {f"k{n}-{i}" for n in range(4) for i in range(12)}
 
-    def test_concurrent_writes_never_share_a_temp_file(self, tmp_path: Path) -> None:
-        stores = [ProfileStore(base_dir=tmp_path, ttl_sec=3600.0) for _ in range(2)]
-        start = threading.Barrier(2)
+    def test_concurrent_writes_never_share_a_temp_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
+        path = store._path("1.2.3.4", "x.com")
+        replacing = threading.Barrier(2)
+        temporary: list[Path] = []
         errors: list[BaseException] = []
+        replace = Path.replace
 
-        def worker(store: ProfileStore) -> None:
-            start.wait()
+        def overlap(source: Path, target: Path) -> Path:
+            temporary.append(source)
+            replacing.wait(timeout=5)
+            return replace(source, target)
+
+        monkeypatch.setattr(Path, "replace", overlap)
+
+        def worker(data: bytes) -> None:
             try:
-                for i in range(40):
-                    store.save("1.2.3.4", "x.com", Profile(cookies={"i": str(i)}))
-            except OSError as error:
+                store._write(path, data)
+            except (OSError, threading.BrokenBarrierError) as error:
                 errors.append(error)
 
-        threads = [threading.Thread(target=worker, args=(s,)) for s in stores]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert errors == []
-        assert sorted(p.name for p in tmp_path.iterdir()) == [
-            ".1.2.3.4|x.com.json.lock",
-            "1.2.3.4|x.com.json",
+        threads = [
+            threading.Thread(target=worker, args=(data,)) for data in (b"a", b"b")
         ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert len(set(temporary)) == 2
+        assert all(source.parent == path.parent for source in temporary)
+        assert path.read_bytes() in (b"a", b"b")
+        assert list(tmp_path.iterdir()) == [path]
 
 
 if __name__ == "__main__":
