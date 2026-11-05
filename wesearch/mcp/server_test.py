@@ -25,10 +25,16 @@ from treekle import from_plain
 import fastjsonschema
 import mcp.types as mcp_types
 
+from wesearch import browser
+from wesearch.browser import BrowserMode, BrowserResult
 from wesearch.fetch import FetchSession
 from wesearch.mcp import server
 from wesearch.mcp.schema import Schema, literal_values
-from wesearch.mcp.types import FetchBodyParamsSchema, SearchParamsSchema
+from wesearch.mcp.types import (
+    BrowserParamsSchema,
+    FetchBodyParamsSchema,
+    SearchParamsSchema,
+)
 from wesearch.paper import authors, details, fetch, search
 from wesearch.paper.types import AuthorRecord, PaperRecord
 from wesearch.search import types
@@ -251,6 +257,7 @@ _MCP_OMITS = frozenset({"method", "json", "form"})
 _PARAM_SURFACES: list[tuple[type[Schema], str, frozenset[str]]] = [
     (FetchBodyParamsSchema, "web_fetch", _MCP_OMITS),
     (SearchParamsSchema, "web_search", frozenset()),
+    (BrowserParamsSchema, "web_browser", frozenset()),
 ]
 
 
@@ -464,6 +471,7 @@ _TOOLS = (
     "author_papers",
     "web_search",
     "web_fetch",
+    "web_browser",
 )
 
 
@@ -487,6 +495,7 @@ _SESSION_CALLS: list[tuple[str, dict[str, object], tuple[object, str, object]]] 
     ),
     ("author_papers", {"author_id": "1"}, (authors, "author_papers", _LISTING)),
     ("web_search", {"query": "q"}, (server, "search", [])),
+    ("web_browser", {"action": "tabs"}, (browser, "browser", BrowserResult())),
     (
         "web_fetch",
         {"url": "https://e.co"},
@@ -714,6 +723,95 @@ def _enum_values(schema: object) -> set[object]:
     for branch in from_plain(prop.get("anyOf"), list[dict[str, object]], default=[]):
         values |= _enum_values(branch)
     return values
+
+
+def test_browser_forwards_all_arguments_and_returns_native_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def act(action: str, **kwargs: object) -> BrowserResult:
+        seen.append({"action": action, **kwargs})
+        return BrowserResult(text="bounded", truncated=True, screenshot=b"png")
+
+    monkeypatch.setattr(browser, "browser", act)
+    arguments = {
+        "action": "fill",
+        "tab_id": "t",
+        "url": "",
+        "selector": "#p",
+        "text": "secret",
+        "key": "",
+        "max_chars": 17,
+        "timeout_sec": 4.5,
+    }
+    result = asyncio.run(server.mcp.call_tool("web_browser", arguments))
+    assert isinstance(result, mcp_types.CallToolResult)
+    assert seen == [{**arguments, "mode": None, "restart": False, "session": None}]
+    assert cast(object, result.structured_content) == {
+        "tab": None,
+        "tabs": [],
+        "text": "bounded",
+        "elements": [],
+        "truncated": True,
+        "mode": None,
+        "restarted": False,
+    }
+    images = [
+        part for part in result.content if isinstance(part, mcp_types.ImageContent)
+    ]
+    assert len(images) == 1
+    assert images[0].mime_type == "image/png"
+    assert images[0].data == "cG5n"
+    assert all(
+        "cG5n" not in part.text
+        for part in result.content
+        if isinstance(part, mcp_types.TextContent)
+    )
+
+
+def test_browser_surfaces_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*args: object, **kwargs: object) -> BrowserResult:
+        del args, kwargs
+        raise ValueError("Unknown tab")
+
+    monkeypatch.setattr(browser, "browser", fail)
+    with pytest.raises(ToolError, match="ValueError: Unknown tab"):
+        asyncio.run(
+            server.mcp.call_tool(
+                "web_browser",
+                {"action": "inspect", "tab_id": "gone"},
+            ),
+        )
+
+
+@pytest.mark.parametrize("mode", [None, "headed", "headless"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_browser_mode_control_reaches_library(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: BrowserMode | None,
+    restart: bool,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def act(action: str, **kwargs: object) -> BrowserResult:
+        seen.append({"action": action, **kwargs})
+        return BrowserResult(mode=mode, restarted=restart)
+
+    monkeypatch.setattr(browser, "browser", act)
+    result = asyncio.run(
+        server.mcp.call_tool(
+            "web_browser",
+            {"action": "mode", "mode": mode, "restart": restart},
+        ),
+    )
+    assert isinstance(result, mcp_types.CallToolResult)
+    assert seen[0]["mode"] == mode
+    assert seen[0]["restart"] is restart
+    data = from_plain(result.structured_content, dict[str, object])
+    assert data["mode"] == mode
+    assert data["restarted"] is restart
+    assert "consent" in (server.web_browser.__doc__ or "")
 
 
 if __name__ == "__main__":

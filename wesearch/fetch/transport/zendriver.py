@@ -16,7 +16,7 @@ see what a fetch saw, clear a block, or log in.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Generator, Mapping
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator, Mapping
 from html import unescape
 from pathlib import Path
 from types import MappingProxyType
@@ -71,7 +71,14 @@ else:
     zendriver = lazy_import("zendriver")  # 214ms.
 
 
-__all__ = ["BrowserPool", "BrowserUnavailableError", "fetch_zendriver", "open_window"]
+__all__ = [
+    "BrowserPool",
+    "BrowserUnavailableError",
+    "fetch_zendriver",
+    "get_browser_pool",
+    "guard_requests",
+    "open_window",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -142,10 +149,7 @@ def fetch_zendriver(
     sent = {name: value for name, value in headers.items() if value is not None}
     cookie = cookie_header(sent, {})
     pairs = (pair.strip().partition("=") for pair in cookie.split(";"))
-    with session.lock:
-        pool = session.browsers
-        if not isinstance(pool, BrowserPool):
-            pool = session.browsers = BrowserPool()
+    pool = get_browser_pool(session)
     try:
         page = pool.run(
             _load(
@@ -169,6 +173,82 @@ def fetch_zendriver(
     return page
 
 
+def get_browser_pool(session: FetchSession) -> BrowserPool:
+    """Return the session's browser pool, creating it once under its lock."""
+    with session.lock:
+        pool = session.browsers
+        if not isinstance(pool, BrowserPool):
+            pool = session.browsers = BrowserPool()
+        return pool
+
+
+@contextlib.asynccontextmanager
+async def guard_requests(
+    tab: zendriver.Tab,
+    *,
+    deadline: float,
+    allow_private_hosts: bool = False,
+    headers: Mapping[str, str] = MappingProxyType({}),
+    initial_url: str = "",
+    max_redirects: int = 10,
+    on_redirect: Callable[[str], None] = ignore,
+) -> AsyncGenerator[_RequestGuard]:
+    """Intercept requests for one operation without taking ownership of its tab.
+
+    Args:
+      tab: Tab whose actions the caller serializes.
+      deadline: Absolute event-loop deadline for request replies.
+      allow_private_hosts: Permit private addresses through the shared host policy.
+      headers: Credentials to inject only on the initial URL's origin.
+      initial_url: Original navigation URL, never inferred from event order.
+      max_redirects: Maximum document hops away from the current URL.
+      on_redirect: Callback before following each document hop; raising aborts it.
+
+    Yields:
+      guard: Await ``drain()`` before trusting an action's successful output.
+
+    Raises:
+      ValueError: A request violates the shared host policy.
+      TimeoutError: Request replies or bounded cleanup exceed their deadline.
+
+    """
+    guard = _RequestGuard(
+        tab,
+        deadline=deadline,
+        allow_private_hosts=allow_private_hosts,
+        headers=headers,
+        initial_url=initial_url,
+        max_redirects=max_redirects,
+        on_redirect=on_redirect,
+    )
+    register = cast(
+        Callable[[type[object], Callable[..., object]], None],
+        tab.add_handler,
+    )
+    remove = cast(
+        Callable[[type[object], Callable[..., object]], None],
+        tab.remove_handlers,
+    )
+    register(zendriver.cdp.fetch.RequestPaused, guard.on_paused)
+    try:
+        async with asyncio.timeout_at(deadline):
+            await tab.send(
+                zendriver.cdp.fetch.enable(
+                    patterns=[
+                        zendriver.cdp.fetch.RequestPattern(
+                            url_pattern="*",
+                            request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
+                        ),
+                    ],
+                ),
+            )
+        yield guard
+        await guard.drain()
+    finally:
+        remove(zendriver.cdp.fetch.RequestPaused, guard.on_paused)
+        await guard.finish()
+
+
 def open_window(url: str, *, profile_dir: Path) -> None:
     """Open ``url`` in a visible Chrome on ``profile_dir``; block until it closes.
 
@@ -183,14 +263,20 @@ def open_window(url: str, *, profile_dir: Path) -> None:
     """
     pool = BrowserPool()
     try:
-        # Across both, or a fetch in between relaunches headless on the profile.
-        with _launch_lock(profile_dir):
-            port = _devtools_port(profile_dir)
-            if port is not None and _port_answers(port):
-                asyncio.run(_close_chrome(port))
-            browser = pool.run(_launch(profile_dir))
+        pool.run(pool.mode(profile_dir, headless=False, restart=True))
+        browser = pool.run(pool.browser(profile_dir, headless=False))
+        try:
+            visited = pool.run(_watch_window(url, browser))
+        except BaseException:
+            try:
+                port = browser.config.port
+                assert isinstance(port, int)
+                pool.run(_close_chrome(port), timeout_sec=30)
+            except Exception:
+                logger.warning("browser stop failed during interruption", exc_info=True)
+            raise
         # Again at close: an agent may have relocked a site meanwhile.
-        for host in pool.run(_watch_window(url, browser)):
+        for host in visited:
             clear_host(host)
     finally:
         pool.shutdown()
@@ -204,8 +290,10 @@ class BrowserPool:
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
-        self._browsers: dict[str, tuple[bool, zendriver.Browser]] = {}
+        self._browsers: dict[str, zendriver.Browser] = {}
         self._connect_lock = asyncio.Lock()
+        self.targets_lock = asyncio.Lock()
+        self._tab_locks: dict[str, asyncio.Lock] = {}
         self._lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -213,6 +301,10 @@ class BrowserPool:
             daemon=True,
         )
         self._thread.start()
+
+    def tab_lock(self, tab_id: str) -> asyncio.Lock:
+        """Return the lock serializing actions on ``tab_id`` on the pool's loop."""
+        return self._tab_locks.setdefault(tab_id, asyncio.Lock())
 
     def run(self, coro: Coroutine[object, object, _T], *, timeout_sec: float = 0) -> _T:
         """Run ``coro`` on the pool's loop; return its result.
@@ -232,7 +324,7 @@ class BrowserPool:
         future: Future[_T] = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return future.result(timeout=timeout_sec or None)
-        except TimeoutError:
+        except BaseException:
             future.cancel()
             raise
 
@@ -247,7 +339,7 @@ class BrowserPool:
           browser: The connection.
 
         Raises:
-          BrowserUnavailableError: When the live connection has the other mode.
+          BrowserUnavailableError: When Chrome cannot be launched or attached.
 
         """
         key = str(profile_dir.resolve())  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
@@ -258,17 +350,13 @@ class BrowserPool:
             # connection lacks.
             live = (
                 existing is not None
-                and (connection := existing[1].connection) is not None
+                and (connection := existing.connection) is not None
                 and not connection.closed
                 and connection.listener is not None
                 and connection.listener.running
             )
             if existing is not None and live:
-                if existing[0] != headless:
-                    raise BrowserUnavailableError(
-                        "Cannot change Zendriver launch mode for a live profile.",
-                    )
-                return existing[1]
+                return existing
             port = await asyncio.to_thread(
                 _shared_chrome,
                 profile_dir,
@@ -287,8 +375,47 @@ class BrowserPool:
                     f"Could not attach to Chrome on DevTools port {port}: {error}",
                 ) from error
             with self._lock:
-                self._browsers[key] = (headless, connected)
+                self._browsers[key] = connected
             return connected
+
+    async def mode(
+        self,
+        profile_dir: Path,
+        *,
+        headless: bool | None,
+        restart: bool,
+    ) -> tuple[bool, bool]:
+        """Report or change Chrome's actual mode with explicit restart consent.
+
+        A mode change interrupts shared tabs. Profile data persists, but page
+        state and target ids do not; Chrome restores its last session best-effort.
+        Cancellation waits for the transition to release the shared launch lock.
+
+        Args:
+          profile_dir: Shared Chrome profile.
+          headless: Desired mode; None only reports the running mode.
+          restart: Consent to interrupt Chrome when its mode differs.
+
+        Returns:
+          headless: Actual Chrome mode.
+          restarted: Whether an existing Chrome was replaced.
+
+        """
+        async with self._connect_lock:
+            transition = asyncio.create_task(
+                asyncio.to_thread(
+                    _switch_mode,
+                    self,
+                    profile_dir,
+                    headless=headless,
+                    restart=restart,
+                ),
+            )
+            try:
+                return await asyncio.shield(transition)
+            except asyncio.CancelledError:
+                await asyncio.shield(transition)
+                raise
 
     def shutdown(self, *, budget_sec: float = 5.0, stop_launched: bool = False) -> None:
         """Disconnect from every Chrome and stop the loop thread.
@@ -302,7 +429,7 @@ class BrowserPool:
         if self._loop.is_closed():
             return
         with self._lock:
-            browsers = [browser for _, browser in self._browsers.values()]
+            browsers = list(self._browsers.values())
             self._browsers.clear()
         deadline = time.monotonic() + budget_sec
         for browser in browsers:
@@ -325,6 +452,7 @@ class BrowserPool:
         closer = threading.Thread(target=self._loop.close, name="loop-web-close")
         closer.start()
         closer.join()
+        self._tab_locks.clear()
         while stop_launched and _launched:
             process = _launched.pop()
             with contextlib.suppress(OSError):
@@ -406,49 +534,8 @@ async def _load(
     """Load ``url`` in a new tab, closed after; report and return its page."""
     loop = asyncio.get_running_loop()
     pages: list[tuple[int, dict[str, str], str]] = []
-    # A hop leaves the current page, not the first URL: Chrome rewrites that one.
-    position = [url]
-    followed = [0]
-    # Credentials go only to the origin the caller named, on page loads.
-    credentials = {k: v for k, v in headers.items() if k.lower() in ORIGIN_BOUND}
     navigated = asyncio.Event()
-
-    # Chrome follows redirects itself, so this is the only place to check each hop's
-    # host, call ``on_redirect``, and enforce ``max_redirects`` before Chrome connects.
-    # Two arguments: zendriver retries a TypeError with one, re-running the handler.
-    # ``isinstance``: zendriver delivers other event types too.
-    def on_paused(event: object, *_unused: object) -> None:
-        if not isinstance(event, zendriver.cdp.fetch.RequestPaused):
-            return
-        target = event.request.url
-        if event.resource_type != zendriver.cdp.network.ResourceType.DOCUMENT:
-            # Paused only to carry the credentials (below); not a navigation.
-            _send(loop, tab, _with_credentials(event, credentials))
-            return
-        is_hop = _wire_url(target) != _wire_url(position[0])
-        position[0] = target
-        refuse = zendriver.cdp.fetch.fail_request(
-            event.request_id,
-            zendriver.cdp.network.ErrorReason.ACCESS_DENIED,
-        )
-        if is_hop:
-            followed[0] += 1
-            if followed[0] > max_redirects:
-                _send(loop, tab, refuse)
-                return
-        try:
-            pinned_host(target, allow_private_hosts=allow_private_hosts)
-            if is_hop:
-                on_redirect(target)
-        except Exception:  # noqa: BLE001 -- any refusal aborts the request.
-            _send(loop, tab, refuse)
-            return
-        # Override only to add credentials: overriding drops Chrome's Cookie
-        # intermittently (crbug 40762053).
-        if not credentials or origin(target) != origin(url):
-            _send(loop, tab, zendriver.cdp.fetch.continue_request(event.request_id))
-            return
-        _send(loop, tab, _with_credentials(event, credentials))
+    request_deadline = loop.time() + timeout_sec
 
     def on_document(event: object, *_unused: object) -> None:
         if (
@@ -478,53 +565,47 @@ async def _load(
 
     async with asyncio.timeout(timeout_sec):
         browser = await pool.browser(profile_dir, headless=headless)
+        connection = browser.connection
+        if connection is None:
+            raise BrowserUnavailableError("The browser has no DevTools connection.")
+        # CookieJar borrows an arbitrary page, which another fetch can close.
         if cookies:
-            await browser.cookies.set_all(
-                [
-                    zendriver.cdp.network.CookieParam(name=name, value=value, url=url)
-                    for name, value in cookies.items()
-                ],
+            await connection.send(
+                zendriver.cdp.storage.set_cookies(
+                    [
+                        zendriver.cdp.network.CookieParam(
+                            name=name,
+                            value=value,
+                            url=url,
+                        )
+                        for name, value in cookies.items()
+                    ],
+                ),
             )
         # The marker URL tells ``open_window`` this tab is an agent's, not the user's.
         tab = await browser.get("about:blank#wesearch-agent", new_tab=True)
-        try:
+        async with contextlib.AsyncExitStack() as stack:
+            stack.push_async_callback(_close_tab, tab)
+            guard = await stack.enter_async_context(
+                guard_requests(
+                    tab,
+                    deadline=request_deadline,
+                    allow_private_hosts=allow_private_hosts,
+                    headers=headers,
+                    initial_url=url,
+                    max_redirects=max_redirects,
+                    on_redirect=on_redirect,
+                ),
+            )
             # `zendriver` types ``add_handler`` with a bare Callable, and a stub for
             # the inherited method would blank the rest of ``Connection``.
             register = cast(
                 Callable[[type[object], Callable[..., None]], None],
                 tab.add_handler,
             )
-            register(zendriver.cdp.fetch.RequestPaused, on_paused)
             register(zendriver.cdp.network.ResponseReceived, on_document)
             register(zendriver.cdp.page.FrameNavigated, on_navigated)
-            # Pages only: pausing every subresource stalls heavy pages past the
-            # timeout.
-            # With credentials, the origin's subresources are paused too: a site
-            # behind Basic auth answers its CSS with a 401, and Chrome then waits
-            # on a login prompt that never comes, so the load times out.
-            await tab.send(
-                zendriver.cdp.fetch.enable(
-                    patterns=[
-                        zendriver.cdp.fetch.RequestPattern(
-                            url_pattern="*",
-                            resource_type=zendriver.cdp.network.ResourceType.DOCUMENT,
-                            request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
-                        ),
-                        *(
-                            [
-                                zendriver.cdp.fetch.RequestPattern(
-                                    url_pattern=f"{origin(url)}/*",
-                                    request_stage=zendriver.cdp.fetch.RequestStage.REQUEST,
-                                ),
-                            ]
-                            if credentials
-                            else []
-                        ),
-                    ],
-                ),
-            )
-            # Tab-wide headers reach every subresource, cross-origin ones too, so
-            # credentials go only on same-origin page loads, in ``on_paused``.
+            # Tab-wide headers reach cross-origin resources; credentials must not.
             ambient = {
                 k: v for k, v in headers.items() if k.lower() not in ORIGIN_BOUND
             }
@@ -544,7 +625,7 @@ async def _load(
             # timeout. ``on_success_body``: a rendered page's CAPTCHA widget (a
             # login form's) is not a wall.
             deadline = loop.time() + timeout_sec / 2
-            shell_deadline = loop.time() + min(shell_wait_sec, timeout_sec / 2)
+            shell_deadline = loop.time() + shell_wait_sec
             while True:
                 # Before the read: a navigation between read and wait must count.
                 navigated.clear()
@@ -580,25 +661,11 @@ async def _load(
             host = urlparse(landed).hostname or ""
             jar = {
                 cookie.name: cookie.value or ""
-                for cookie in await browser.cookies.get_all()
+                for cookie in await connection.send(zendriver.cdp.storage.get_cookies())
                 if (domain := cookie.domain.removeprefix("."))
                 and (host == domain or host.endswith(f".{domain}"))
             }
-        finally:
-            # ``Tab.close`` can hang on a dead connection, so it is shielded and
-            # timed; an abandoned close is awaited after cancel, or it raises later
-            # on the pool's loop. Failures are swallowed: raising would replace the
-            # caller's result or error.
-            closing = asyncio.ensure_future(tab.close())
-            try:
-                async with asyncio.timeout(5.0):
-                    await asyncio.shield(closing)
-            except TimeoutError:
-                closing.cancel()
-                await asyncio.gather(asyncio.shield(closing), return_exceptions=True)
-                logger.debug("tab close timed out; abandoning the tab")
-            except Exception:
-                logger.debug("tab close failed; abandoning the tab", exc_info=True)
+            await guard.drain()
     status, received, _ = pages[-1] if pages else (200, {}, landed)
     if jar:
         received = {
@@ -612,6 +679,20 @@ async def _load(
     if status >= 400:
         raise classify_http_error(landed, status, received, content)
     return content
+
+
+async def _close_tab(tab: zendriver.Tab) -> None:
+    """Close a fetch-owned tab without replacing the load's result or error."""
+    closing = asyncio.ensure_future(tab.close())
+    try:
+        async with asyncio.timeout(5.0):
+            await asyncio.shield(closing)
+    except TimeoutError:
+        closing.cancel()
+        await asyncio.gather(asyncio.shield(closing), return_exceptions=True)
+        logger.debug("tab close timed out; abandoning the tab")
+    except Exception:
+        logger.debug("tab close failed; abandoning the tab", exc_info=True)
 
 
 def _with_credentials(
@@ -656,18 +737,6 @@ def _wire_url(url: str) -> str:
     return urlunsplit(parts._replace(fragment="", path=parts.path or "/"))
 
 
-# Scheduled, never awaited: blocking in a handler deadlocks the connection it answers.
-def _send(loop: asyncio.AbstractEventLoop, tab: zendriver.Tab, command: object) -> None:
-    """Send a CDP command from zendriver's event-handler thread."""
-    coroutine = tab.send(
-        cast("Generator[dict[str, object], dict[str, object], object]", command),
-    )
-    if loop.is_closed():
-        coroutine.close()
-        return
-    loop.call_soon_threadsafe(lambda: loop.create_task(coroutine))
-
-
 @contextlib.contextmanager
 def _launch_lock(profile_dir: Path) -> Generator[None]:
     """Hold the host-wide lock serializing Chrome launches on ``profile_dir``."""
@@ -710,7 +779,8 @@ def _devtools_port(
     def flag(marker: str) -> str:
         return command.partition(marker)[2].partition(" --")[0].strip()
 
-    if flag("--user-data-dir=") != str(profile_dir.resolve()):
+    owner_profile = flag("--user-data-dir=")
+    if not owner_profile or Path(owner_profile).resolve() != profile_dir.resolve():
         return None
     try:
         port = int(flag("--remote-debugging-port=").split()[0])
@@ -738,27 +808,6 @@ async def _close_chrome(port: int) -> None:
             return
         await asyncio.sleep(0.05)
     raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
-
-
-async def _launch(profile_dir: Path) -> zendriver.Browser:
-    """Launch a visible Chrome this process owns on ``profile_dir``."""
-    profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- The browser driver owns the blocking operation on its dedicated worker.
-    _tolerate_late_cdp_replies()
-    executable = await asyncio.to_thread(_chrome_for_testing)
-    try:
-        return await zendriver.start(
-            zendriver.Config(
-                headless=False,
-                user_data_dir=str(profile_dir),
-                sandbox=os.geteuid() != 0,
-                browser_executable_path=executable,
-                browser_args=["--use-mock-keychain"] if executable else [],
-                browser_connection_timeout=0.5,
-                browser_connection_max_tries=6,
-            ),
-        )
-    except Exception as error:
-        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
 
 
 # A reply arriving after its request timed out raises InvalidStateError in zendriver's
@@ -862,32 +911,81 @@ async def _watch_window(url: str, browser: zendriver.Browser) -> set[str]:
     )
     register(zendriver.cdp.target.TargetCreated, on_target)
     register(zendriver.cdp.target.TargetInfoChanged, on_target)
+    listener = connection.listener
+    if (
+        connection.closed
+        or listener is None
+        or listener.task is None
+        or listener.task.done()
+    ):
+        return visited
+    opening = asyncio.create_task(_open_window_pages(url, browser))
+    try:
+        # Tab.get can remain in its idle wait after Chrome has closed.
+        await asyncio.wait(
+            {opening, listener.task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if opening.done():
+            opening.result()
+        await asyncio.shield(listener.task)
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+    return visited
+
+
+async def _open_window_pages(url: str, browser: zendriver.Browser) -> None:
     for page in (url, *(locked for locked in challenged_urls() if locked != url)):
         try:
             tab = await browser.get("about:blank", new_tab=True)
             await tab.get(page)
         except Exception:
             logger.warning("could not open %s", page, exc_info=True)
+
+
+def _switch_mode(
+    pool: BrowserPool,
+    profile_dir: Path,
+    *,
+    headless: bool | None,
+    restart: bool,
+) -> tuple[bool, bool]:
+    with _launch_lock(profile_dir):
+        port = _devtools_port(profile_dir)
+        if port is None or not _port_answers(port):
+            desired = True if headless is None else headless
+            _start_shared_chrome(profile_dir, headless=desired)
+            return desired, False
+        actual = pool.run(_read_mode(port), timeout_sec=5)
+        if headless is None or actual == headless:
+            return actual, False
+        if not restart:
+            raise BrowserUnavailableError(
+                "Changing shared Chrome mode requires restart=True; tabs will be interrupted.",
+            )
+        pool.run(_close_chrome(port), timeout_sec=15)
+        _start_shared_chrome(profile_dir, headless=headless, restore_session=True)
+        return headless, True
+
+
+async def _read_mode(port: int) -> bool:
+    browser = await zendriver.start(
+        host="127.0.0.1",
+        port=port,
+        browser_connection_timeout=0.5,
+        browser_connection_max_tries=6,
+    )
+    connection = browser.connection
+    if connection is None:
+        raise BrowserUnavailableError("The browser has no DevTools connection.")
     try:
-        while not browser.stopped:  # noqa: ASYNC110 -- no event source; poll the flag.
-            await asyncio.sleep(0.5)
-    except BaseException:
-        # Swallows every failure: raising would replace the error in flight.
-        try:
-            async with asyncio.timeout(30.0):
-                await browser.stop()
-        except Exception:
-            logger.warning("browser stop failed; killing it", exc_info=True)
-            process: object = getattr(browser, "_process", None)
-            if process is not None:
-                with contextlib.suppress(OSError):
-                    cast(_Killable, process).kill()
-        raise
-    return visited
-
-
-class _Killable(Protocol):
-    def kill(self) -> None: ...
+        _, _, _, user_agent, _ = await connection.send(
+            zendriver.cdp.browser.get_version(),
+        )
+        return "HeadlessChrome/" in user_agent
+    finally:
+        await connection.aclose()
 
 
 def _shared_chrome(profile_dir: Path, *, headless: bool) -> int:
@@ -896,54 +994,62 @@ def _shared_chrome(profile_dir: Path, *, headless: bool) -> int:
         port = _devtools_port(profile_dir)
         if port is not None and _port_answers(port):
             return port
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        (profile_dir / "DevToolsActivePort").unlink(missing_ok=True)
-        executable = _chrome_for_testing()
-        config = zendriver.Config(
-            headless=headless,
-            user_data_dir=str(profile_dir),
-            # Chrome's sandbox refuses to run as root.
-            sandbox=os.geteuid() != 0,
-            browser_executable_path=executable,
-            browser_args=["--use-mock-keychain"] if executable else [],
-            host="127.0.0.1",
+        return _start_shared_chrome(profile_dir, headless=headless)
+
+
+def _start_shared_chrome(
+    profile_dir: Path,
+    *,
+    headless: bool,
+    restore_session: bool = False,
+) -> int:
+    """Launch Chrome while the caller holds the profile launch lock."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "DevToolsActivePort").unlink(missing_ok=True)
+    executable = _chrome_for_testing()
+    config = zendriver.Config(
+        headless=headless,
+        user_data_dir=str(profile_dir),
+        # Chrome's sandbox refuses to run as root.
+        sandbox=os.geteuid() != 0,
+        browser_executable_path=executable,
+        browser_args=["--use-mock-keychain"] if executable else [],
+        host="127.0.0.1",
+    )
+    try:
+        # Not ``port=0`` in Config: it drops a falsy port, and Chrome then has no
+        # DevTools. A new session keeps Chrome alive past this process.
+        process = subprocess.Popen(  # noqa: S603 -- argv is zendriver's own launch config.
+            [
+                str(config.browser_executable_path),
+                *config(),
+                "--remote-debugging-port=0",
+                *(["--restore-last-session"] if restore_session else ["about:blank"]),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        try:
-            # Not ``port=0`` in Config: it drops a falsy port, and Chrome then has no
-            # DevTools. A new session keeps Chrome alive past this process.
-            process = subprocess.Popen(  # noqa: S603 -- argv is zendriver's own launch config.
-                [
-                    str(config.browser_executable_path),
-                    *config(),
-                    "--remote-debugging-port=0",
-                    "about:blank",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as error:
+    except OSError as error:
+        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
+    _launched.append(process)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
             raise BrowserUnavailableError(
-                f"Could not launch Chrome: {error}",
-            ) from error
-        _launched.append(process)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise BrowserUnavailableError(
-                    f"Could not launch Chrome: it exited with code {process.returncode}.",
-                )
-            with contextlib.suppress(FileNotFoundError, IndexError, ValueError):
-                port = int((profile_dir / "DevToolsActivePort").read_text().split()[0])
-                if _port_answers(port):
-                    return port
-            time.sleep(0.05)
-        process.kill()
-        process.wait()
-        raise BrowserUnavailableError(
-            "Could not launch Chrome: DevTools did not come up in 3s.",
-        )
+                f"Could not launch Chrome: it exited with code {process.returncode}.",
+            )
+        with contextlib.suppress(FileNotFoundError, IndexError, ValueError):
+            port = int((profile_dir / "DevToolsActivePort").read_text().split()[0])
+            if _port_answers(port):
+                return port
+        time.sleep(0.05)
+    process.kill()
+    process.wait()
+    raise BrowserUnavailableError(
+        "Could not launch Chrome: DevTools did not come up in 3s.",
+    )
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -957,6 +1063,152 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 class _Flags(Protocol):
     url: str
+
+
+class _RequestGuard:
+    """Track intercepted replies and surface their first failure to the caller."""
+
+    def __init__(
+        self,
+        tab: zendriver.Tab,
+        *,
+        deadline: float,
+        allow_private_hosts: bool,
+        headers: Mapping[str, str],
+        initial_url: str,
+        max_redirects: int,
+        on_redirect: Callable[[str], None],
+    ) -> None:
+        self._tab = tab
+        self._deadline = deadline
+        self._allow_private_hosts = allow_private_hosts
+        self._credentials = {
+            k: v for k, v in headers.items() if k.lower() in ORIGIN_BOUND
+        }
+        self._initial_url = initial_url
+        self._position = initial_url
+        self._followed = 0
+        self._max_redirects = max_redirects
+        self._on_redirect = on_redirect
+        self._tasks: set[asyncio.Task[object]] = set()
+        self._unchecked: set[zendriver.cdp.fetch.RequestId] = set()
+        self._errors: list[Exception] = []
+        self._finished = False
+
+    async def drain(self) -> None:
+        """Wait for pending request replies and raise their first failure.
+
+        Raises:
+          Exception: The first blocked-host or reply error recorded by the guard.
+          TimeoutError: Pending replies exceeded the operation's deadline.
+
+        """
+        async with asyncio.timeout_at(self._deadline):
+            await asyncio.sleep(0)
+            while self._tasks:
+                await asyncio.gather(*self._tasks)
+                await asyncio.sleep(0)
+        if self._errors:
+            raise self._errors[0]
+
+    async def on_paused(self, event: object, *_unused: object) -> None:
+        """Answer an intercepted request and retain errors for ``drain``.
+
+        Args:
+          event: CDP event supplied by zendriver's listener.
+          *_unused: Optional connection supplied by the listener.
+
+        """
+        if self._finished or not isinstance(event, zendriver.cdp.fetch.RequestPaused):
+            return
+        task = asyncio.current_task()
+        assert isinstance(task, asyncio.Task)
+        self._tasks.add(task)
+        self._unchecked.add(event.request_id)
+        try:
+            command = await self._command(event)
+            self._unchecked.remove(event.request_id)
+            await self._tab.send(
+                cast(
+                    Generator[dict[str, object], dict[str, object], None],
+                    command,
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 -- Retrieved and raised by drain, never discarded.
+            self._errors.append(error)
+        finally:
+            self._tasks.discard(task)
+
+    async def _command(
+        self,
+        event: zendriver.cdp.fetch.RequestPaused,
+    ) -> object:
+        target = event.request.url
+        # Browser-local subresources use no network host; documents remain HTTP(S).
+        if (
+            event.resource_type != zendriver.cdp.network.ResourceType.DOCUMENT
+            and urlsplit(target).scheme in ("chrome-extension", "data", "blob", "about")
+        ):
+            return zendriver.cdp.fetch.continue_request(event.request_id)
+        refuse = zendriver.cdp.fetch.fail_request(
+            event.request_id,
+            zendriver.cdp.network.ErrorReason.ACCESS_DENIED,
+        )
+        try:
+            await asyncio.to_thread(
+                pinned_host,
+                target,
+                allow_private_hosts=self._allow_private_hosts,
+            )
+        except Exception as error:  # noqa: BLE001 -- Fail closed and report through drain.
+            self._errors.append(error)
+            return refuse
+        if event.resource_type == zendriver.cdp.network.ResourceType.DOCUMENT:
+            is_hop = bool(self._position) and _wire_url(target) != _wire_url(
+                self._position,
+            )
+            self._position = target
+            if is_hop:
+                self._followed += 1
+                if self._followed > self._max_redirects:
+                    return refuse
+                try:
+                    self._on_redirect(target)
+                except Exception:  # noqa: BLE001 -- The callback's refusal aborts the hop.
+                    return refuse
+        if (
+            self._credentials
+            and self._initial_url
+            and origin(target) == origin(self._initial_url)
+        ):
+            return _with_credentials(event, self._credentials)
+        return zendriver.cdp.fetch.continue_request(event.request_id)
+
+    async def finish(self) -> None:
+        """Reap pending replies and disable interception without closing the tab.
+
+        Raises:
+          TimeoutError: Cleanup exceeded its independent one-second deadline.
+
+        """
+        async with asyncio.timeout_at(asyncio.get_running_loop().time() + 1.0):
+            await asyncio.sleep(0)
+            self._finished = True
+            tasks = tuple(self._tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Disabling Fetch resumes paused requests, including cancelled DNS checks.
+            for request_id in self._unchecked:
+                await self._tab.send(
+                    zendriver.cdp.fetch.fail_request(
+                        request_id,
+                        zendriver.cdp.network.ErrorReason.ACCESS_DENIED,
+                    ),
+                )
+            if tasks or self._errors:
+                await self._tab.send(zendriver.cdp.page.stop_loading())
+            await self._tab.send(zendriver.cdp.fetch.disable())
 
 
 if __name__ == "__main__":

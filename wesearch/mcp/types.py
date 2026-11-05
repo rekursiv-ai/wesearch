@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+from wesearch.browser import BrowserAction, BrowserMode, BrowserResult, BrowserTab
 from wesearch.mcp.schema import Field, Schema
 from wesearch.search.searxng import category_gloss
 from wesearch.search.types import (
@@ -14,15 +15,105 @@ from wesearch.search.types import (
 from wesearch.types.params import Extractor, PolicyParams, Transport
 
 
+if TYPE_CHECKING:
+    from treekle import PlainTree
+
+
 FetchMethod = Literal["GET", "POST"]
 
 
 __all__ = [
+    "BrowserParamsSchema",
     "FetchBodyParamsSchema",
     "FetchMethod",
     "FetchParamsSchema",
     "SearchParamsSchema",
+    "browser_data",
 ]
+
+
+class BrowserParamsSchema(Schema):
+    """What persistent-browser tools accept, without session ownership."""
+
+    action = Field[BrowserAction](
+        annotation=BrowserAction,
+        required=True,
+        description="List tabs, open, navigate, inspect, click, fill, press, screenshot, close, or report/change Chrome mode.",
+    )
+    tab_id = Field[str](
+        annotation=str,
+        default="",
+        description="Stable tab id from tabs/open; required except for tabs/open/mode.",
+    )
+    url = Field[str](
+        annotation=str,
+        default="",
+        description="Public HTTP(S) destination for open/navigate.",
+    )
+    selector = Field[str](
+        annotation=str,
+        default="",
+        description="CSS selector from inspection for click/fill/press.",
+    )
+    text = Field[str](
+        annotation=str,
+        default="",
+        description="Replacement field contents for fill; may be empty or sensitive.",
+    )
+    key = Field[str](
+        annotation=str,
+        default="",
+        description="Enter, Tab, Escape, Backspace, Delete, or an Arrow key for press.",
+    )
+    mode = Field[BrowserMode](
+        annotation=BrowserMode,
+        description="For action='mode': headed or headless; omit to report actual mode. Rejected for other actions.",
+    )
+    restart = Field[bool](
+        annotation=bool,
+        default=False,
+        description="For action='mode' only: permit restarting shared Chrome to change mode. Obtain user consent first; interrupts Chrome, invalidates tab ids, restores tabs best-effort, and preserves the profile.",
+    )
+    max_chars = Field[int](
+        annotation=int,
+        default=20_000,
+        description="Maximum inspected text length; must be positive.",
+    )
+    timeout_sec = Field[float](
+        annotation=float,
+        default=30,
+        description="Entire action deadline in seconds, including attachment and loading.",
+    )
+
+
+def browser_data(result: BrowserResult) -> dict[str, PlainTree]:
+    """Return browser metadata without serializing screenshot bytes.
+
+    Args:
+      result: The library's bounded inspection, tabs, or screenshot.
+
+    Returns:
+      data: JSON-compatible inspection metadata; images travel separately.
+
+    """
+    return {
+        "tab": _browser_tab(result.tab) if result.tab is not None else None,
+        "tabs": [_browser_tab(tab) for tab in result.tabs],
+        "text": result.text,
+        "elements": [
+            {
+                "selector": element.selector,
+                "tag": element.tag,
+                "role": element.role,
+                "label": element.label,
+                "kind": element.kind,
+            }
+            for element in result.elements
+        ],
+        "truncated": result.truncated,
+        "mode": result.mode,
+        "restarted": result.restarted,
+    }
 
 
 class FetchParamsSchema(Schema):
@@ -127,3 +218,7 @@ class SearchParamsSchema(Schema):
             "a site bot-blocks it. Set an explicit transport to stress a path."
         ),
     )
+
+
+def _browser_tab(tab: BrowserTab) -> dict[str, PlainTree]:
+    return {"tab_id": tab.tab_id, "url": tab.url, "title": tab.title}
