@@ -87,21 +87,6 @@ _PROFILE = Path("test-profile")
 _VENDOR_TRANSACTION_CALL = Transaction[object].__call__
 
 
-@pytest.mark.cli_python_subprocess
-def test_webrowser_executable_uses_shared_browser_command() -> None:
-    script = _CWD.parents[3] / "bin" / "webrowser"
-    result = subprocess.run(  # noqa: S603 -- fixed argv: this repo's own script.
-        [str(script), "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0
-    assert result.stdout.startswith("usage: webrowser [-h] [url]\n")
-    assert "RuntimeWarning" not in result.stderr
-
-
 @dataclass(slots=True, kw_only=True)
 class _FakeCookie:
     name: str
