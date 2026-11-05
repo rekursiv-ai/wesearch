@@ -63,6 +63,8 @@ from wesearch.types.params import ignore, no_cookies
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
+    from zendriver.core import util
+
     import zendriver
 
     from wesearch.types.params import HttpMethod
@@ -70,6 +72,7 @@ else:
     from wrapt import lazy_import
 
     zendriver = lazy_import("zendriver")  # 214ms.
+    util = lazy_import("zendriver.core.util")
 
 
 __all__ = [
@@ -195,6 +198,8 @@ async def guard_requests(
     on_redirect: Callable[[str], None] = ignore,
 ) -> AsyncGenerator[_RequestGuard]:
     """Intercept requests for one operation without taking ownership of its tab.
+
+    Policy refusals abort subresources locally; document refusals fail the operation.
 
     Args:
       tab: Tab whose actions the caller serializes.
@@ -1017,7 +1022,9 @@ def _start_shared_chrome(
     profile_dir.mkdir(parents=True, exist_ok=True)
     (profile_dir / "DevToolsActivePort").unlink(missing_ok=True)
     executable = _chrome_for_testing()
+    port = util.free_port()
     config = zendriver.Config(
+        port=port,
         headless=headless,
         user_data_dir=str(profile_dir),
         # Chrome's sandbox refuses to run as root.
@@ -1027,13 +1034,11 @@ def _start_shared_chrome(
         host="127.0.0.1",
     )
     try:
-        # Not ``port=0`` in Config: it drops a falsy port, and Chrome then has no
-        # DevTools. A new session keeps Chrome alive past this process.
+        # Port zero exposes navigator.webdriver even in headed Chrome.
         process = subprocess.Popen(  # noqa: S603 -- argv is zendriver's own launch config.
             [
                 str(config.browser_executable_path),
                 *config(),
-                "--remote-debugging-port=0",
                 *(["--restore-last-session"] if restore_session else ["about:blank"]),
             ],
             stdin=subprocess.DEVNULL,
@@ -1055,10 +1060,8 @@ def _start_shared_chrome(
             raise BrowserUnavailableError(
                 f"Could not launch Chrome: it exited with code {process.returncode}.",
             )
-        with contextlib.suppress(FileNotFoundError, IndexError, ValueError):
-            port = int((profile_dir / "DevToolsActivePort").read_text().split()[0])
-            if _port_answers(port):
-                return port
+        if _port_answers(port):
+            return port
         time.sleep(0.05)
     process.kill()
     process.wait()
@@ -1175,8 +1178,9 @@ class _RequestGuard:
                 target,
                 allow_private_hosts=self._allow_private_hosts,
             )
-        except Exception as error:  # noqa: BLE001 -- Fail closed and report through drain.
-            self._errors.append(error)
+        except ValueError as error:
+            if event.resource_type == zendriver.cdp.network.ResourceType.DOCUMENT:
+                self._errors.append(error)
             return refuse
         if event.resource_type == zendriver.cdp.network.ResourceType.DOCUMENT:
             is_hop = bool(self._position) and _wire_url(target) != _wire_url(
