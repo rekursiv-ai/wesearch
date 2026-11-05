@@ -5,10 +5,14 @@ from __future__ import annotations
 from concurrent import futures
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeVar
+from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeVar, cast
 
 import asyncio
 import base64
+import os
+import selectors
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -694,7 +698,47 @@ def test_fill_refuses_noneditable_controls_without_typing(
     assert not pool.chrome.tabs[0].commands
 
 
+@pytest.fixture
+def headed_display(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Give headed Chrome an isolated X server on displayless Linux runners."""
+    if not sys.platform.startswith("linux") or os.environ.get("DISPLAY", ""):
+        yield
+        return
+    executable = shutil.which("Xvfb")
+    if executable is None:
+        pytest.fail("Headed Chrome requires DISPLAY or Xvfb on Linux.")
+    with subprocess.Popen(  # noqa: S603 -- Xvfb from PATH with fixed arguments.
+        [
+            executable,
+            "-displayfd",
+            "1",
+            "-screen",
+            "0",
+            "1280x1024x24",
+            "-nolisten",
+            "tcp",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ) as display:
+        try:
+            assert display.stdout is not None
+            with selectors.DefaultSelector() as ready:
+                ready.register(display.stdout, selectors.EVENT_READ)
+                if not ready.select(timeout=10):
+                    pytest.fail("Xvfb did not report a display within 10 seconds.")
+            number = cast(bytes, display.stdout.readline()).decode().strip()  # ty: ignore[redundant-cast] -- basedpyright's typeshed declares Popen.stdout as IO[Any]; ty infers bytes.
+            if not number.isdecimal():
+                pytest.fail("Xvfb exited without reporting a display number.")
+            monkeypatch.setenv("DISPLAY", f":{number}")
+            yield
+        finally:
+            display.terminate()
+            display.wait(timeout=10)
+
+
 @pytest.mark.browser_zendriver
+@pytest.mark.usefixtures("headed_display")
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_real_cli_mode_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
@@ -763,6 +807,7 @@ def test_real_cli_mode_lifecycle(
 
 
 @pytest.mark.browser_zendriver
+@pytest.mark.usefixtures("headed_display")
 def test_real_mode_roundtrip_preserves_profile_and_reconnects(tmp_path: Path) -> None:
     with (
         FetchSession(profile_dir=tmp_path / "chrome") as session,

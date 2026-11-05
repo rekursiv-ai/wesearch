@@ -17,10 +17,10 @@ import pytest
 
 from wesearch.chrome import capture
 from wesearch.chrome.capture import (
-    _chrome_binary,
     _kill_group,
     _load_libc,
     chrome_available,
+    chrome_binary,
     die_with_parent,
     drive_chrome,
 )
@@ -100,7 +100,7 @@ class TestDriveChrome:
             patch("subprocess.Popen", return_value=_Popen.timing_out().process),
             patch("os.killpg"),
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="google-chrome-stable",
             ),
         ):
@@ -118,7 +118,7 @@ class TestDriveChrome:
             patch("subprocess.Popen", return_value=chrome.process) as popen,
             patch("os.killpg") as killpg,
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="google-chrome-stable",
             ),
         ):
@@ -143,7 +143,7 @@ class TestDriveChrome:
             patch("subprocess.Popen", return_value=_Popen.timing_out().process),
             patch("os.killpg", side_effect=ProcessLookupError),
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="google-chrome-stable",
             ),
         ):
@@ -154,7 +154,7 @@ class TestDriveChrome:
             patch("subprocess.Popen", return_value=_Popen().process),
             patch("os.killpg") as killpg,
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="google-chrome-stable",
             ),
         ):
@@ -163,7 +163,7 @@ class TestDriveChrome:
 
     def test_missing_binary_raises(self) -> None:
         with (
-            patch("wesearch.chrome.capture._chrome_binary", return_value=None),
+            patch("wesearch.chrome.capture.chrome_binary", return_value=None),
             pytest.raises(RuntimeError, match=r"^No Chrome binary found on PATH\.$"),
         ):
             drive_chrome("https://localhost:1/")
@@ -172,7 +172,7 @@ class TestDriveChrome:
         with (
             patch("subprocess.Popen", side_effect=_fresh_popen) as run,
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="google-chrome-stable",
             ),
         ):
@@ -190,7 +190,7 @@ class TestDriveChrome:
         with (
             patch("subprocess.Popen", side_effect=_fresh_popen) as run,
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="google-chrome-stable",
             ),
         ):
@@ -205,7 +205,7 @@ class TestDriveChrome:
         chrome = _Popen()
         with (
             patch("subprocess.Popen", return_value=chrome.process) as run,
-            patch("wesearch.chrome.capture._chrome_binary", return_value="chrome"),
+            patch("wesearch.chrome.capture.chrome_binary", return_value="chrome"),
         ):
             assert drive_chrome("https://example.test/") is False
         run.assert_called_once()
@@ -224,7 +224,7 @@ class TestDriveChrome:
         with (
             patch("subprocess.Popen", return_value=chrome.process),
             patch("os.killpg"),
-            patch("wesearch.chrome.capture._chrome_binary", return_value="chrome"),
+            patch("wesearch.chrome.capture.chrome_binary", return_value="chrome"),
         ):
             assert drive_chrome("https://example.test/") is True
         assert chrome.communicate.call_args_list[1].kwargs == {"timeout": 10.0}
@@ -235,7 +235,7 @@ class TestDriveChrome:
             patch("subprocess.Popen", return_value=chrome.process) as run,
             patch("os.killpg"),
             patch(
-                "wesearch.chrome.capture._chrome_binary",
+                "wesearch.chrome.capture.chrome_binary",
                 return_value="chrome",
             ),
         ):
@@ -377,11 +377,11 @@ class TestChromeAvailable:
             return "/bin/native" if name_to_find == name else None
 
         with patch.object(shutil, "which", only):
-            assert _chrome_binary() == name
+            assert chrome_binary() == name
 
     def test_no_binary_returns_none(self) -> None:
         with patch.object(shutil, "which", return_value=None):
-            assert _chrome_binary() is None
+            assert chrome_binary() is None
 
     def test_load_libc_returns_none_off_linux(self) -> None:
         with patch.object(sys, "platform", "darwin"):
@@ -414,7 +414,7 @@ class TestChromeAvailable:
 
     def test_a_snap_confined_chromium_does_not_count(self, tmp_path: Path) -> None:
         # Ubuntu's ``chromium`` package is a snap wrapper, which cannot use the
-        # temp profile ``drive_chrome`` hands it; see ``_chrome_binary``.
+        # temp profile ``drive_chrome`` hands it; see ``chrome_binary``.
         snap = tmp_path / "snap"
         snap.write_bytes(b"\x7fELF")
         entry = tmp_path / "chromium"

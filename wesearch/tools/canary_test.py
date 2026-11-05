@@ -168,7 +168,7 @@ def test_processes_flag_defaults_to_skipping_the_browser() -> None:
     flags = cast(canary.Flags, parser.parse_args([]))
     assert flags.processes == 0
     assert flags.threads == 0
-    assert flags.backends == ["brave", "duckduckgo", "google", "searxng"]
+    assert flags.backends == ["brave", "duckduckgo", "searxng"]
     assert flags.query == "python asyncio timeout"
     assert flags.url == "https://example.com/"
     with pytest.raises(SystemExit):
