@@ -1154,13 +1154,15 @@ def test_load_settles_on_half_the_timeout(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_load_timeout_includes_browser_acquisition() -> None:
+    """A caller falls back from an absent browser, never from a timed-out page."""
+
     class _SlowPool:
         async def browser(self, profile_dir: Path, *, headless: bool) -> _FakeBrowser:
             del profile_dir, headless
             await asyncio.Event().wait()
             raise AssertionError("Browser acquisition escaped the timeout.")
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(zendriver.BrowserUnavailableError, match="still starting"):
         asyncio.run(
             _load(
                 cast(BrowserPool, _SlowPool()),
@@ -2643,6 +2645,29 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
     assert events == ["lock", *initial, *transition, "unlock"]
 
 
+def test_mode_read_outlasts_a_cold_chrome_that_has_not_answered_yet(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cold CI runner's Chrome took 6.10s to answer once it accepted connections."""
+
+    async def headless(port: int) -> bool:
+        del port
+        return True
+
+    pool = _RunningPool(_FakeBrowser())
+    monkeypatch.setattr(zendriver, "_devtools_port", _port_4242)
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_everywhere)
+    monkeypatch.setattr(zendriver, "_read_mode", headless, raising=False)
+    zendriver._switch_mode(
+        cast(BrowserPool, pool),
+        tmp_path,
+        headless=None,
+        restart=False,
+    )
+    assert pool.waits[0] > 6.10
+
+
 def test_mode_transition_requires_consent_before_closing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3550,7 +3575,8 @@ def test_shared_chrome_waits_for_a_reported_port_to_answer(
     assert sleeps == [0.05]
 
 
-@pytest.mark.parametrize("ready_after", [3.0, 9.95])
+# 24.20s is the slowest of 16 first launches timed on fresh CI runners.
+@pytest.mark.parametrize("ready_after", [3.0, 24.20, 59.95])
 def test_shared_chrome_waits_for_slow_startup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3602,7 +3628,7 @@ def test_shared_chrome_kills_a_chrome_that_never_reports_a_port(
     tmp_path: Path,
 ) -> None:
     process = _ChromeProcess()
-    clock = iter([0.0, 0.0, 10.0])
+    clock = iter([0.0, 0.0, 60.0])
     monkeypatch.setattr(zendriver, "_devtools_port", _no_port)
     monkeypatch.setattr(subprocess, "Popen", partial(_popen, process))
     monkeypatch.setattr(zendriver, "_launched", [])
@@ -3611,7 +3637,7 @@ def test_shared_chrome_kills_a_chrome_that_never_reports_a_port(
     monkeypatch.setattr(time, "sleep", _no_sleep)
     with pytest.raises(zendriver.BrowserUnavailableError) as exc:
         zendriver._shared_chrome(tmp_path / "profile", headless=True)
-    assert str(exc.value) == "Could not launch Chrome: DevTools did not come up in 10s."
+    assert str(exc.value) == "Could not launch Chrome: DevTools did not come up in 60s."
     assert process.killed
     assert process.waited
 
