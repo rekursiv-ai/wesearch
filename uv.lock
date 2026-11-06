@@ -2117,8 +2117,8 @@ wheels = [
 
 [[package]]
 name = "rekursiv-ai-typings"
-version = "0.1.14"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#7c6df2709342fc99d6ade2020795cade31f9029c" }
+version = "0.1.15"
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#3aa8297da37fe2ffa9bac70e1366c0f04e95ff8b" }
 
 [[package]]
 name = "rpds-py"
@@ -2710,7 +2710,7 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.17"
+version = "0.1.18"
 source = { editable = "." }
 default-groups = ["cuda", "dev"]
 dependencies = [
