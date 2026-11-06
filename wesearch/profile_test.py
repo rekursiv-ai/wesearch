@@ -366,8 +366,25 @@ class TestParseSetCookie:
         assert parse_set_cookie("a=1; Max-Age=0") == {}
 
 
+@pytest.fixture
+def yielded_fsync(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    """Keep scheduling at the disk boundary; durability is tested separately."""
+
+    def yielding_sync(fd: int) -> None:
+        del fd
+        time.sleep(0)
+
+    sync = Mock(side_effect=yielding_sync)
+    monkeypatch.setattr(os, "fsync", sync)
+    return sync
+
+
 class TestConcurrentSafety:
-    def test_interleaved_saves_do_not_corrupt(self, tmp_path: Path) -> None:
+    def test_interleaved_saves_do_not_corrupt(
+        self,
+        tmp_path: Path,
+        yielded_fsync: Mock,
+    ) -> None:
         # Two threads hammering the same key must leave a readable profile, never
         # a half-written file (fcntl-guarded read-modify-write).
         store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
@@ -389,8 +406,13 @@ class TestConcurrentSafety:
         assert got is not None
         # Every worker's last write survives -> jar is coherent, not truncated.
         assert all(f"k{n}" in got.cookies for n in range(4))
+        assert yielded_fsync.call_count == 1 + 12 * 4
 
-    def test_two_stores_on_one_file_lose_no_cookie(self, tmp_path: Path) -> None:
+    def test_two_stores_on_one_file_lose_no_cookie(
+        self,
+        tmp_path: Path,
+        yielded_fsync: Mock,
+    ) -> None:
         # Two sessions in one process each hold their own store, so a per-store
         # thread lock cannot serialize them; only the file lock can.
         stores = [ProfileStore(base_dir=tmp_path, ttl_sec=3600.0) for _ in range(4)]
@@ -409,11 +431,13 @@ class TestConcurrentSafety:
             t.join()
         got = _loaded(stores[0], "1.2.3.4", "x.com")
         assert set(got.cookies) == {f"k{n}-{i}" for n in range(4) for i in range(12)}
+        assert yielded_fsync.call_count == 1 + 12 * 4
 
     def test_concurrent_writes_never_share_a_temp_file(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        yielded_fsync: Mock,
     ) -> None:
         store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         path = store._path("1.2.3.4", "x.com")
@@ -448,6 +472,61 @@ class TestConcurrentSafety:
         assert all(source.parent == path.parent for source in temporary)
         assert path.read_bytes() in (b"a", b"b")
         assert list(tmp_path.iterdir()) == [path]
+        assert yielded_fsync.call_count == len(threads)
+
+
+class TestDurableWrite:
+    def test_syncs_complete_bytes_before_atomic_replace(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = ProfileStore(base_dir=tmp_path)
+        path = tmp_path / "profile.json"
+        data = b"complete profile"
+        synced: list[int] = []
+        fsync = os.fsync
+        replace = Path.replace
+
+        def sync(fd: int) -> None:
+            assert os.pread(fd, len(data) + 1, 0) == data
+            fsync(fd)
+            synced.append(fd)
+
+        def publish(source: Path, target: Path) -> Path:
+            assert len(synced) == 1
+            return replace(source, target)
+
+        monkeypatch.setattr(os, "fsync", sync)
+        monkeypatch.setattr(Path, "replace", publish)
+        store._write(path, data)
+        assert path.read_bytes() == data
+        assert list(tmp_path.iterdir()) == [path]
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(synced[0])
+
+    def test_failed_sync_never_replaces_the_previous_profile(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = ProfileStore(base_dir=tmp_path)
+        path = tmp_path / "profile.json"
+        path.write_bytes(b"previous profile")
+        synced: list[int] = []
+
+        def fail_sync(fd: int) -> None:
+            synced.append(fd)
+            raise OSError("sync failed")
+
+        sync = Mock(side_effect=fail_sync)
+        monkeypatch.setattr(os, "fsync", sync)
+        with pytest.raises(OSError, match="sync failed"):
+            store._write(path, b"new profile")
+        sync.assert_called_once()
+        assert path.read_bytes() == b"previous profile"
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(synced[0])
 
 
 if __name__ == "__main__":
