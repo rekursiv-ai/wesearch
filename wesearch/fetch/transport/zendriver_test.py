@@ -3046,8 +3046,12 @@ def test_pool_run_gives_up_when_its_loop_stopped() -> None:
         async def never_scheduled() -> str:
             raise AssertionError("A stopped loop must not run the coroutine.")
 
-        with pytest.raises(TimeoutError):
-            pool.run(never_scheduled(), timeout_sec=0.05)
+        work = never_scheduled()
+        try:
+            with pytest.raises(TimeoutError):
+                pool.run(work, timeout_sec=0.05)
+        finally:
+            work.close()
     finally:
         pool.shutdown()
 
@@ -3114,6 +3118,34 @@ def test_pool_run_cancels_work_when_its_caller_is_interrupted(
     finally:
         pool.shutdown()
     assert cancelled == [True]
+
+
+def test_pool_shutdown_finishes_pending_work_before_returning() -> None:
+    finalized = threading.Event()
+
+    async def start() -> asyncio.Task[None]:
+        entered = asyncio.Event()
+
+        async def work() -> None:
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                finalized.set()
+
+        task = asyncio.create_task(work())
+        await entered.wait()
+        return task
+
+    pool = BrowserPool()
+    try:
+        pending = pool.run(start())
+        pool.shutdown()
+        assert finalized.is_set()
+        assert pending.cancelled()
+    finally:
+        pool.shutdown()
 
 
 def test_pool_shutdown_joins_thread_and_closes_loop() -> None:
@@ -4348,12 +4380,17 @@ def test_open_window_main_thread_interrupt_stops_chrome(
         del self, profile_dir, headless, restart
         return False, False
 
+    async def timed_cleanup[T](coro: Coroutine[object, object, T]) -> T:
+        async with asyncio.timeout(0.01):
+            return await coro
+
     def run[T](
         self: BrowserPool,
         coro: Coroutine[object, object, T],
         *,
         timeout_sec: float = 0,
     ) -> T:
+        submitted = coro
         if (
             inspect.iscoroutine(coro)
             and coro.cr_code is zendriver._watch_window.__code__
@@ -4366,8 +4403,9 @@ def test_open_window_main_thread_interrupt_stops_chrome(
             and coro.cr_code is zendriver._close_chrome.__code__
         ):
             assert timeout_sec == 30
-            timeout_sec = 0.01
-        return real_run(self, coro, timeout_sec=timeout_sec)
+            if stop == "hangs":
+                submitted = timed_cleanup(submitted)
+        return real_run(self, submitted, timeout_sec=timeout_sec)
 
     def shared(profile_dir: Path, *, headless: bool) -> int:
         assert profile_dir == tmp_path
