@@ -3,6 +3,13 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.1.18 - 2026-11-06
+
+### Fixed
+
+- The zendriver transport closes its browser event loop through
+  `asyncio.Runner`.
+
 ## 0.1.17 - 2026-11-06
 
 ### Changed
