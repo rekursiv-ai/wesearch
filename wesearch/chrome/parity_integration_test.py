@@ -30,11 +30,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import subprocess
+
 from curl_cffi.requests.impersonate import REAL_TARGET_MAP
 
 import pytest
 
-from wesearch.chrome.capture import chrome_available, drive_chrome
+from wesearch.chrome.capture import chrome_available, chrome_binary, drive_chrome
 from wesearch.chrome.headers import (
     chrome_brands,
     chrome_identity_headers,
@@ -323,7 +325,28 @@ def _assert_identity_matches(
     chrome_ua = _value(chrome, "user-agent")
     assert user_agent_platform(chrome_ua) == platform
     chrome_major = int(chrome_ua.split("Chrome/", 1)[1].split(".", 1)[0])
-    assert _value(chrome, "sec-ch-ua") == chrome_brands(chrome_major)
+    assert _value(chrome, "sec-ch-ua") == _oracle_brands(chrome_major)
+
+
+def _oracle_brands(major: int) -> str:
+    """Return exact brands for the installed oracle, independently of its headers."""
+    binary = chrome_binary()
+    assert binary is not None
+    version = subprocess.check_output(  # noqa: S603 -- Fixed argv, native browser selected from PATH.
+        [binary, "--version"],
+        text=True,
+        timeout=10,
+    )
+    branded = chrome_brands(major)
+    if version.startswith("Chromium "):
+        # Chromium omits Google's brand and shuffles two entries, not three.
+        grease = next(
+            brand for brand in branded.split(", ") if brand.startswith('"Not')
+        )
+        brands = (grease, f'"Chromium";v="{major}"')
+        return ", ".join(brands[:: -1 if major % 2 else 1])
+    assert version.startswith("Google Chrome "), version
+    return branded
 
 
 def _drop_lines(lines: tuple[str, ...], omit: frozenset[str]) -> tuple[str, ...]:
