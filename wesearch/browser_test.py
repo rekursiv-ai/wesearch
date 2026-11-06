@@ -737,6 +737,37 @@ def headed_display(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
             display.wait(timeout=10)
 
 
+def _wait_for_cli_window(
+    watching: threading.Event,
+    *,
+    running: futures.Future[None],
+) -> None:
+    running.add_done_callback(lambda _: watching.set())
+    # Chrome's launch alone may take 60s; worker failure must wake this wait too.
+    assert watching.wait(90)
+    if running.done():
+        running.result()
+    assert not running.done()
+
+
+def test_cli_window_wait_surfaces_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watching = threading.Event()
+
+    def wait(timeout: float) -> bool:
+        assert timeout == 90
+        return watching.is_set()
+
+    monkeypatch.setattr(watching, "wait", wait)
+    running = futures.Future[None]()
+    error = zendriver.BrowserUnavailableError("Chrome exited before watching.")
+    running.set_exception(error)
+    with pytest.raises(zendriver.BrowserUnavailableError) as caught:
+        _wait_for_cli_window(watching, running=running)
+    assert caught.value is error
+
+
 @pytest.mark.browser_zendriver
 @pytest.mark.usefixtures("headed_display")
 @pytest.mark.parametrize("interrupt", [False, True])
@@ -776,9 +807,7 @@ def test_real_cli_mode_lifecycle(
                 profile_dir=profile,
             )
             try:
-                # Chrome's launch alone may take 60s (zendriver._launch's budget).
-                assert watching.wait(90)
-                assert not running.done()
+                _wait_for_cli_window(watching, running=running)
                 assert api.browser("mode", session=sibling).mode == "headed"
                 headed = pool.run(pool.browser(profile, headless=True))
                 assert headed is not original

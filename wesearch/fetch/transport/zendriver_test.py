@@ -3823,6 +3823,75 @@ def test_devtools_port_reads_the_singleton_owner_command(tmp_path: Path) -> None
     assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
 
 
+@pytest.mark.parametrize("command_port", [0, 4242])
+def test_shared_chrome_reuses_profile_in_owners_mount_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command_port: int,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    unrelated = tmp_path / "proc" / "456"
+    unrelated.mkdir(parents=True)
+    (unrelated / "root").symlink_to(tmp_path / "vanished")
+    process = tmp_path / "proc" / "123"
+    namespace_profile = process / "root" / profile.relative_to("/")
+    namespace_profile.mkdir(parents=True)
+    (namespace_profile / "SingletonLock").symlink_to("host-with-dashes-123")
+    (namespace_profile / "DevToolsActivePort").write_text(
+        "4242\n/devtools/browser/id\n",
+    )
+    (process / "cmdline").write_bytes(
+        f"chrome\0--user-data-dir={profile}\0"
+        f"--remote-debugging-port={command_port}\0".encode(),
+    )
+    monkeypatch.setattr(
+        zendriver,
+        "_devtools_port",
+        partial(
+            zendriver._devtools_port,
+            proc_root=tmp_path / "proc",
+            platform="linux",
+        ),
+    )
+    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
+
+    def popen(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError(
+            "A live namespaced profile must not launch another Chrome.",
+        )
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    assert zendriver._shared_chrome(profile, headless=True) == 4242
+    assert not (profile / "SingletonLock").is_symlink()
+
+
+@pytest.mark.parametrize("owner", [None, "host-456", "host-123"])
+def test_devtools_port_rejects_unowned_namespace_profiles(
+    tmp_path: Path,
+    owner: str | None,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    process = tmp_path / "proc" / "123"
+    namespace_profile = process / "root" / profile.relative_to("/")
+    namespace_profile.mkdir(parents=True)
+    if owner is not None:
+        (namespace_profile / "SingletonLock").symlink_to(owner)
+    (process / "cmdline").write_text(
+        f"chrome --user-data-dir={profile}-other --remote-debugging-port=4242",
+    )
+    assert (
+        zendriver._devtools_port(
+            profile,
+            proc_root=tmp_path / "proc",
+            platform="linux",
+        )
+        is None
+    )
+
+
 def test_devtools_port_takes_the_pid_after_a_dashed_hostname(tmp_path: Path) -> None:
     # Chrome names the lock ``<hostname>-<pid>``, and hostnames carry dashes.
     profile = tmp_path / "profile"

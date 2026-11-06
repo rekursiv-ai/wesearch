@@ -766,8 +766,14 @@ def _devtools_port(
     platform: str = sys.platform,
 ) -> int | None:
     """Return the DevTools port of the Chrome owning ``profile_dir``, if any."""
+    lock_dir = profile_dir
+    if (
+        platform.startswith("linux")
+        and not (profile_dir / "SingletonLock").is_symlink()
+    ):
+        lock_dir = _namespace_profile(profile_dir, proc_root=proc_root)
     try:
-        owner = (profile_dir / "SingletonLock").readlink()
+        owner = (lock_dir / "SingletonLock").readlink()
         pid = int(str(owner).rsplit("-", 1)[1])
         command_file = proc_root / str(pid) / "cmdline"
         if command_file.is_file() or platform != "darwin":
@@ -793,9 +799,24 @@ def _devtools_port(
         return None
     try:
         port = int(flag("--remote-debugging-port=").split()[0])
-        return port or int((profile_dir / "DevToolsActivePort").read_text().split()[0])
+        return port or int((lock_dir / "DevToolsActivePort").read_text().split()[0])
     except (FileNotFoundError, IndexError, ValueError):
         return None
+
+
+def _namespace_profile(profile_dir: Path, *, proc_root: Path) -> Path:
+    """Locate a profile hidden by its owner's private mount namespace."""
+    # Snap's private /tmp hides SingletonLock from the host, causing duplicate launches.
+    relative = profile_dir.resolve().relative_to("/")
+    for process in proc_root.glob("[0-9]*"):
+        candidate = process / "root" / relative
+        try:
+            owner = (candidate / "SingletonLock").readlink()
+        except OSError:
+            continue
+        if str(owner).rsplit("-", 1)[-1] == process.name:
+            return candidate
+    return profile_dir
 
 
 def _port_answers(port: int) -> bool:
