@@ -450,9 +450,10 @@ class BrowserPool:
         self._thread.join()
         # Zendriver's asyncio_atexit makes ``close`` run the loop, which fails on
         # a thread with a loop of its own running, as a caller's often has.
-        closer = threading.Thread(target=self._loop.close, name="loop-web-close")
-        closer.start()
-        closer.join()
+        with asyncio.Runner(loop_factory=lambda: self._loop) as runner:
+            closer = threading.Thread(target=runner.close, name="loop-web-close")
+            closer.start()
+            closer.join()
         self._tab_locks.clear()
         while stop_launched and _launched:
             process = _launched.pop()
