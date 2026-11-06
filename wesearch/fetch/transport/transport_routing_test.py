@@ -167,17 +167,17 @@ def test_remember_preserves_domains_past_the_read_chunk(tmp_path: Path) -> None:
     # The domain list must be read to EOF before rewrite; a fixed read cap would
     # silently drop every domain past it on the next remember.
     path = tmp_path / "domains.txt"
-    # 50k * 25 bytes/line ~= 1.25 MiB, safely past the old 1 MiB read cap.
-    many = [f"dom-{i:07d}.example.test" for i in range(50_000)]
-    path.write_text("".join(f"{d}\t{time.time():.0f}\n" for d in many))
+    # One entry beyond 1 MiB proves the reader reaches EOF without 50k parses.
+    beyond_chunk = "a" * ((1 << 20) + 1)
+    path.write_text(f"{beyond_chunk}\t{time.time():.0f}\n")
     assert path.stat().st_size > (1 << 20)
 
     remember_zendriver_domain("fresh.example", path=path)
 
     result = zendriver_domains(path=path)
     assert "fresh.example" in result
-    assert many[-1] in result
-    assert len(result) == len(many) + 1
+    assert beyond_chunk in result
+    assert len(result) == 2
 
 
 def test_read_failure_after_open_degrades_to_empty(
