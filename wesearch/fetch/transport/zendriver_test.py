@@ -893,7 +893,10 @@ _APP_SHELL = (
 )
 
 
-def test_load_waits_for_a_script_to_fill_a_shell() -> None:
+@pytest.mark.asyncio
+async def test_load_waits_for_a_script_to_fill_a_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A page whose content a script fills in place must be read once filled.
 
     claude.com, 2026-10-30: under load, Chrome reported the page complete
@@ -911,29 +914,38 @@ def test_load_waits_for_a_script_to_fill_a_shell() -> None:
             self.reads += 1
             return _APP_SHELL if self.reads < 3 else _FILLED
 
+    _, sleeps = _poll_clock(monkeypatch)
     tab = _HydratingTab()
-    body = asyncio.run(_drive(_browser_with(tab), timeout_sec=10.0, shell_wait_sec=2.0))
+    body = await _drive(_browser_with(tab), timeout_sec=10.0, shell_wait_sec=2.0)
     assert body == _FILLED.encode()
     assert tab.reads == 3
+    assert sleeps == [0.01, 0.01]
 
 
-@pytest.mark.asyncio
-async def test_load_default_shell_budget_polls_for_five_seconds(
+def _poll_clock(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> tuple[list[float], list[float]]:
+    """Advance polling time while retaining real event-loop scheduling."""
     loop = asyncio.get_running_loop()
     clock = [loop.time()]
     sleeps: list[float] = []
     real_sleep = asyncio.sleep
 
     async def sleep(delay: float) -> None:
-        if delay:
-            sleeps.append(delay)
-            clock[0] += delay
+        sleeps.extend([delay] if delay else [])
+        clock[0] += delay
         await real_sleep(0)
 
     monkeypatch.setattr(loop, "time", lambda: clock[0])
     monkeypatch.setattr(asyncio, "sleep", sleep)
+    return clock, sleeps
+
+
+@pytest.mark.asyncio
+async def test_load_default_shell_budget_polls_for_five_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, sleeps = _poll_clock(monkeypatch)
     browser = _FakeBrowser(content=_APP_SHELL)
     assert (
         await _load(
@@ -1008,12 +1020,20 @@ async def test_load_interception_deadline_is_bounded_by_the_whole_load(
     assert checked
 
 
-def test_load_returns_an_app_shell_that_never_fills_at_its_budget() -> None:
+@pytest.mark.asyncio
+async def test_load_returns_an_app_shell_that_never_fills_at_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock, sleeps = _poll_clock(monkeypatch)
     browser = _FakeBrowser(content=_APP_SHELL)
-    started = time.monotonic()
-    body = asyncio.run(_drive(browser, timeout_sec=10.0, shell_wait_sec=0.2))
+    started = clock[0]
+    body = await _drive(browser, timeout_sec=10.0, shell_wait_sec=0.2)
     assert body == _APP_SHELL.encode()
-    assert 0.2 <= time.monotonic() - started < 2.0
+    assert 0.2 <= clock[0] - started < 0.2 + 2 * 0.01
+    assert all(delay in (0.0, 0.01) for delay in sleeps)
+    assert browser.last_tab is not None
+    assert browser.last_tab.content_reads == 1 + sleeps.count(0.01)
+    assert browser.last_tab.closed
 
 
 def test_load_does_not_wait_on_a_short_page_with_no_script() -> None:

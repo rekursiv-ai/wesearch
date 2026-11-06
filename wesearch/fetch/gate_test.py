@@ -6,11 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fcntl
-import time
+import os
 
 import pytest
 
 from wesearch.fetch.gate import SitePolicy, challenged_urls, clear_host, gated
+from wesearch.lib.userdirs import data_dir
 from wesearch.types.errors import (
     CooldownError,
     FetchError,
@@ -197,13 +198,16 @@ def test_one_url_per_site_however_many_blocks() -> None:
 
 
 def test_challenges_list_oldest_first() -> None:
-    _block("https://probe.example/a")
-    time.sleep(0.01)
     with (
         pytest.raises(PuzzleChallengeError),
         gated("https://other.example/b", egress=""),
     ):
         raise PuzzleChallengeError("challenge")
+    _block("https://probe.example/a")
+    base = data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit"
+    for path in base.glob("*_gate.url"):
+        modified = 1 if path.name.startswith("probe.example:") else 2
+        os.utime(path, (modified, modified))
     assert challenged_urls() == ["https://probe.example/a", "https://other.example/b"]
 
 
