@@ -461,7 +461,7 @@ class TestExactInternals:
                 "authorId": "a",
                 "name": "n",
                 "aliases": ["old"],
-                "affiliations": [" U ", {"affiliation": "V"}],
+                "affiliations": [" U ", " ", {"affiliation": "V"}],
                 "homepage": "h",
                 "hIndex": 1,
                 "citationCount": 2,
