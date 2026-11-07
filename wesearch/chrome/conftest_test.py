@@ -6,7 +6,8 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from http import client
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
 from unittest.mock import MagicMock, patch
 
 import os
@@ -19,7 +20,7 @@ import time
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 import pytest
 
@@ -34,9 +35,11 @@ from wesearch.chrome.conftest import (
 )
 
 
+_THIS: Final = Path(__file__).resolve()
+_CWD: Final = _THIS.parent
+
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 class TestHeaderParsing:
@@ -191,20 +194,37 @@ class TestSelfSignedCert:
         tmp_path: Path,
     ) -> None:
         cert_path, key_path = tmp_path / "c.pem", tmp_path / "k.pem"
-        self_signed_localhost_cert(cert_path, key_path)
+        private_key = serialization.load_pem_private_key(
+            (_THIS.with_name("testdata") / "localhost_key.pem").read_bytes(),
+            password=None,
+            # The fixture is fixed; the newly written key is validated below.
+            unsafe_skip_rsa_key_validation=True,
+        )
+        with patch.object(
+            rsa,
+            "generate_private_key",
+            return_value=private_key,
+        ) as generate:
+            self_signed_localhost_cert(cert_path, key_path)
+        generate.assert_called_once_with(public_exponent=65_537, key_size=2048)
         cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
         now = datetime.now(UTC)
         assert cert.subject.rfc4514_string() == "CN=localhost"
         assert cert.issuer.rfc4514_string() == "CN=localhost"
         public_key = cert.public_key()
-        assert isinstance(public_key, rsa.RSAPublicKey | ec.EllipticCurvePublicKey)
+        assert isinstance(public_key, rsa.RSAPublicKey)
         assert public_key.key_size == 2048
         assert cert.not_valid_before_utc >= now - timedelta(days=1, seconds=2)
         assert cert.not_valid_after_utc <= now + timedelta(days=3650, seconds=2)
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
         assert san.critical is False
         assert san.value.get_values_for_type(x509.DNSName) == ["localhost"]
-        serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        written_key = serialization.load_pem_private_key(
+            key_path.read_bytes(),
+            password=None,
+        )
+        assert isinstance(written_key, rsa.RSAPrivateKey)
+        assert written_key.public_key().public_numbers() == public_key.public_numbers()
 
 
 class TestEchoOracle:

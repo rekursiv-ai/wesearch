@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import cast
 from unittest.mock import patch
 
 import atexit
@@ -74,20 +76,22 @@ def test_closing_with_no_default_does_nothing() -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
-def test_a_forked_child_never_reuses_the_parents_session() -> None:
-    parent = default_session()
-    read, write = os.pipe()
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover -- runs in the child, outside the tracer.
-        os.close(read)
-        os.write(write, b"fresh" if default_session() is not parent else b"same")
-        os._exit(0)
-    os.close(write)
-    try:
-        assert os.read(read, 5) == b"fresh"
-    finally:
-        os.close(read)
-        os.waitpid(pid, 0)
+def test_a_forked_child_never_reuses_the_parents_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the registered child hook against a copy of the parent's globals."""
+    monkeypatch.setattr(session, "_hooked", [])
+    with patch.object(os, "register_at_fork") as register:
+        parent = default_session()
+    register.assert_called_once_with(after_in_child=session._forget_in_child)
+    child_hook = cast(Callable[[], None], register.call_args.kwargs["after_in_child"])
+    parent_lock = session._lock
+    with monkeypatch.context() as child:
+        child.setattr(session, "_default", list(session._default))
+        child.setattr(session, "_lock", parent_lock)
+        child_hook()
+        assert session._lock is not parent_lock
+        assert default_session() is not parent
     assert default_session() is parent
 
 
