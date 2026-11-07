@@ -4916,6 +4916,7 @@ def test_main_help_is_exact(
     capsys: pytest.CaptureFixture[str],
     prog: str,
 ) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
     monkeypatch.setattr(sys, "argv", [prog, "--help"])
     with pytest.raises(SystemExit) as error:
         zendriver.main()

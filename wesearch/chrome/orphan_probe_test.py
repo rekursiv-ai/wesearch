@@ -71,7 +71,7 @@ def test_add_arguments_sets_exact_defaults_and_flags() -> None:
 def test_add_arguments_help_describes_each_flag() -> None:
     parser = argparse.ArgumentParser()
     orphan_probe._add_arguments(parser)
-    help_text = parser.format_help()
+    help_text = " ".join(parser.format_help().split())
 
     assert "--proofed" in help_text
     assert "start the child through subprocess with" in help_text

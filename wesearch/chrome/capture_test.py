@@ -56,14 +56,11 @@ def _fresh_popen(*args: object, **kwargs: object) -> MagicMock:
 
 class TestKillGroup:
     def test_ignores_missing_or_inaccessible_process_groups(self) -> None:
-        process = subprocess.Popen([sys.executable, "-c", ""], stdout=subprocess.PIPE)
-        try:
-            for error in (ProcessLookupError(), PermissionError()):
-                with patch("os.killpg", side_effect=error) as killpg:
-                    _kill_group(process)
-                killpg.assert_called_once_with(process.pid, signal.SIGKILL)
-        finally:
-            process.wait()
+        chrome = _Popen()
+        for error in (ProcessLookupError(), PermissionError()):
+            with patch("os.killpg", side_effect=error) as killpg:
+                _kill_group(chrome.process)
+            killpg.assert_called_once_with(chrome.pid, signal.SIGKILL)
 
 
 class TestDieWithParent:

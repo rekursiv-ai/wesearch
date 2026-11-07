@@ -420,6 +420,27 @@ def test_download_open_serves_arxiv_then_open_access() -> None:
         assert fetch.download_open("arxiv", "1706.03762") == (_PDF, "open_access")
 
 
+def test_download_open_discovers_an_open_access_copy() -> None:
+    paper: dict[str, MutablePlainTree] = {
+        "openAccessPdf": {"url": "https://oa/pdf"},
+    }
+    with (
+        patch.object(s2, "get", return_value=paper),
+        patch.object(fetch, "fetch", return_value=_PDF),
+    ):
+        assert fetch.download_open("doi", "10.1/x") == (_PDF, "open_access")
+
+
+def test_download_open_serves_a_pre_resolved_open_access_copy() -> None:
+    with patch.object(fetch, "fetch", return_value=_PDF):
+        assert fetch.download_open(
+            "doi",
+            "10.1/x",
+            oa_url="https://oa/pdf",
+            oa_looked_up=True,
+        ) == (_PDF, "open_access")
+
+
 if __name__ == "__main__":
     from wesearch.lib.testing.runner import test_main
 
