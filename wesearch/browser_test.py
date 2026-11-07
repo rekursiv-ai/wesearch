@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
     from pathlib import Path
 
+    from wesearch.fetch.gate import Gate
+
 
 _T = TypeVar("_T")
 
@@ -783,7 +785,7 @@ def test_real_cli_mode_lifecycle(
     watch_window = zendriver._watch_window
     cancel_watch: list[Callable[[], object]] = []
 
-    async def watch(url: str, browser: Browser) -> set[str]:
+    async def watch(url: str, browser: Browser, *, gate: Gate) -> set[str]:
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         assert isinstance(task, asyncio.Task)
@@ -792,10 +794,9 @@ def test_real_cli_mode_lifecycle(
         if interrupt:
             assert await asyncio.to_thread(release.wait, 20)
             raise asyncio.CancelledError
-        return await watch_window(url, browser)
+        return await watch_window(url, browser, gate=gate)
 
     monkeypatch.setattr(zendriver, "_watch_window", watch)
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     with FetchSession(profile_dir=profile) as sibling:
         pool = zendriver.get_browser_pool(sibling)
         original = pool.run(pool.browser(profile, headless=True))
@@ -805,6 +806,7 @@ def test_real_cli_mode_lifecycle(
                 zendriver.open_window,
                 "about:blank",
                 profile_dir=profile,
+                gate=sibling.gate,
             )
             try:
                 _wait_for_cli_window(watching, running=running)

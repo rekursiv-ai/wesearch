@@ -62,6 +62,7 @@ if TYPE_CHECKING:
 
     import zendriver
 
+    from wesearch.fetch.gate import Gate
     from wesearch.types.params import HttpMethod
 else:
     from wrapt import lazy_import
@@ -250,7 +251,7 @@ async def guard_requests(
         await guard.finish()
 
 
-def open_window(url: str, *, profile_dir: Path) -> None:
+def open_window(url: str, *, profile_dir: Path, gate: Gate) -> None:
     """Open ``url`` in a visible Chrome on ``profile_dir``; block until it closes.
 
     Replaces the profile's headless Chrome; fetches meanwhile run in this
@@ -260,6 +261,7 @@ def open_window(url: str, *, profile_dir: Path) -> None:
     Args:
       url: The page to open.
       profile_dir: Chrome profile, e.g. :attr:`FetchSession.profile_dir`.
+      gate: The locks to show and lift, e.g. :attr:`FetchSession.gate`.
 
     """
     pool = BrowserPool()
@@ -267,7 +269,7 @@ def open_window(url: str, *, profile_dir: Path) -> None:
         pool.run(pool.mode(profile_dir, headless=False, restart=True))
         browser = pool.run(pool.browser(profile_dir, headless=False))
         try:
-            visited = pool.run(_watch_window(url, browser))
+            visited = pool.run(_watch_window(url, browser, gate=gate))
         except BaseException:
             try:
                 port = browser.config.port
@@ -278,7 +280,7 @@ def open_window(url: str, *, profile_dir: Path) -> None:
             raise
         # Again at close: an agent may have relocked a site meanwhile.
         for host in visited:
-            clear_host(host)
+            clear_host(host, gate=gate)
     finally:
         pool.shutdown()
 
@@ -506,11 +508,12 @@ def main() -> int:
     )
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
-    profile_dir = FetchSession().profile_dir
+    session = FetchSession()
     print(
-        f"Opening {flags.url} in Chrome on {profile_dir} -- close the window when done.",
+        f"Opening {flags.url} in Chrome on {session.profile_dir} -- close the window"
+        " when done.",
     )
-    open_window(flags.url, profile_dir=profile_dir)
+    open_window(flags.url, profile_dir=session.profile_dir, gate=session.gate)
     print("Window closed.")
     return 0
 
@@ -901,7 +904,12 @@ def _chrome_for_testing(*, platform: str = sys.platform) -> str:
     return ""
 
 
-async def _watch_window(url: str, browser: zendriver.Browser) -> set[str]:
+async def _watch_window(
+    url: str,
+    browser: zendriver.Browser,
+    *,
+    gate: Gate,
+) -> set[str]:
     """Show ``url`` and each locked site until closed; return the hosts loaded."""
     connection = browser.connection
     if connection is None:
@@ -934,7 +942,7 @@ async def _watch_window(url: str, browser: zendriver.Browser) -> set[str]:
         parsed = urlparse(info.url)
         if parsed.scheme in ("http", "https") and parsed.hostname is not None:
             visited.add(parsed.hostname)
-            await asyncio.to_thread(clear_host, parsed.hostname)
+            await asyncio.to_thread(clear_host, parsed.hostname, gate=gate)
 
     register = cast(
         Callable[[type[object], Callable[..., object]], None],
@@ -950,7 +958,7 @@ async def _watch_window(url: str, browser: zendriver.Browser) -> set[str]:
         or listener.task.done()
     ):
         return visited
-    opening = asyncio.create_task(_open_window_pages(url, browser))
+    opening = asyncio.create_task(_open_window_pages(url, browser, gate=gate))
     try:
         # Tab.get can remain in its idle wait after Chrome has closed.
         await asyncio.wait(
@@ -966,8 +974,14 @@ async def _watch_window(url: str, browser: zendriver.Browser) -> set[str]:
     return visited
 
 
-async def _open_window_pages(url: str, browser: zendriver.Browser) -> None:
-    for page in (url, *(locked for locked in challenged_urls() if locked != url)):
+async def _open_window_pages(
+    url: str,
+    browser: zendriver.Browser,
+    *,
+    gate: Gate,
+) -> None:
+    locked = [page for page in challenged_urls(gate=gate) if page != url]
+    for page in (url, *locked):
         try:
             tab = await browser.get("about:blank", new_tab=True)
             await tab.get(page)

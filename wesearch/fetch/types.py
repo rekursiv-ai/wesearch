@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol, Self, TypeAlias
 import asyncio
 import threading
 
+from wesearch.fetch.gate import FileGate, Gate
 from wesearch.lib.userdirs import data_dir
 from wesearch.profile import ProfileStore
 from wesearch.types.params import ignore, no_cookies
@@ -83,10 +84,13 @@ class FetchSession:
       browsers: Connections to Chrome, opened by the first browser fetch.
       tokens: Bearer tokens by service, with their monotonic expiry.
       lock: Guards ``egress``, ``curl``, ``browsers``, and ``tokens``.
+      gate: Paces each site and locks one that blocked this IP, for every
+        caller on the host that shares its state.
 
     """
 
     profiles: ProfileStore = field(default_factory=ProfileStore)
+    gate: Gate = field(default_factory=FileGate)
     profile_dir: Path = field(
         default_factory=lambda: (
             data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver"

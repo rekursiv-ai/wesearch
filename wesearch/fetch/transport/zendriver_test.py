@@ -35,6 +35,7 @@ from zendriver.core.connection import Transaction
 import asyncio_atexit
 import pytest
 
+from wesearch.fetch.gate import FileGate, SitePolicy
 from wesearch.fetch.session import default_session
 from wesearch.fetch.transport import zendriver
 from wesearch.fetch.transport.zendriver import BrowserPool, _load
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
         Sequence,
     )
 
+    from wesearch.fetch.gate import Gate
     from wesearch.fetch.types import Fetch
     from wesearch.types.params import HttpMethod
 
@@ -4319,13 +4321,15 @@ def test_open_window_requests_shared_headed_mode(
         events.append("separate-launch")
         return browser
 
-    async def watch(url: str, attached: Browser) -> set[str]:
+    gate = FileGate()
+
+    async def watch(url: str, attached: Browser, *, gate: Gate) -> set[str]:
         assert attached is browser
-        events.append(("watch", url))
+        events.append(("watch", url, gate))
         return {"visited.example"}
 
-    def clear(host: str) -> int:
-        events.append(("clear", host))
+    def clear(host: str, *, gate: Gate) -> int:
+        events.append(("clear", host, gate))
         return 1
 
     monkeypatch.setattr(BrowserPool, "mode", mode)
@@ -4333,12 +4337,12 @@ def test_open_window_requests_shared_headed_mode(
     monkeypatch.setattr("zendriver.start", start)
     monkeypatch.setattr(zendriver, "_watch_window", watch)
     monkeypatch.setattr(zendriver, "clear_host", clear)
-    zendriver.open_window("https://gated.example/", profile_dir=tmp_path)
+    zendriver.open_window("https://gated.example/", profile_dir=tmp_path, gate=gate)
     assert events == [
         ("mode", tmp_path, False, True),
         ("attach", tmp_path, False),
-        ("watch", "https://gated.example/"),
-        ("clear", "visited.example"),
+        ("watch", "https://gated.example/", gate),
+        ("clear", "visited.example", gate),
     ]
     assert browser.stop_calls == 0
 
@@ -4417,7 +4421,7 @@ def test_open_window_main_thread_interrupt_stops_chrome(
     monkeypatch.setattr(BrowserPool, "mode", mode)
     monkeypatch.setattr(BrowserPool, "run", run)
     with pytest.raises(KeyboardInterrupt):
-        zendriver.open_window("about:blank", profile_dir=tmp_path)
+        zendriver.open_window("about:blank", profile_dir=tmp_path, gate=FileGate())
     assert browser.stop_calls == 1
     assert browser.connection.closed
     assert len(pools) == 1
@@ -4437,19 +4441,14 @@ def test_open_window_main_thread_interrupt_stops_chrome(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
-async def test_watch_blocks_for_attached_browser_connection(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    cancel: bool,
-) -> None:
+async def test_watch_blocks_for_attached_browser_connection(*, cancel: bool) -> None:
     browser = _FakeBrowser()
     browser.stopped = True
     ended = asyncio.Future[None]()
     assert browser.connection.listener is not None
     browser.connection.listener.task = ended
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     watching = asyncio.create_task(
-        zendriver._watch_window("about:blank", cast(Browser, browser)),
+        zendriver._watch_window("about:blank", cast(Browser, browser), gate=FileGate()),
     )
     try:
         done, pending = await asyncio.wait({watching}, timeout=0.01)
@@ -4505,9 +4504,8 @@ async def test_watch_reaps_navigation_when_browser_closes(
         return tab
 
     monkeypatch.setattr(browser, "get", create)
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     watching = asyncio.create_task(
-        zendriver._watch_window("about:blank", cast(Browser, browser)),
+        zendriver._watch_window("about:blank", cast(Browser, browser), gate=FileGate()),
     )
     try:
         await asyncio.wait_for(entered.wait(), timeout=1)
@@ -4546,11 +4544,14 @@ async def test_watch_returns_when_connection_has_already_ended(
         raise AssertionError("Closed browser started navigation.")
 
     monkeypatch.setattr(browser, "get", create)
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     try:
         assert (
             await asyncio.wait_for(
-                zendriver._watch_window("about:blank", cast(Browser, browser)),
+                zendriver._watch_window(
+                    "about:blank",
+                    cast(Browser, browser),
+                    gate=FileGate(),
+                ),
                 timeout=0.1,
             )
             == set()
@@ -4585,8 +4586,14 @@ def test_close_chrome_reports_a_stuck_port(monkeypatch: pytest.MonkeyPatch) -> N
 
     clock = iter([0.0, 0.0, 10.0])
     sleeps: list[float] = []
+    real_sleep, mine = asyncio.sleep, threading.get_ident()
 
+    # Only this thread's: another test's browser thread, still winding down,
+    # sleeps through ``asyncio.sleep`` too, and would spin on a fake one.
     async def sleep(seconds: float) -> None:
+        if threading.get_ident() != mine:
+            await real_sleep(seconds)
+            return
         sleeps.append(seconds)
 
     monkeypatch.setattr("zendriver.start", start)
@@ -4648,7 +4655,11 @@ class _WatchedBrowser(_FakeBrowser):
 async def _watch_fake(browser: _FakeBrowser) -> set[str]:
     assert browser.connection.listener is not None
     browser.connection.listener.task = asyncio.Future[None]()
-    return await zendriver._watch_window("about:blank", cast(Browser, browser))
+    return await zendriver._watch_window(
+        "about:blank",
+        cast(Browser, browser),
+        gate=FileGate(),
+    )
 
 
 def _visits(
@@ -4658,12 +4669,12 @@ def _visits(
     """Feed target events to a watched window; return its visits and clears."""
     cleared: list[str] = []
 
-    def clear(host: str) -> int:
+    def clear(host: str, *, gate: Gate) -> int:
+        del gate
         cleared.append(host)
         return 1
 
     monkeypatch.setattr(zendriver, "clear_host", clear)
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     browser = _WatchedBrowser(events)
     visited = asyncio.run(_watch_fake(browser))
     return visited, cleared
@@ -4738,7 +4749,8 @@ def test_a_misrouted_event_never_counts_as_a_visit(
     """
     cleared: list[str] = []
 
-    def clear(host: str) -> int:
+    def clear(host: str, *, gate: Gate) -> int:
+        del gate
         cleared.append(host)
         return 1
 
@@ -4763,7 +4775,6 @@ def test_a_misrouted_event_never_counts_as_a_visit(
             return tab
 
     monkeypatch.setattr(zendriver, "clear_host", clear)
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     visited = asyncio.run(_watch_fake(_MisroutingBrowser()))
     assert visited == set()
     assert cleared == []
@@ -4776,7 +4787,13 @@ def test_a_watch_needs_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
         zendriver.BrowserUnavailableError,
         match=r"^The visible Chrome has no DevTools connection\.$",
     ):
-        asyncio.run(zendriver._watch_window("about:blank", cast(Browser, browser)))
+        asyncio.run(
+            zendriver._watch_window(
+                "about:blank",
+                cast(Browser, browser),
+                gate=FileGate(),
+            ),
+        )
 
 
 def test_the_window_opens_the_url_then_each_challenged_site(
@@ -4794,13 +4811,16 @@ def test_the_window_opens_the_url_then_each_challenged_site(
         return tab
 
     monkeypatch.setattr(browser, "get", get)
-    monkeypatch.setattr(
-        zendriver,
-        "challenged_urls",
-        lambda: ["https://gated.example/", "https://locked.example/a"],
-    )
+    gate = FileGate()
+    policy = SitePolicy(host="x")
+    gate.trip("gated.example::", policy, challenge_url="https://gated.example/")
+    gate.trip("locked.example::", policy, challenge_url="https://locked.example/a")
     asyncio.run(
-        zendriver._open_window_pages("https://gated.example/", cast(Browser, browser)),
+        zendriver._open_window_pages(
+            "https://gated.example/",
+            cast(Browser, browser),
+            gate=gate,
+        ),
     )
     assert browser.gets == ["about:blank", "about:blank"]
     assert [tab.navigations for tab in tabs] == [
@@ -4810,7 +4830,6 @@ def test_the_window_opens_the_url_then_each_challenged_site(
 
 
 def test_a_site_that_will_not_open_spares_the_window(
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class _RefusingBrowser(_FakeBrowser):
@@ -4821,9 +4840,12 @@ def test_a_site_that_will_not_open_spares_the_window(
     browser = _RefusingBrowser()
     browser.stopped = True
     browser.connection.closed = True
-    monkeypatch.setattr(zendriver, "challenged_urls", list)
     asyncio.run(
-        zendriver._open_window_pages("https://bad.example/", cast(Browser, browser)),
+        zendriver._open_window_pages(
+            "https://bad.example/",
+            cast(Browser, browser),
+            gate=FileGate(),
+        ),
     )
     assert browser.stop_calls == 0
     [record] = caplog.records
@@ -4860,7 +4882,8 @@ def test_main_prints_lifecycle_and_opens_url(
 ) -> None:
     opened: list[tuple[str, Path]] = []
 
-    def open_window(url: str, *, profile_dir: Path) -> None:
+    def open_window(url: str, *, profile_dir: Path, gate: Gate) -> None:
+        assert isinstance(gate, FileGate)
         opened.append((url, profile_dir))
 
     profile = data_dir() / "rekursiv-ai" / "wesearch" / "fetch-zendriver"
@@ -4877,8 +4900,8 @@ def test_main_prints_lifecycle_and_opens_url(
 def test_main_defaults_to_a_blank_page(monkeypatch: pytest.MonkeyPatch) -> None:
     opened: list[str] = []
 
-    def open_window(url: str, *, profile_dir: Path) -> None:
-        del profile_dir
+    def open_window(url: str, *, profile_dir: Path, gate: Gate) -> None:
+        del profile_dir, gate
         opened.append(url)
 
     monkeypatch.setattr(zendriver, "open_window", open_window)

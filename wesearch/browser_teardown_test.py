@@ -13,9 +13,9 @@ from typing import Final
 
 import ast
 
-import pytest
+from codedoctor.testing.tiers import TIERS
 
-from tools.testing.tiers import TIERS
+import pytest
 
 
 _THIS: Final = Path(__file__).resolve()

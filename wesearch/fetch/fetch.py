@@ -99,7 +99,7 @@ def fetch(
     egress = session.egress if params.content.raw_headers else egress_ip(session)
     # The gate files the URL a person clears a block at; never its credentials.
     bare, _ = without_userinfo(url)
-    with gated(bare, egress=egress):
+    with gated(bare, egress=egress, gate=session.gate):
         try:
             if not params.content.raw_headers:
                 return _fetch_as_profile(url, params, session=session)
