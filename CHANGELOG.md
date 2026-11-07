@@ -3,6 +3,26 @@
 All notable wesearch changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking:** the fetch gate is a `Gate` protocol a caller may supply, as
+  `FetchSession.gate`; `FileGate`, the host-wide locked files, is the default.
+  `gated`, `clear_host` and `challenged_urls` take `gate=`. A gate keeps one
+  JSON file per key; locks recorded in the old `*_gate.lock` files are not read.
+- A caller released from a lock waits out a random part of the policy's
+  `jitter_sec` too, so callers one lock held do not meet the next block together.
+
+### Added
+
+- `Gate.hold(key, until=...)`: a lock until a time the server named, with no
+  probe after it, kept as `GateState.held_until`; a `reset` lifts a block's
+  lock but leaves a hold to its time. `SitePolicy.max_wait_sec`, the longest
+  lock `admitted` sits out before refusing.
+- `Gate.admitted(key, policy)`, async: waits until admitted. A gate shared
+  through a server may wake its waiters when a key changes.
+
 ## 0.1.18 - 2026-11-06
 
 ### Fixed

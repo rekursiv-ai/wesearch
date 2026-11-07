@@ -5,12 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import asyncio
 import fcntl
-import os
 
 import pytest
 
-from wesearch.fetch.gate import SitePolicy, challenged_urls, clear_host, gated
+from wesearch.fetch.gate import (
+    Admission,
+    FileGate,
+    GateState,
+    SitePolicy,
+    admitted,
+    challenged_urls,
+    clear_host,
+    gated,
+)
 from wesearch.lib.userdirs import data_dir
 from wesearch.types.errors import (
     CooldownError,
@@ -42,18 +51,23 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     return made
 
 
+@pytest.fixture
+def gate() -> FileGate:
+    return FileGate()
+
+
 def _block(url: str = _URL, *, egress: str = "203.0.113.1") -> None:
     """Send one request through the gate and have the site block it."""
     with (
         pytest.raises(PuzzleChallengeError),
-        gated(url, egress=egress, policies=_FAST),
+        gated(url, egress=egress, gate=FileGate(), policies=_FAST),
     ):
         raise PuzzleChallengeError("challenge")
 
 
 def _send(url: str = _URL, *, egress: str = "203.0.113.1") -> None:
     """Send one request through the gate and have the site answer it."""
-    with gated(url, egress=egress, policies=_FAST):
+    with gated(url, egress=egress, gate=FileGate(), policies=_FAST):
         pass
 
 
@@ -63,68 +77,82 @@ def test_a_block_locks_the_site_for_every_caller() -> None:
         _send()
 
 
-def test_a_rate_limit_locks_the_site() -> None:
-    with pytest.raises(FetchError), gated(_URL, egress="", policies=_FAST):
+def test_a_rate_limit_locks_the_site(gate: FileGate) -> None:
+    with pytest.raises(FetchError), gated(_URL, egress="", gate=gate, policies=_FAST):
         raise FetchError(_URL, 429, {}, b"")
     with pytest.raises(CooldownError):
         _send(egress="")
 
 
-def test_a_page_that_only_needs_javascript_does_not_lock() -> None:
+def test_a_page_that_only_needs_javascript_does_not_lock(gate: FileGate) -> None:
     # Google's enablejs page refused nobody: locking Google for 15 minutes on it
     # failed every search after one render that read the page too early.
     with (
         pytest.raises(GoogleJavascriptRequiredError),
-        gated(_URL, egress="", policies=_FAST),
+        gated(_URL, egress="", gate=gate, policies=_FAST),
     ):
         raise GoogleJavascriptRequiredError("enablejs")
     _send(egress="")
-    assert challenged_urls() == []
+    assert challenged_urls(gate=gate) == []
 
 
-def test_a_page_that_only_needs_javascript_frees_the_probe(clock: _Clock) -> None:
+def test_a_page_that_only_needs_javascript_frees_the_probe(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
     # After a block, the first caller back is the probe; a JavaScript page says
     # nothing about the block, so the next caller must not wait out its lease.
     _block()
     clock.now += 1.0
     with (
         pytest.raises(GoogleJavascriptRequiredError),
-        gated(_URL, egress="203.0.113.1", policies=_FAST),
+        gated(_URL, egress="203.0.113.1", gate=gate, policies=_FAST),
     ):
         raise GoogleJavascriptRequiredError("enablejs")
     _send()
 
 
-def test_an_ordinary_failure_does_not_lock() -> None:
-    with pytest.raises(FetchError), gated(_URL, egress="", policies=_FAST):
+def test_an_ordinary_failure_does_not_lock(gate: FileGate) -> None:
+    with pytest.raises(FetchError), gated(_URL, egress="", gate=gate, policies=_FAST):
         raise FetchError(_URL, 503, {}, b"")
     _send(egress="")
 
 
-def test_an_unreachable_site_locks_only_when_its_policy_says_so() -> None:
+def test_an_unreachable_site_locks_only_when_its_policy_says_so(
+    gate: FileGate,
+) -> None:
     dropping = (SitePolicy(host="probe.example", unreachable_blocks=True),)
-    with pytest.raises(TimeoutError), gated(_URL, egress="", policies=_FAST):
+    with pytest.raises(TimeoutError), gated(_URL, egress="", gate=gate, policies=_FAST):
         raise TimeoutError
     _send(egress="")
-    with pytest.raises(TimeoutError), gated(_URL, egress="", policies=dropping):
+    with (
+        pytest.raises(TimeoutError),
+        gated(_URL, egress="", gate=gate, policies=dropping),
+    ):
         raise TimeoutError
     with pytest.raises(CooldownError):
         _send(egress="")
 
 
-def test_a_refused_connection_counts_as_unreachable() -> None:
+def test_a_refused_connection_counts_as_unreachable(gate: FileGate) -> None:
     dropping = (SitePolicy(host="probe.example", unreachable_blocks=True),)
-    with pytest.raises(FetchError), gated(_URL, egress="", policies=dropping):
+    with (
+        pytest.raises(FetchError),
+        gated(_URL, egress="", gate=gate, policies=dropping),
+    ):
         raise FetchError(_URL, 0, {}, b"timed out")
     with pytest.raises(CooldownError):
         _send(egress="")
 
 
-def test_an_expired_lock_admits_one_probe_while_others_wait(clock: _Clock) -> None:
+def test_an_expired_lock_admits_one_probe_while_others_wait(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
     _block()
     clock.sleep(0.06)
     with (
-        gated(_URL, egress="203.0.113.1", policies=_FAST),
+        gated(_URL, egress="203.0.113.1", gate=gate, policies=_FAST),
         pytest.raises(CooldownError, match="probing"),
     ):
         _send()
@@ -163,131 +191,189 @@ def test_a_block_belongs_to_the_egress_that_drew_it() -> None:
     _send(egress="198.51.100.7")
 
 
-def test_a_block_belongs_to_the_site_that_drew_it() -> None:
+def test_a_block_belongs_to_the_site_that_drew_it(gate: FileGate) -> None:
     policies = (
         SitePolicy(host="probe.example", path_prefix="/search"),
         SitePolicy(host="probe.example", path_prefix="/scholar"),
     )
-    with pytest.raises(PuzzleChallengeError), gated(_URL, egress="", policies=policies):
+    with (
+        pytest.raises(PuzzleChallengeError),
+        gated(_URL, egress="", gate=gate, policies=policies),
+    ):
         raise PuzzleChallengeError("challenge")
-    with gated("https://probe.example/scholar?q=x", egress="", policies=policies):
+    scholar = "https://probe.example/scholar?q=x"
+    with gated(scholar, egress="", gate=gate, policies=policies):
         pass
 
 
-def test_clearing_the_host_lifts_its_lock() -> None:
+def test_clearing_the_host_lifts_its_lock(gate: FileGate) -> None:
     _block()
-    assert clear_host("probe.example") == 1
+    assert clear_host("probe.example", gate=gate) == 1
     _send()
 
 
-def test_a_challenge_records_the_url_that_drew_it() -> None:
+def test_a_challenge_records_the_url_that_drew_it(gate: FileGate) -> None:
     _block()
-    assert challenged_urls() == [_URL]
+    assert challenged_urls(gate=gate) == [_URL]
 
 
-def test_a_rate_limit_records_no_challenge() -> None:
-    with pytest.raises(FetchError), gated(_URL, egress="", policies=_FAST):
+def test_a_rate_limit_records_no_challenge(gate: FileGate) -> None:
+    with pytest.raises(FetchError), gated(_URL, egress="", gate=gate, policies=_FAST):
         raise FetchError(_URL, 429, {}, b"")
-    assert challenged_urls() == []
+    assert challenged_urls(gate=gate) == []
 
 
-def test_one_url_per_site_however_many_blocks() -> None:
+def test_one_url_per_site_however_many_blocks(gate: FileGate) -> None:
     _block(egress="203.0.113.1")
     _block(egress="198.51.100.7")
-    assert challenged_urls() == [_URL]
+    assert challenged_urls(gate=gate) == [_URL]
 
 
-def test_challenges_list_oldest_first() -> None:
+def test_challenges_list_oldest_first(clock: _Clock, gate: FileGate) -> None:
     with (
         pytest.raises(PuzzleChallengeError),
-        gated("https://other.example/b", egress=""),
+        gated("https://other.example/b", egress="", gate=gate),
     ):
         raise PuzzleChallengeError("challenge")
+    clock.now += 1.0
     _block("https://probe.example/a")
-    base = data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit"
-    for path in base.glob("*_gate.url"):
-        modified = 1 if path.name.startswith("probe.example:") else 2
-        os.utime(path, (modified, modified))
-    assert challenged_urls() == ["https://probe.example/a", "https://other.example/b"]
+    assert challenged_urls(gate=gate) == [
+        "https://other.example/b",
+        "https://probe.example/a",
+    ]
 
 
-def test_an_answered_site_drops_its_challenge(clock: _Clock) -> None:
+def test_an_answered_site_drops_its_challenge(clock: _Clock, gate: FileGate) -> None:
     _block()
     clock.sleep(0.06)
     _send()
-    assert challenged_urls() == []
+    assert challenged_urls(gate=gate) == []
 
 
-def test_clearing_the_host_drops_its_challenge() -> None:
+def test_clearing_the_host_drops_its_challenge(gate: FileGate) -> None:
     _block()
-    clear_host("probe.example")
-    assert challenged_urls() == []
+    clear_host("probe.example", gate=gate)
+    assert challenged_urls(gate=gate) == []
 
 
-def test_no_state_means_no_challenges() -> None:
-    assert challenged_urls() == []
+def test_no_state_means_no_challenges(gate: FileGate) -> None:
+    assert challenged_urls(gate=gate) == []
 
 
-def test_clearing_one_host_leaves_another_locked() -> None:
+def test_clearing_one_host_leaves_another_locked(gate: FileGate) -> None:
     _block()
     with (
         pytest.raises(PuzzleChallengeError),
-        gated("https://other.example/", egress=""),
+        gated("https://other.example/", egress="", gate=gate),
     ):
         raise PuzzleChallengeError("challenge")
-    assert clear_host("probe.example") == 1
-    with pytest.raises(CooldownError), gated("https://other.example/", egress=""):
+    assert clear_host("probe.example", gate=gate) == 1
+    with (
+        pytest.raises(CooldownError),
+        gated("https://other.example/", egress="", gate=gate),
+    ):
         pass
 
 
-def test_clearing_a_host_with_no_state_clears_nothing() -> None:
-    assert clear_host("never.example") == 0
+def test_clearing_a_host_with_no_state_clears_nothing(gate: FileGate) -> None:
+    assert clear_host("never.example", gate=gate) == 0
 
 
-def test_the_burst_is_free_and_then_paced(clock: _Clock) -> None:
+def test_the_burst_is_free_and_then_paced(clock: _Clock, gate: FileGate) -> None:
     policies = (SitePolicy(host="probe.example", interval_sec=0.05, burst=2),)
     start = clock.time()
     for _ in range(2):
-        with gated(_URL, egress="", policies=policies):
+        with gated(_URL, egress="", gate=gate, policies=policies):
             pass
     assert clock.time() - start < 0.04
-    with gated(_URL, egress="", policies=policies):
+    with gated(_URL, egress="", gate=gate, policies=policies):
         pass
     assert clock.time() - start >= 0.04
 
 
-def test_jitter_lengthens_only_a_wait_the_pace_imposed(clock: _Clock) -> None:
+@pytest.mark.asyncio
+async def test_a_caller_sits_out_a_lock_it_may_wait_for_then_probes(
+    clock: _Clock,
+    gate: FileGate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+        clock.sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    patient = SitePolicy(host="probe.example", cooldown_sec=0.05, max_wait_sec=1.0)
+    gate.trip("probe.example", patient)
+
+    assert await gate.admitted("probe.example", patient) == Admission()
+    assert slept == [pytest.approx(0.05)]
+
+
+@pytest.mark.asyncio
+async def test_a_lock_longer_than_the_wait_allowed_is_refused_unwaited(
+    gate: FileGate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(asyncio, "sleep", _never_sleep)
+    hurried = SitePolicy(host="probe.example", cooldown_sec=0.05)
+    gate.trip("probe.example", hurried)
+
+    refusal = await gate.admitted("probe.example", hurried)
+
+    assert not refusal.admitted
+    assert refusal.wait_sec == pytest.approx(0.05)
+
+
+async def _never_sleep(delay: float) -> None:
+    raise AssertionError(f"slept {delay}s on a lock it should refuse")
+
+
+def test_jitter_lengthens_only_a_wait_the_pace_imposed(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
     policies = (SitePolicy(host="probe.example", interval_sec=0.02, jitter_sec=0.05),)
     start = clock.time()
-    with gated(_URL, egress="", policies=policies):
+    with gated(_URL, egress="", gate=gate, policies=policies):
         pass
     assert clock.time() - start < 0.02
-    with gated(_URL, egress="", policies=policies):
+    with gated(_URL, egress="", gate=gate, policies=policies):
         pass
     assert clock.time() - start >= 0.02
 
 
-def test_an_unpaced_site_that_never_failed_leaves_no_state() -> None:
+def test_an_unpaced_site_that_never_failed_leaves_no_state(gate: FileGate) -> None:
     _send()
-    assert clear_host("probe.example") == 0
+    assert gate.states() == {}
 
 
-def test_an_unpaced_site_that_recovered_leaves_no_state(clock: _Clock) -> None:
+def test_an_unpaced_site_that_recovered_leaves_no_state(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
     # Else every later request to it pays for a locked file read and write.
     _block()
     clock.sleep(0.06)
     _send()
-    assert clear_host("probe.example") == 0
+    assert gate.states() == {}
 
 
-def test_a_paced_site_that_recovered_keeps_its_pace(clock: _Clock) -> None:
+def test_a_paced_site_that_recovered_keeps_its_pace(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
     policies = (SitePolicy(host="probe.example", interval_sec=0.05, cooldown_sec=0.01),)
-    with pytest.raises(PuzzleChallengeError), gated(_URL, egress="", policies=policies):
+    with (
+        pytest.raises(PuzzleChallengeError),
+        gated(_URL, egress="", gate=gate, policies=policies),
+    ):
         raise PuzzleChallengeError("challenge")
     clock.sleep(0.02)
-    with gated(_URL, egress="", policies=policies):
+    with gated(_URL, egress="", gate=gate, policies=policies):
         pass
-    assert clear_host("probe.example") == 1
+    assert clear_host("probe.example", gate=gate) == 1
 
 
 def test_a_block_that_waited_on_a_deleted_gate_still_locks() -> None:
@@ -310,45 +396,180 @@ def test_a_block_that_waited_on_a_deleted_gate_still_locks() -> None:
         _send()
 
 
-def test_a_hostless_url_passes_ungated() -> None:
+def test_a_hostless_url_passes_ungated(gate: FileGate) -> None:
     for _ in range(2):
-        with pytest.raises(PuzzleChallengeError), gated("data:,x", egress=""):
+        with (
+            pytest.raises(PuzzleChallengeError),
+            gated("data:,x", egress="", gate=gate),
+        ):
             raise PuzzleChallengeError("challenge")
 
 
-def test_a_hostless_url_that_succeeds_passes_ungated() -> None:
+def test_a_hostless_url_that_succeeds_passes_ungated(gate: FileGate) -> None:
     ran: list[str] = []
-    with gated("data:,x", egress=""):
+    with gated("data:,x", egress="", gate=gate):
         ran.append("body")
     assert ran == ["body"]
-    assert challenged_urls() == []
+    assert challenged_urls(gate=gate) == []
 
 
-def test_an_ordinary_failure_frees_the_probe(clock: _Clock) -> None:
+def test_an_ordinary_failure_frees_the_probe(clock: _Clock, gate: FileGate) -> None:
     _block()
     clock.sleep(0.06)
-    with pytest.raises(FetchError), gated(_URL, egress="203.0.113.1", policies=_FAST):
+    with (
+        pytest.raises(FetchError),
+        gated(_URL, egress="203.0.113.1", gate=gate, policies=_FAST),
+    ):
         raise FetchError(_URL, 503, {}, b"")
     _send()
 
 
-def test_a_timeout_on_a_site_that_answers_frees_the_probe(clock: _Clock) -> None:
+def test_a_timeout_on_a_site_that_answers_frees_the_probe(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
     _block()
     clock.sleep(0.06)
-    with pytest.raises(TimeoutError), gated(_URL, egress="203.0.113.1", policies=_FAST):
+    with (
+        pytest.raises(TimeoutError),
+        gated(_URL, egress="203.0.113.1", gate=gate, policies=_FAST),
+    ):
         raise TimeoutError
     _send()
 
 
-def test_an_interrupted_request_frees_the_probe(clock: _Clock) -> None:
+def test_an_interrupted_request_frees_the_probe(clock: _Clock, gate: FileGate) -> None:
     _block()
     clock.sleep(0.06)
     with (
         pytest.raises(KeyboardInterrupt),
-        gated(_URL, egress="203.0.113.1", policies=_FAST),
+        gated(_URL, egress="203.0.113.1", gate=gate, policies=_FAST),
     ):
         raise KeyboardInterrupt
     _send()
+
+
+# -- hold and admitted: a lock a server names, and a wait sat out ----------------
+
+
+def test_a_hold_short_enough_is_sat_out(clock: _Clock, gate: FileGate) -> None:
+    policy = SitePolicy(host="acct", max_wait_sec=60.0)
+    gate.hold("anthropic@work", until=clock.now + 39.0)
+    admitted(gate, "anthropic@work", policy, refuse=RuntimeError)
+    assert clock.now == pytest.approx(1_039.0)
+
+
+def test_a_hold_longer_than_the_wait_refuses(clock: _Clock, gate: FileGate) -> None:
+    policy = SitePolicy(host="acct", max_wait_sec=60.0)
+    gate.hold("anthropic@work", until=clock.now + 600.0)
+    with pytest.raises(RuntimeError, match="cooling down for 600s"):
+        admitted(gate, "anthropic@work", policy, refuse=RuntimeError)
+    assert clock.now == 1_000.0
+
+
+def test_a_hold_set_during_the_wait_is_sat_out_too(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
+    # The first wait ends where a second caller's 429 began another: the gate
+    # is asked again rather than sent through.
+    policy = SitePolicy(host="acct", max_wait_sec=60.0)
+    gate.hold("k", until=clock.now + 10.0)
+    sleeps: list[float] = []
+
+    def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        clock.now += delay
+        if len(sleeps) == 1:
+            gate.hold("k", until=clock.now + 20.0)
+
+    with patch.object(clock, "sleep", sleep):
+        admitted(gate, "k", policy, refuse=RuntimeError)
+    assert sleeps[:2] == [pytest.approx(10.0), pytest.approx(20.0)]
+
+
+def test_a_hold_draws_no_probe(clock: _Clock, gate: FileGate) -> None:
+    gate.hold("k", until=clock.now + 1.0)
+    clock.now += 2.0
+    policy = SitePolicy(host="acct")
+    assert gate.admit("k", policy) == Admission()
+    assert gate.admit("k", policy) == Admission()
+
+
+def test_a_hold_never_shortens_a_lock(clock: _Clock, gate: FileGate) -> None:
+    gate.hold("k", until=clock.now + 50.0)
+    gate.hold("k", until=clock.now + 5.0)
+    assert gate.states()["k"].held_until == clock.now + 50.0
+
+
+def test_a_success_lifts_a_blocks_lock_but_not_a_servers_hold(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
+    # A reply that succeeds and says its window is spent: the reset after it
+    # must not lift the hold it set.
+    policy = SitePolicy(host="acct")
+    gate.trip("k", policy)
+    gate.hold("k", until=clock.now + 600.0)
+    gate.reset("k", forget=True)
+    assert gate.states() == {"k": GateState(held_until=clock.now + 600.0)}
+    clock.now += 601.0
+    gate.reset("k", forget=True)
+    assert gate.states() == {}
+
+
+def test_waiting_on_a_probe_polls_at_the_cooldown(
+    clock: _Clock,
+    gate: FileGate,
+) -> None:
+    policy = SitePolicy(host="acct", cooldown_sec=2.0, max_wait_sec=600.0)
+    gate.trip("k", policy)
+    clock.now += 2.0
+    assert gate.admit("k", policy).admitted
+    waiting = gate.admit("k", policy)
+    assert (waiting.admitted, waiting.wait_sec) == (False, 2.0)
+
+
+def test_keys_that_are_no_filenames_round_trip(gate: FileGate) -> None:
+    gate.hold("openai/sub@a b", until=5_000.0)
+    assert set(gate.states()) == {"openai/sub@a b"}
+    assert all(
+        p.parent == data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit"
+        for p in (data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit").iterdir()
+    )
+
+
+def test_an_unreadable_state_reads_as_fresh(gate: FileGate) -> None:
+    base = data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit"
+    base.mkdir(parents=True)
+    (base / "k.gate").write_text("{not json")
+    assert gate.states() == {"k": GateState()}
+
+
+def test_a_key_cleared_while_listed_is_skipped(
+    gate: FileGate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another process's reset deletes a recovered key's file between the
+    # listing and the read.
+    gate.hold("gone", until=5_000.0)
+    gate.hold("kept", until=5_000.0)
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self.name == "gone.gate":
+            raise FileNotFoundError(self)
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert set(gate.states()) == {"kept"}
+
+
+def test_a_gate_kept_elsewhere_keeps_its_own_state(tmp_path: Path) -> None:
+    elsewhere = FileGate(base_dir=tmp_path)
+    elsewhere.hold("k", until=5_000.0)
+    assert set(elsewhere.states()) == {"k"}
+    assert FileGate().states() == {}
 
 
 if __name__ == "__main__":
