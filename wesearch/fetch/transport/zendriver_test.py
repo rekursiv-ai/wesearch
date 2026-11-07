@@ -35,7 +35,7 @@ from zendriver.core.connection import Transaction
 import asyncio_atexit
 import pytest
 
-from wesearch.fetch.gate import FileGate, SitePolicy
+from wesearch.fetch.gate import FileGate, GatePolicy
 from wesearch.fetch.session import default_session
 from wesearch.fetch.transport import zendriver
 from wesearch.fetch.transport.zendriver import BrowserPool, _load
@@ -4812,7 +4812,7 @@ def test_the_window_opens_the_url_then_each_challenged_site(
 
     monkeypatch.setattr(browser, "get", get)
     gate = FileGate()
-    policy = SitePolicy(host="x")
+    policy = GatePolicy()
     gate.trip("gated.example::", policy, challenge_url="https://gated.example/")
     gate.trip("locked.example::", policy, challenge_url="https://locked.example/a")
     asyncio.run(

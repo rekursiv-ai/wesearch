@@ -7,18 +7,21 @@ from unittest.mock import patch
 
 import asyncio
 import fcntl
+import os
+import threading
 
 import pytest
 
 from wesearch.fetch.gate import (
     Admission,
     FileGate,
+    GatePolicy,
     GateState,
-    SitePolicy,
     admitted,
     challenged_urls,
     clear_host,
     gated,
+    waited,
 )
 from wesearch.lib.userdirs import data_dir
 from wesearch.types.errors import (
@@ -30,7 +33,7 @@ from wesearch.types.errors import (
 
 
 _URL = "https://probe.example/search?q=x"
-_FAST = (SitePolicy(host="probe.example", cooldown_sec=0.05, max_cooldown_sec=1.0),)
+_FAST = (GatePolicy(host="probe.example", cooldown_sec=0.05, max_cooldown_sec=1.0),)
 
 
 class _Clock:
@@ -121,7 +124,7 @@ def test_an_ordinary_failure_does_not_lock(gate: FileGate) -> None:
 def test_an_unreachable_site_locks_only_when_its_policy_says_so(
     gate: FileGate,
 ) -> None:
-    dropping = (SitePolicy(host="probe.example", unreachable_blocks=True),)
+    dropping = (GatePolicy(host="probe.example", unreachable_blocks=True),)
     with pytest.raises(TimeoutError), gated(_URL, egress="", gate=gate, policies=_FAST):
         raise TimeoutError
     _send(egress="")
@@ -135,7 +138,7 @@ def test_an_unreachable_site_locks_only_when_its_policy_says_so(
 
 
 def test_a_refused_connection_counts_as_unreachable(gate: FileGate) -> None:
-    dropping = (SitePolicy(host="probe.example", unreachable_blocks=True),)
+    dropping = (GatePolicy(host="probe.example", unreachable_blocks=True),)
     with (
         pytest.raises(FetchError),
         gated(_URL, egress="", gate=gate, policies=dropping),
@@ -193,8 +196,8 @@ def test_a_block_belongs_to_the_egress_that_drew_it() -> None:
 
 def test_a_block_belongs_to_the_site_that_drew_it(gate: FileGate) -> None:
     policies = (
-        SitePolicy(host="probe.example", path_prefix="/search"),
-        SitePolicy(host="probe.example", path_prefix="/scholar"),
+        GatePolicy(host="probe.example", path_prefix="/search"),
+        GatePolicy(host="probe.example", path_prefix="/scholar"),
     )
     with (
         pytest.raises(PuzzleChallengeError),
@@ -280,7 +283,7 @@ def test_clearing_a_host_with_no_state_clears_nothing(gate: FileGate) -> None:
 
 
 def test_the_burst_is_free_and_then_paced(clock: _Clock, gate: FileGate) -> None:
-    policies = (SitePolicy(host="probe.example", interval_sec=0.05, burst=2),)
+    policies = (GatePolicy(host="probe.example", interval_sec=0.05, burst=2),)
     start = clock.time()
     for _ in range(2):
         with gated(_URL, egress="", gate=gate, policies=policies):
@@ -304,7 +307,7 @@ async def test_a_caller_sits_out_a_lock_it_may_wait_for_then_probes(
         clock.sleep(delay)
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
-    patient = SitePolicy(host="probe.example", cooldown_sec=0.05, max_wait_sec=1.0)
+    patient = GatePolicy(host="probe.example", cooldown_sec=0.05, max_wait_sec=1.0)
     gate.trip("probe.example", patient)
 
     assert await gate.admitted("probe.example", patient) == Admission()
@@ -317,13 +320,34 @@ async def test_a_lock_longer_than_the_wait_allowed_is_refused_unwaited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(asyncio, "sleep", _never_sleep)
-    hurried = SitePolicy(host="probe.example", cooldown_sec=0.05)
+    hurried = GatePolicy(host="probe.example", cooldown_sec=0.05)
     gate.trip("probe.example", hurried)
 
     refusal = await gate.admitted("probe.example", hurried)
 
     assert not refusal.admitted
     assert refusal.wait_sec == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_wait_cut_short_asks_the_gate_again_before_sending() -> None:
+    """The pace's slot went unused, so the slot it was waiting for is not taken."""
+    answers = [Admission(wait_sec=0.5), Admission(wait_sec=0.0)]
+    asked: list[Admission] = []
+    waits: list[float] = []
+
+    async def admit() -> Admission:
+        asked.append(answers[len(asked)])
+        return asked[-1]
+
+    async def wait(seconds: float) -> bool:
+        waits.append(seconds)
+        return True
+
+    patient = GatePolicy(host="probe.example", max_wait_sec=1.0)
+
+    assert await waited(admit, patient, wait=wait) == Admission()
+    assert (len(asked), waits) == (2, [0.5])
 
 
 async def _never_sleep(delay: float) -> None:
@@ -334,7 +358,7 @@ def test_jitter_lengthens_only_a_wait_the_pace_imposed(
     clock: _Clock,
     gate: FileGate,
 ) -> None:
-    policies = (SitePolicy(host="probe.example", interval_sec=0.02, jitter_sec=0.05),)
+    policies = (GatePolicy(host="probe.example", interval_sec=0.02, jitter_sec=0.05),)
     start = clock.time()
     with gated(_URL, egress="", gate=gate, policies=policies):
         pass
@@ -364,7 +388,7 @@ def test_a_paced_site_that_recovered_keeps_its_pace(
     clock: _Clock,
     gate: FileGate,
 ) -> None:
-    policies = (SitePolicy(host="probe.example", interval_sec=0.05, cooldown_sec=0.01),)
+    policies = (GatePolicy(host="probe.example", interval_sec=0.05, cooldown_sec=0.01),)
     with (
         pytest.raises(PuzzleChallengeError),
         gated(_URL, egress="", gate=gate, policies=policies),
@@ -453,14 +477,14 @@ def test_an_interrupted_request_frees_the_probe(clock: _Clock, gate: FileGate) -
 
 
 def test_a_hold_short_enough_is_sat_out(clock: _Clock, gate: FileGate) -> None:
-    policy = SitePolicy(host="acct", max_wait_sec=60.0)
+    policy = GatePolicy(max_wait_sec=60.0)
     gate.hold("anthropic@work", until=clock.now + 39.0)
     admitted(gate, "anthropic@work", policy, refuse=RuntimeError)
     assert clock.now == pytest.approx(1_039.0)
 
 
 def test_a_hold_longer_than_the_wait_refuses(clock: _Clock, gate: FileGate) -> None:
-    policy = SitePolicy(host="acct", max_wait_sec=60.0)
+    policy = GatePolicy(max_wait_sec=60.0)
     gate.hold("anthropic@work", until=clock.now + 600.0)
     with pytest.raises(RuntimeError, match="cooling down for 600s"):
         admitted(gate, "anthropic@work", policy, refuse=RuntimeError)
@@ -473,7 +497,7 @@ def test_a_hold_set_during_the_wait_is_sat_out_too(
 ) -> None:
     # The first wait ends where a second caller's 429 began another: the gate
     # is asked again rather than sent through.
-    policy = SitePolicy(host="acct", max_wait_sec=60.0)
+    policy = GatePolicy(max_wait_sec=60.0)
     gate.hold("k", until=clock.now + 10.0)
     sleeps: list[float] = []
 
@@ -491,7 +515,7 @@ def test_a_hold_set_during_the_wait_is_sat_out_too(
 def test_a_hold_draws_no_probe(clock: _Clock, gate: FileGate) -> None:
     gate.hold("k", until=clock.now + 1.0)
     clock.now += 2.0
-    policy = SitePolicy(host="acct")
+    policy = GatePolicy()
     assert gate.admit("k", policy) == Admission()
     assert gate.admit("k", policy) == Admission()
 
@@ -508,7 +532,7 @@ def test_a_success_lifts_a_blocks_lock_but_not_a_servers_hold(
 ) -> None:
     # A reply that succeeds and says its window is spent: the reset after it
     # must not lift the hold it set.
-    policy = SitePolicy(host="acct")
+    policy = GatePolicy()
     gate.trip("k", policy)
     gate.hold("k", until=clock.now + 600.0)
     gate.reset("k", forget=True)
@@ -522,7 +546,7 @@ def test_waiting_on_a_probe_polls_at_the_cooldown(
     clock: _Clock,
     gate: FileGate,
 ) -> None:
-    policy = SitePolicy(host="acct", cooldown_sec=2.0, max_wait_sec=600.0)
+    policy = GatePolicy(cooldown_sec=2.0, max_wait_sec=600.0)
     gate.trip("k", policy)
     clock.now += 2.0
     assert gate.admit("k", policy).admitted
@@ -554,15 +578,43 @@ def test_a_key_cleared_while_listed_is_skipped(
     # listing and the read.
     gate.hold("gone", until=5_000.0)
     gate.hold("kept", until=5_000.0)
-    real = Path.read_bytes
+    real = os.open
 
-    def read_bytes(self: Path) -> bytes:
-        if self.name == "gone.gate":
-            raise FileNotFoundError(self)
-        return real(self)
+    def opened(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+        if Path(path).name == "gone.gate":
+            raise FileNotFoundError(path)
+        return real(path, flags, *args)
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(os, "open", opened)
     assert set(gate.states()) == {"kept"}
+
+
+def test_a_state_listed_mid_write_is_read_once_written(gate: FileGate) -> None:
+    """A write truncates, then writes: read between, the key had no state at all."""
+    gate.hold("k", until=5_000.0)
+    path = data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit" / "k.gate"
+    written = path.read_bytes()
+    listed: list[dict[str, GateState]] = []
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.ftruncate(fd, 0)
+        reading = threading.Thread(target=lambda: listed.append(gate.states()))
+        reading.start()
+        reading.join(0.1)
+        os.write(fd, written)
+    finally:
+        os.close(fd)
+    reading.join(5)
+    assert listed == [{"k": GateState(held_until=5_000.0)}]
+
+
+def test_a_key_that_is_no_site_is_paced_with_no_host(gate: FileGate) -> None:
+    """An account is paced and held as a site is, and matched by no URL."""
+    account = GatePolicy(cooldown_sec=5.0, max_wait_sec=60.0)
+    assert account.host == ""
+    gate.trip("openai-sub@work/sol-6.1", account)
+    assert not gate.admit("openai-sub@work/sol-6.1", account).admitted
 
 
 def test_a_gate_kept_elsewhere_keeps_its_own_state(tmp_path: Path) -> None:
