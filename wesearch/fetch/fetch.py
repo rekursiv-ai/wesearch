@@ -103,7 +103,7 @@ def fetch(
         try:
             if not params.content.raw_headers:
                 return _fetch_as_profile(url, params, session=session)
-            return _send(url, params, session=session, profile_cookies=False)
+            return _send(url, params, session=session)
         except BotDetectionError as block:
             if block.url:
                 raise
@@ -265,7 +265,7 @@ def _fetch_as_profile(
         return _fetch_as_profile(url, _on(params, "zendriver"), session=session)
     params = _on(params, transport)
     try:
-        return _send(url, params, session=session, profile_cookies=True)
+        return _send(url, params, session=session)
     except BotDetectionError:
         # A stored identity may be what got blocked: forget it and retry once
         # from a freshly probed egress. The browser's wall is final.
@@ -276,7 +276,7 @@ def _fetch_as_profile(
             raise
         session.profiles.discard(session.egress, domain)
         egress_ip(session, refresh=True)
-        return _send(url, params, session=session, profile_cookies=True)
+        return _send(url, params, session=session)
 
 
 # A render that fails raises: the shell has no content, so returning it would pass the
@@ -312,9 +312,8 @@ def _send(
     params: RequestParams,
     *,
     session: FetchSession,
-    profile_cookies: bool,
 ) -> bytes:
-    """Send ``params`` once, with retries, filing the cookies each response sets."""
+    """Send ``params`` once, with retries; a raw request sends and files no profile."""
     url, credentials = without_userinfo(url)
     parts = urlsplit(url)
     if params.content.params:
@@ -339,7 +338,7 @@ def _send(
 
     def stored_cookies(host: str) -> Mapping[str, str]:
         profile = (
-            session.profiles.load(session.egress, host) if profile_cookies else None
+            None if content.raw_headers else session.profiles.load(session.egress, host)
         )
         return dict[str, str]() if profile is None else profile.cookies
 
@@ -409,7 +408,7 @@ def _send(
             time.sleep(delay_sec)
     # Per attempt, so a 200 that is really a block sends ``auto`` to the browser.
     params.observe.body_validator(body_out)
-    if profile_cookies and session.egress:
+    if session.egress and not content.raw_headers:
         for host, cookies_set in landed.items():
             # The body already arrived: losing a cookie must not fail the fetch.
             try:
