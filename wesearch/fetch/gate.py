@@ -160,7 +160,7 @@ class GateState:
       tokens: Requests the pace allows, as of ``updated``.
       updated: When ``tokens`` was counted, in seconds since the epoch.
       locked_until: When the lock a block drew ends; a success lifts it.
-      held_until: When a hold a server named ends; only its time lifts it.
+      held_until: When a server's hold ends, unless explicitly cleared.
       failures: Blocks in a row; past zero, the first caller back probes.
       probe_until: When the current probe's lease ends.
       challenge_url: The URL whose bot challenge drew the lock; ``""`` for none.
@@ -227,8 +227,14 @@ class Gate(Protocol):
         """Free the probe; the failure said nothing about a block."""
         ...
 
-    def reset(self, key: str, *, forget: bool = False) -> None:
-        """Lift the lock a block drew on ``key``; a server's hold stays to its time."""
+    def reset(
+        self,
+        key: str,
+        *,
+        forget: bool = False,
+        clear_hold: bool = False,
+    ) -> None:
+        """Lift a key's lock, preserving its server hold unless explicitly cleared."""
         ...
 
     def states(self) -> dict[str, GateState]:
@@ -330,8 +336,14 @@ class FileGate:
         with _state(path) as box:
             box[0] = replace(box[0], probe_until=0.0)
 
-    def reset(self, key: str, *, forget: bool = False) -> None:
-        """Lift the lock a block drew on ``key``, and its backoff; a hold stays.
+    def reset(
+        self,
+        key: str,
+        *,
+        forget: bool = False,
+        clear_hold: bool = False,
+    ) -> None:
+        """Lift a key's lock and backoff, preserving its server hold by default.
 
         A success resets: a reply that also said its window is spent holds the
         key past the success, until the time it named.
@@ -339,13 +351,18 @@ class FileGate:
         Args:
           key: What is paced.
           forget: Also drop its pace, and its file once no hold is left.
+          clear_hold: Clear the server hold for an explicit recheck.
 
         """
         path = self._path(key)
         if not path.exists():
             return
         with _state(path) as box:
-            held = box[0].held_until if box[0].held_until > time.time() else 0.0
+            held = (
+                box[0].held_until
+                if not clear_hold and box[0].held_until > time.time()
+                else 0.0
+            )
             box[0] = GateState(
                 tokens=box[0].tokens,
                 updated=box[0].updated,

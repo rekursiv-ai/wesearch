@@ -602,6 +602,22 @@ def test_a_success_lifts_a_blocks_lock_but_not_a_servers_hold(
     assert gate.states() == {}
 
 
+@pytest.mark.parametrize("forget", [False, True])
+def test_an_explicit_reset_can_clear_a_servers_hold(
+    clock: _Clock,
+    gate: FileGate,
+    forget: bool,
+) -> None:
+    gate.hold("k", until=clock.now + 432_000.0)
+    gate.hold("other", until=clock.now + 432_000.0)
+    gate.reset("k", forget=forget, clear_hold=True)
+    assert gate.admit("k", GatePolicy()).admitted
+    assert not gate.admit("other", GatePolicy()).admitted
+    assert ("k" in gate.states()) is not forget
+    gate.reset("absent", clear_hold=True)
+    assert "absent" not in gate.states()
+
+
 def test_waiting_on_a_probe_polls_at_the_cooldown(
     clock: _Clock,
     gate: FileGate,
