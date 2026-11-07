@@ -7,7 +7,7 @@ public IP (a VPN roll) starts with none.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -230,12 +230,14 @@ class ProfileStore:
             prefix=f".{path.name}.",
             suffix=".tmp",
         )
-        try:
-            _ = os.write(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        Path(tmp).replace(path)
+        with ExitStack() as cleanup:
+            cleanup.callback(Path(tmp).unlink, missing_ok=True)
+            try:
+                _ = os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            Path(tmp).replace(path)
 
 
 def parsedate_to_datetime_or_none(value: str) -> datetime | None:

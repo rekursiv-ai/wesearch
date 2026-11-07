@@ -193,11 +193,15 @@ class TestCorruptFileResilience:
         path.write_bytes(b'{"cookies": {"a"')  # crash-truncated write.
         assert store.load("1.2.3.4", "x.com") is None
 
-    def test_load_wrong_shape_returns_none(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "raw",
+        [b"{}", b"[]", b"null", b"3", b'"invalid"', b"true"],
+    )
+    def test_load_wrong_shape_returns_none(self, tmp_path: Path, raw: bytes) -> None:
         store = ProfileStore(base_dir=tmp_path, ttl_sec=3600.0)
         path = store._path("1.2.3.4", "x.com")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"{}")  # Valid JSON, missing keys.
+        path.write_bytes(raw)
         assert store.load("1.2.3.4", "x.com") is None
 
     def test_corrupt_file_self_heals_on_next_save(self, tmp_path: Path) -> None:
@@ -503,6 +507,10 @@ class TestDurableWrite:
 
         def publish(source: Path, target: Path) -> Path:
             assert len(synced) == 1
+            assert source.parent == target.parent
+            assert source.name.startswith(f".{target.name}.")
+            assert source.suffix == ".tmp"
+            assert source.stat().st_mode & 0o777 == 0o600
             return replace(source, target)
 
         monkeypatch.setattr(os, "fsync", sync)
@@ -533,6 +541,7 @@ class TestDurableWrite:
             store._write(path, b"new profile")
         sync.assert_called_once()
         assert path.read_bytes() == b"previous profile"
+        assert list(tmp_path.iterdir()) == [path]
         with pytest.raises(OSError, match="Bad file descriptor"):
             os.fstat(synced[0])
 

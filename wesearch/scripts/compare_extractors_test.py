@@ -83,14 +83,22 @@ def test_reference_text_contains_visible_nodes() -> None:
     )
 
 
-def test_converters_have_expected_names() -> None:
-    assert list(compare_extractors.converters()) == [
-        "traf",
-        "traf-txt",
-        "h2t",
-        "mdfy",
-        "read-md",
-    ]
+def test_converters_select_the_shipped_extractors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def convert(value: str, *, extractor: str = "html2text") -> str:
+        assert value == "<p>body</p>"
+        seen.append(extractor)
+        return "body"
+
+    monkeypatch.setattr(compare_extractors, "html_to_text", convert)
+    converters = compare_extractors.converters()
+    assert list(converters) == ["traf", "traf-txt", "h2t", "mdfy", "read-md"]
+    for name in ("traf", "h2t", "mdfy"):
+        assert converters[name]("<p>body</p>") == "body"
+    assert seen == ["trafilatura", "html2text", "markdownify"]
 
 
 def test_score_page_filters_names_and_reports_probes() -> None:

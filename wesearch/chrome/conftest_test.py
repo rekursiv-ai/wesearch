@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from http import client
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import os
 import socket
@@ -191,24 +191,27 @@ class TestSelfSignedCert:
         tmp_path: Path,
     ) -> None:
         cert_path, key_path = tmp_path / "c.pem", tmp_path / "k.pem"
+        now = datetime(2026, 1, 2, tzinfo=UTC)
         # Made before the patch, so the patched generator hands out this one key.
         private_key = rsa.generate_private_key(public_exponent=65_537, key_size=2048)
-        with patch.object(
-            rsa,
-            "generate_private_key",
-            return_value=private_key,
-        ) as generate:
+        with (
+            patch.object(
+                rsa,
+                "generate_private_key",
+                return_value=private_key,
+            ) as generate,
+            patch.object(conftest, "datetime", Mock(now=Mock(return_value=now))),
+        ):
             self_signed_localhost_cert(cert_path, key_path)
         generate.assert_called_once_with(public_exponent=65_537, key_size=2048)
         cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        now = datetime.now(UTC)
         assert cert.subject.rfc4514_string() == "CN=localhost"
         assert cert.issuer.rfc4514_string() == "CN=localhost"
         public_key = cert.public_key()
         assert isinstance(public_key, rsa.RSAPublicKey)
         assert public_key.key_size == 2048
-        assert cert.not_valid_before_utc >= now - timedelta(days=1, seconds=2)
-        assert cert.not_valid_after_utc <= now + timedelta(days=3650, seconds=2)
+        assert cert.not_valid_before_utc == now - timedelta(days=1)
+        assert cert.not_valid_after_utc == now + timedelta(days=3650)
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
         assert san.critical is False
         assert san.value.get_values_for_type(x509.DNSName) == ["localhost"]

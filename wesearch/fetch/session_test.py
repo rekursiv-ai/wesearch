@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import atexit
 import os
@@ -46,14 +46,27 @@ def test_exit_closes_the_default_session() -> None:
     assert default_session() is not made
 
 
-def test_process_hooks_register_once(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("fork_hook", [True, False])
+def test_process_hooks_register_once(
+    monkeypatch: pytest.MonkeyPatch,
+    fork_hook: bool,
+) -> None:
     registered: list[object] = []
+    register_fork = Mock()
     monkeypatch.setattr(session, "_hooked", [])
     monkeypatch.setattr(atexit, "register", registered.append)
+    if fork_hook:
+        monkeypatch.setattr(os, "register_at_fork", register_fork, raising=False)
+    else:
+        monkeypatch.delattr(os, "register_at_fork", raising=False)
     default_session()
     session.close_default_session()
     default_session()
     assert registered == [session.close_default_session]
+    if fork_hook:
+        register_fork.assert_called_once_with(after_in_child=session._forget_in_child)
+    else:
+        register_fork.assert_not_called()
 
 
 def test_forgetting_in_a_child_drops_the_session_and_the_lock() -> None:
@@ -81,6 +94,7 @@ def test_a_forked_child_never_reuses_the_parents_session(
 ) -> None:
     """Run the registered child hook against a copy of the parent's globals."""
     monkeypatch.setattr(session, "_hooked", [])
+    monkeypatch.setattr(atexit, "register", Mock())
     with patch.object(os, "register_at_fork") as register:
         parent = default_session()
     register.assert_called_once_with(after_in_child=session._forget_in_child)

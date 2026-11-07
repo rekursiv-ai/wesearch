@@ -80,42 +80,37 @@ class TestPaginate:
         assert sizes[0] == 200  # limit>max -> request the ceiling.
 
     def test_walks_multiple_pages_to_limit_incomplete(self) -> None:
-        # Three full 200-pages available; limit 450 spans them and stays
-        # incomplete (a full final page means more may remain).
         pages: list[list[dict[str, MutablePlainTree]]] = [
-            [{"n": i} for i in range(200)] for _ in range(3)
+            [{"n": 1}, {"n": 2}],
+            [{"n": 3}, {"n": 4}],
         ]
-        cursor = _offset_cursor(pages, page_size_max=200)
-        page = paginate(cursor, limit=450)
-        assert len(page.entries) == 450
+        cursor = _offset_cursor(pages, page_size_max=2)
+        page = paginate(cursor, limit=3)
+        assert page.entries == [{"n": 1}, {"n": 2}, {"n": 3}]
         assert not page.complete
 
     def test_full_page_exactly_at_limit_is_incomplete(self) -> None:
-        # Limit == a full page: enough is reached, but the cursor was not
-        # exhausted, so complete must be False (the limit-clamp bug guard).
         pages: list[list[dict[str, MutablePlainTree]]] = [
-            [{"n": i} for i in range(200)],
-            [{"n": 200}],
+            [{"n": 1}, {"n": 2}],
+            [{"n": 3}],
         ]
-        cursor = _offset_cursor(pages, page_size_max=200)
-        page = paginate(cursor, limit=200)
-        assert len(page.entries) == 200
+        cursor = _offset_cursor(pages, page_size_max=2)
+        page = paginate(cursor, limit=2)
+        assert page.entries == [{"n": 1}, {"n": 2}]
         assert not page.complete
 
     def test_keep_filter_does_not_understate_completeness(self) -> None:
-        # A keep-filter dropping rows must not make a full page look short.
         pages: list[list[dict[str, MutablePlainTree]]] = [
-            [{"n": i} for i in range(200)],
-            [{"n": 200}],
+            [{"n": 1}, {"n": 2}],
+            [{"n": 3}],
         ]
-        cursor = _offset_cursor(pages, page_size_max=200)
+        cursor = _offset_cursor(pages, page_size_max=2)
         page = paginate(
             cursor,
             limit=None,
             keep=lambda r: from_plain(r["n"], int) % 2 == 0,
         )
-        # Only one page fetched (limit=None), all-even kept, but complete
-        # reflects the cursor (full page -> more), not the filtered count.
+        assert page.entries == [{"n": 2}]
         assert not page.complete
 
     def test_zero_limit_returns_empty_page(self) -> None:

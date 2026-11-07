@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import asyncio
 
 import pytest
@@ -69,6 +71,39 @@ def test_close_releases_every_connection_once_and_empties_the_session() -> None:
     assert first.closed == second.closed == browsers.shutdowns == 1
     assert session.curl == {}
     assert session.browsers is None
+
+
+@pytest.mark.parametrize("failure", ["first", "second", "browser", "all"])
+def test_close_attempts_every_connection_even_when_one_fails(failure: str) -> None:
+    close_first = Mock(
+        side_effect=OSError("first") if failure in {"first", "all"} else None,
+    )
+    close_second = Mock(
+        side_effect=OSError("second") if failure in {"second", "all"} else None,
+    )
+    shutdown = Mock(
+        side_effect=OSError("browser") if failure in {"browser", "all"} else None,
+    )
+    first, second = Mock(close=close_first), Mock(close=close_second)
+    browsers = Mock(shutdown=shutdown)
+    session = FetchSession(
+        curl={
+            ("egress", "first.example", None, 443): first,
+            ("egress", "second.example", None, 443): second,
+        },
+        browsers=browsers,
+    )
+    with pytest.raises(OSError, match="browser" if failure == "all" else failure):
+        session.close()
+    close_first.assert_called_once_with()
+    close_second.assert_called_once_with()
+    shutdown.assert_called_once_with()
+    assert session.curl == {}
+    assert session.browsers is None
+    session.close()
+    close_first.assert_called_once_with()
+    close_second.assert_called_once_with()
+    shutdown.assert_called_once_with()
 
 
 if __name__ == "__main__":
