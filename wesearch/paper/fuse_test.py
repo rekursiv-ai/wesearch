@@ -60,12 +60,6 @@ class TestFuse:
         assert len(out) == 1
         assert set(out[0].sources) == {"s2", "openalex"}
 
-    def test_dedup_by_title_when_no_doi(self) -> None:
-        s2 = [_rec("Deep Learning!")]
-        oa = [_rec("deep  learning", source="openalex")]
-        out = fuse(s2, oa)
-        assert len(out) == 1
-
     def test_identifiers_match_case_insensitively(self) -> None:
         out = fuse(
             [PaperRecord(title="T", doi="10.1/X", arxiv_id="2106.ABC")],

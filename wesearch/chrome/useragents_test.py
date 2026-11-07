@@ -646,31 +646,16 @@ class TestDownload:
             fp=None,
         )
         with (
-            patch.object(request, "urlopen", side_effect=error) as urlopen_mock,
-            pytest.raises(HTTPError) as raised,
-        ):
-            useragents._download_records()
-
-        assert raised.value.code == status
-        assert urlopen_mock.call_count == 3
-
-    def test_download_does_not_attempt_fourth_transient_request(self) -> None:
-        error = HTTPError(
-            "https://example.test/user-agents.json.gz",
-            503,
-            "Transient",
-            hdrs=Message(),
-            fp=None,
-        )
-        with (
             patch.object(
                 request,
                 "urlopen",
                 side_effect=[error, error, error, io.BytesIO(self._PAYLOAD)],
             ) as urlopen_mock,
-            pytest.raises(HTTPError),
+            pytest.raises(HTTPError) as raised,
         ):
             useragents._download_records()
+
+        assert raised.value is error
         assert urlopen_mock.call_count == 3
 
     def test_download_stops_after_three_transient_failures(self) -> None:

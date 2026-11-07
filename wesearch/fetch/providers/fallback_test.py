@@ -218,28 +218,6 @@ class TestFallback:
         assert exc.value is error
         proxy.assert_not_called()
 
-    def test_proxy_failure_reraises_primary(self) -> None:
-        def proxy_fail(
-            url: str,
-            *,
-            policy: object = None,
-            session: FetchSession | None = None,
-        ) -> bytes:
-            del url, policy, session
-            raise FetchError("https://r.jina.ai/", 401, {}, b"auth")
-
-        with (
-            patch.object(fallback, "fetch", _fetch_raising(403)),
-            patch.object(fallback, "fetch_reader_proxy", proxy_fail),
-            pytest.raises(FetchError) as exc,
-        ):
-            fallback.fetch_with_reader_fallback(
-                "https://s.example/",
-                policy=PolicyParams(),
-            )
-        # The primary (403) is surfaced, not the proxy's 401.
-        assert exc.value.status == 403
-
     def test_forwards_url_and_policy_to_both_hops(self) -> None:
         policy = PolicyParams()
         session = FetchSession()
@@ -296,18 +274,14 @@ class TestFallback:
             del url, request, session
             raise primary
 
-        def proxy_fail(
-            url: str,
-            *,
-            policy: object,
-            session: FetchSession | None = None,
-        ) -> bytes:
-            del url, policy, session
-            raise FetchError("https://r.jina.ai/", 401, {}, b"auth")
-
+        proxy_error = FetchError("https://r.jina.ai/", 401, {}, b"auth")
         with (
             patch.object(fallback, "fetch", primary_fetch),
-            patch.object(fallback, "fetch_reader_proxy", proxy_fail),
+            patch.object(
+                fallback,
+                "fetch_reader_proxy",
+                side_effect=proxy_error,
+            ) as proxy,
             pytest.raises(CloudflareChallengeError) as raised,
         ):
             fallback.fetch_with_reader_fallback(
@@ -315,6 +289,8 @@ class TestFallback:
                 policy=PolicyParams(),
             )
         assert raised.value is primary
+        assert raised.value.__cause__ is proxy_error
+        proxy.assert_called_once()
 
     def test_rate_limit_proxy_failure_reraises_exact_primary(self) -> None:
         primary = FetchError("https://s.example/", 429, {}, b"blocked")

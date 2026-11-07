@@ -1349,37 +1349,28 @@ async def real_timeout_wait[T](coro: Coroutine[object, object, T], delay: float)
     return await asyncio.wait_for(coro, timeout=delay)
 
 
-def test_load_uses_one_overall_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every step wait must shrink against ONE deadline, never restart it.
-
-    A CHALLENGE page, not a clear one: the settle loop returns on its first
-    read when the document is already clear, so a clear page never reaches the
-    two step waits and the assertion below has nothing to observe.
-    """
+@pytest.mark.asyncio
+async def test_load_uses_one_overall_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every step wait must shrink against ONE deadline, never restart it."""
     browser = _FakeBrowser(
         documents=["<html><title>Just a moment...</title></html>", "<html>ok</html>"],
     )
-    budgets: list[float] = []
+    clock, _ = _poll_clock(monkeypatch)
+    budgets: list[float | None] = []
     real_wait_for = asyncio.wait_for
 
     async def record_budget(
         awaitable: Awaitable[object],
-        timeout: float | None = None,  # noqa: ASYNC109 -- The browser test timeout bounds polling across an awaited operation.
+        timeout: float | None = None,  # noqa: ASYNC109 -- Mirrors asyncio.wait_for.
     ) -> object:
-        budgets.append(-1.0 if timeout is None else timeout)
-        return await real_wait_for(awaitable, timeout)
+        budgets.append(timeout)
+        result = await real_wait_for(awaitable, timeout)
+        clock[0] += 0.25
+        return result
 
     monkeypatch.setattr(asyncio, "wait_for", record_budget)
-    _load_page(browser, timeout_sec=5.0)
-
-    assert len(budgets) >= 2, f"the settle path never reached its step waits: {budgets}"
-    assert all(timeout >= 0.0 for timeout in budgets), (
-        f"a step wait was left unbounded: {budgets}"
-    )
-    assert budgets == sorted(budgets, reverse=True), (
-        f"step waits did not shrink against one deadline: {budgets}"
-    )
-    assert max(budgets) <= 5.0 / 2, f"a step wait exceeded the settle budget: {budgets}"
+    assert await _drive(browser, timeout_sec=5.0) == b"<html>ok</html>"
+    assert budgets == [2.5, 2.25]
 
 
 def test_load_returns_a_rendered_widget_page_without_classifying_it() -> None:
@@ -2691,16 +2682,18 @@ def connects(monkeypatch: pytest.MonkeyPatch) -> _Connects:
 
 
 @pytest.mark.parametrize(
-    ("running", "requested", "restart", "expected"),
+    ("running", "requested", "restart", "listening", "expected"),
     [
-        (True, None, False, (True, False)),
-        (False, None, False, (False, False)),
-        (False, False, False, (False, False)),
-        (True, True, True, (True, False)),
-        (True, False, True, (False, True)),
-        (False, True, True, (True, True)),
-        (None, None, False, (True, False)),
-        (None, False, False, (False, False)),
+        (True, None, False, True, (True, False)),
+        (False, None, False, True, (False, False)),
+        (False, False, False, True, (False, False)),
+        (True, True, True, True, (True, False)),
+        (True, False, True, True, (False, True)),
+        (False, True, True, True, (True, True)),
+        (None, None, False, True, (True, False)),
+        (None, False, False, True, (False, False)),
+        (False, None, False, False, (True, False)),
+        (True, False, False, False, (False, False)),
     ],
 )
 def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
@@ -2711,6 +2704,7 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
     expected: tuple[bool, bool],
     *,
     restart: bool,
+    listening: bool,
 ) -> None:
     events: list[object] = []
 
@@ -2745,6 +2739,9 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
         assert profile_dir == tmp_path
         return 4242 if running is not None else None
 
+    def answers(port: int) -> bool:
+        return listening and port == 4242
+
     run = BrowserPool.run
     waits: list[float] = []
 
@@ -2759,7 +2756,7 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
 
     monkeypatch.setattr(zendriver, "_launch_lock", lock)
     monkeypatch.setattr(zendriver, "_devtools_port", port)
-    monkeypatch.setattr(zendriver, "_port_answers", _answers_on_4242)
+    monkeypatch.setattr(zendriver, "_port_answers", answers)
     monkeypatch.setattr(zendriver, "_read_mode", read_mode, raising=False)
     monkeypatch.setattr(zendriver, "_close_chrome", close)
     monkeypatch.setattr(zendriver, "_start_shared_chrome", launch, raising=False)
@@ -2773,7 +2770,11 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
     finally:
         pool.shutdown()
     transition = ["close", ("launch", requested, True)] if expected[1] else []
-    initial = [("launch", expected[0], False)] if running is None else ["read"]
+    initial = (
+        [("launch", expected[0], False)]
+        if running is None or not listening
+        else ["read"]
+    )
     assert events == ["lock", *initial, *transition, "unlock"]
     assert all(timeout and timeout > 0 for timeout in waits)
 
@@ -3915,7 +3916,11 @@ def _owned_profile(tmp_path: Path, command: str) -> Path:
     return profile
 
 
-def test_devtools_port_reads_the_singleton_owner_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_devtools_port_reads_the_singleton_owner_command(
+    tmp_path: Path,
+    platform: str,
+) -> None:
     profile = tmp_path / "profile"
     process = tmp_path / "proc" / "123"
     profile.mkdir()
@@ -3927,7 +3932,21 @@ def test_devtools_port_reads_the_singleton_owner_command(tmp_path: Path) -> None
         + b"--remote-debugging-port=4567\0"
         + b"about:blank\0",
     )
-    assert zendriver._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
+    other = tmp_path / "proc" / "456"
+    hidden = other / "root" / profile.relative_to("/")
+    hidden.mkdir(parents=True)
+    (hidden / "SingletonLock").symlink_to("host-456")
+    (other / "cmdline").write_text(
+        f"chrome --user-data-dir={profile} --remote-debugging-port=6789",
+    )
+    assert (
+        zendriver._devtools_port(
+            profile,
+            proc_root=tmp_path / "proc",
+            platform=platform,
+        )
+        == 4567
+    )
 
 
 @pytest.mark.parametrize("command_port", [0, 4242])
@@ -3975,9 +3994,11 @@ def test_shared_chrome_reuses_profile_in_owners_mount_namespace(
 
 
 @pytest.mark.parametrize("owner", [None, "host-456", "host-123"])
-def test_devtools_port_rejects_unowned_namespace_profiles(
+@pytest.mark.parametrize("profile_suffix", ["", "-other"])
+def test_devtools_port_validates_namespace_owner_and_profile(
     tmp_path: Path,
     owner: str | None,
+    profile_suffix: str,
 ) -> None:
     profile = tmp_path / "profile"
     profile.mkdir()
@@ -3987,15 +4008,16 @@ def test_devtools_port_rejects_unowned_namespace_profiles(
     if owner is not None:
         (namespace_profile / "SingletonLock").symlink_to(owner)
     (process / "cmdline").write_text(
-        f"chrome --user-data-dir={profile}-other --remote-debugging-port=4242",
+        f"chrome --user-data-dir={profile}{profile_suffix} --remote-debugging-port=4242",
     )
+    expected = 4242 if owner == "host-123" and not profile_suffix else None
     assert (
         zendriver._devtools_port(
             profile,
             proc_root=tmp_path / "proc",
             platform="linux",
         )
-        is None
+        == expected
     )
 
 

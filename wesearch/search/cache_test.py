@@ -77,21 +77,26 @@ def test_an_empty_answer_is_not_cached() -> None:
     assert calls == [2]
 
 
-def test_a_stale_entry_is_recomputed() -> None:
+@pytest.mark.parametrize(("age", "expected_calls"), [(2.0, 1), (2.5, 2)])
+def test_an_entry_is_recomputed_only_after_its_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+    age: float,
+    expected_calls: int,
+) -> None:
     calls = [0]
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
 
     def compute() -> list[SearchResult]:
         calls[0] += 1
         return list(_ROWS)
 
-    cached_search({"q": "x"}, compute)
+    cached_search({"q": "x"}, compute, ttl_sec=2.0)
     base = cache_dir() / "rekursiv-ai" / "wesearch" / "search"
     for entry in base.glob("*.json"):
-        old = time.time() - 7200
-        os.utime(entry, (old, old))
-    cached_search({"q": "x"}, compute, ttl_sec=3600)
-
-    assert calls == [2]
+        os.utime(entry, (now - age, now - age))
+    assert cached_search({"q": "x"}, compute, ttl_sec=2.0) == _ROWS
+    assert calls == [expected_calls]
 
 
 def test_a_zero_ttl_bypasses_read_and_write() -> None:
@@ -126,6 +131,26 @@ def test_a_write_prunes_expired_entries_and_idle_locks() -> None:
     assert "stale.lock" not in survivors
     assert "idle.lock" not in survivors
     assert "recent.lock" in survivors
+
+
+def test_prune_keeps_entries_until_their_ttl_is_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    for name, age in (("answer.json", 2.0), ("answer.lock", 4.0)):
+        entry = tmp_path / name
+        entry.write_text("x")
+        os.utime(entry, (now - age, now - age))
+    cache._prune(tmp_path, ttl_sec=2.0, lock_ttl_sec=4.0)
+    assert {entry.name for entry in tmp_path.iterdir()} == {
+        "answer.json",
+        "answer.lock",
+    }
+    now += 0.5
+    cache._prune(tmp_path, ttl_sec=2.0, lock_ttl_sec=4.0)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_prune_tolerates_an_entry_removed_concurrently(

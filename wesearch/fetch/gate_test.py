@@ -234,6 +234,7 @@ def test_one_url_per_site_however_many_blocks(gate: FileGate) -> None:
 
 
 def test_challenges_list_oldest_first(clock: _Clock, gate: FileGate) -> None:
+    start = clock.now
     with (
         pytest.raises(PuzzleChallengeError),
         gated("https://other.example/b", egress="", gate=gate),
@@ -245,6 +246,12 @@ def test_challenges_list_oldest_first(clock: _Clock, gate: FileGate) -> None:
         "https://other.example/b",
         "https://probe.example/a",
     ]
+    assert {
+        state.challenge_url: state.challenged_at for state in gate.states().values()
+    } == {
+        "https://other.example/b": start,
+        "https://probe.example/a": start + 1.0,
+    }
 
 
 def test_an_answered_site_drops_its_challenge(clock: _Clock, gate: FileGate) -> None:
@@ -319,6 +326,38 @@ async def test_a_caller_sits_out_a_lock_it_may_wait_for_then_probes(
 
 
 @pytest.mark.asyncio
+async def test_an_async_paced_caller_uses_the_slot_it_waited_for(
+    clock: _Clock,
+    gate: FileGate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        assert not slept, "the caller already waited for its pacing slot"
+        slept.append(delay)
+        clock.sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    policy = GatePolicy(interval_sec=0.5)
+    assert await gate.admitted("k", policy) == Admission()
+    assert await gate.admitted("k", policy) == Admission()
+    assert slept == [pytest.approx(0.5)]
+
+
+def test_cooldown_jitter_extends_the_lock_wait(gate: FileGate) -> None:
+    policy = GatePolicy(cooldown_sec=2.0, jitter_sec=1.0)
+    gate.trip("k", policy)
+    with patch(
+        "wesearch.fetch.gate.random.SystemRandom.uniform",
+        return_value=0.5,
+    ):
+        refusal = gate.admit("k", policy)
+    assert not refusal.admitted
+    assert refusal.wait_sec == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
 async def test_a_lock_longer_than_the_wait_allowed_is_refused_unwaited(
     gate: FileGate,
     monkeypatch: pytest.MonkeyPatch,
@@ -373,6 +412,8 @@ def test_jitter_lengthens_only_a_wait_the_pace_imposed(
 
 
 def test_an_unpaced_site_that_never_failed_leaves_no_state(gate: FileGate) -> None:
+    assert gate.admit("probe.example", GatePolicy()) == Admission()
+    assert gate.states() == {}
     _send()
     assert gate.states() == {}
 
@@ -543,9 +584,11 @@ def test_a_hold_never_shortens_a_lock(clock: _Clock, gate: FileGate) -> None:
     assert gate.states()["k"].held_until == clock.now + 50.0
 
 
+@pytest.mark.parametrize("elapsed", [600.0, 601.0])
 def test_a_success_lifts_a_blocks_lock_but_not_a_servers_hold(
     clock: _Clock,
     gate: FileGate,
+    elapsed: float,
 ) -> None:
     # A reply that succeeds and says its window is spent: the reset after it
     # must not lift the hold it set.
@@ -554,7 +597,7 @@ def test_a_success_lifts_a_blocks_lock_but_not_a_servers_hold(
     gate.hold("k", until=clock.now + 600.0)
     gate.reset("k", forget=True)
     assert gate.states() == {"k": GateState(held_until=clock.now + 600.0)}
-    clock.now += 601.0
+    clock.now += elapsed
     gate.reset("k", forget=True)
     assert gate.states() == {}
 
@@ -608,26 +651,51 @@ def test_a_key_cleared_while_listed_is_skipped(
         return real(path, flags, *args)
 
     monkeypatch.setattr(os, "open", opened)
-    assert set(gate.states()) == {"kept"}
+    base = data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit"
+    with patch.object(
+        Path,
+        "glob",
+        return_value=iter([base / "gone.gate", base / "kept.gate"]),
+    ):
+        assert set(gate.states()) == {"kept"}
 
 
-def test_a_state_listed_mid_write_is_read_once_written(gate: FileGate) -> None:
+def test_a_state_listed_mid_write_is_read_once_written(
+    gate: FileGate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A write truncates, then writes: read between, the key had no state at all."""
     gate.hold("k", until=5_000.0)
     path = data_dir() / "rekursiv-ai" / "wesearch" / "ratelimit" / "k.gate"
     written = path.read_bytes()
     listed: list[dict[str, GateState]] = []
+    arriving = threading.Event()
+    flock = fcntl.flock
+
+    def locking(fd: int, operation: int) -> None:
+        arriving.set()
+        flock(fd, operation)
+
+    def read() -> None:
+        try:
+            listed.append(gate.states())
+        finally:
+            arriving.set()
+
+    reading = threading.Thread(target=read)
     fd = os.open(path, os.O_RDWR)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        flock(fd, fcntl.LOCK_EX)
         os.ftruncate(fd, 0)
-        reading = threading.Thread(target=lambda: listed.append(gate.states()))
+        monkeypatch.setattr(fcntl, "flock", locking)
         reading.start()
-        reading.join(0.1)
+        assert arriving.wait(1)
+        assert listed == []
         os.write(fd, written)
     finally:
         os.close(fd)
-    reading.join(5)
+        reading.join(5)
+    assert not reading.is_alive()
     assert listed == [{"k": GateState(held_until=5_000.0)}]
 
 

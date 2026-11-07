@@ -280,6 +280,7 @@ def test_a_firewall_interstitial_is_classified(
             b'&lt;div id="cf-challenge-running"&gt;</description></item></channel></rss>'
         ),
         b"%PDF-1.7 AwsWafIntegration.getToken()",
+        b"X<html><title>Just a moment...</title></html>",
         # Feeds without a prolog, or with a comment before the root.
         b'<rss version="2.0"><channel><title>Just a moment...</title></channel></rss>',
         (
@@ -406,6 +407,7 @@ def test_visible_chars_skip_hidden_elements_in_any_case() -> None:
         # browser never sees; Chrome gets the page with a 200.
         ("https://operations.nfl.com/v2/operations?_rsc", True),
         ("https://operations.nfl.com/", False),
+        ("https://other.example/", True),
     ],
 )
 def test_a_404_after_a_redirect_is_unmarked_but_one_at_the_url_is_not(
@@ -424,6 +426,7 @@ def test_a_404_after_a_redirect_is_unmarked_but_one_at_the_url_is_not(
         ("https://u:p@search.example/x", "https://search.example/x"),
         ("https://search.example/x", "https://search.example/x?page=2"),
         ("https://Search.Example/x#top", "https://search.example/x"),
+        ("https://search.example", "https://search.example/"),
     ],
 )
 def test_a_404_at_the_url_asked_for_is_not_unmarked(
@@ -443,6 +446,7 @@ def test_a_404_at_the_url_asked_for_is_not_unmarked(
         (405, "text/html", True),
         (503, "text/html", True),
         (403, "application/json", False),
+        (403, None, False),
         (404, "text/html", False),
         (429, "text/html", False),
         (500, "text/html", False),
@@ -450,15 +454,12 @@ def test_a_404_at_the_url_asked_for_is_not_unmarked(
 )
 def test_unmarked_block_is_an_html_refusal_only(
     status: int,
-    content_type: str,
+    content_type: str | None,
     unmarked: bool,
 ) -> None:
-    error = FetchError("https://x.com", status, {"Content-Type": content_type}, b"")
+    headers = {} if content_type is None else {"Content-Type": content_type}
+    error = FetchError("https://x.com", status, headers, b"")
     assert is_unmarked_block(error, requested="https://x.com") is unmarked
-    assert not is_unmarked_block(
-        FetchError("https://x.com", 403, {}, b""),
-        requested="https://x.com",
-    )
 
 
 def test_cloudflare_title_on_success() -> None:

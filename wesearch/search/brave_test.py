@@ -8,6 +8,8 @@ from urllib.parse import parse_qs, urlparse
 
 import json
 
+from treekle import ReadError
+
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
@@ -132,6 +134,12 @@ def test_the_session_reaches_fetch() -> None:
 def test_a_payload_without_web_results_is_empty() -> None:
     with _fetching({"query": {"original": "q"}}):
         assert brave("q") == []
+
+
+@pytest.mark.parametrize("payload", [None, [], 7, "invalid", True])
+def test_non_object_payload_is_rejected(payload: object) -> None:
+    with _fetching(payload), pytest.raises(ReadError):
+        brave("q")
 
 
 if __name__ == "__main__":

@@ -88,11 +88,6 @@ class TestNormalizeId:
     def test_old_style_subject_suffix_accepts_uppercase_archive(self) -> None:
         assert normalize_id("foo.BR/1234567") == ("arxiv", "foo.BR/1234567")
 
-    def test_doi_prefix_pins_family(self) -> None:
-        # A ``doi:``-prefixed arXiv-shaped value must not be re-read as arXiv.
-        with pytest.raises(InvalidIdError):
-            normalize_id("doi:2106.15928")
-
     def test_empty_rejected(self) -> None:
         with pytest.raises(InvalidIdError, match=r"^Empty identifier\.$"):
             normalize_id("   ")

@@ -65,8 +65,10 @@ def test_browser_data_without_a_tab_names_none() -> None:
 def test_fetch_schema_declares_url_and_policy_defaults() -> None:
     assert FetchParamsSchema.url.required is True
     assert FetchParamsSchema.url.annotation is str
-    assert FetchParamsSchema.transport.annotation is not None
-    assert FetchParamsSchema.extractor.annotation is not None
+    assert FetchParamsSchema.transport.default == "auto"
+    assert FetchParamsSchema.transport.required is False
+    assert FetchParamsSchema.extractor.default == "html2text"
+    assert FetchParamsSchema.extractor.required is False
 
 
 def test_body_schema_adds_method_json_and_form_fields() -> None:

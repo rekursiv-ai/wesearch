@@ -56,11 +56,19 @@ class TestCitations:
             "isInfluential": True,
             "citingPaper": {"title": "boundary", "year": 2020},
         }
-        with patch.object(
-            s2,
-            "paginate",
-            return_value=Page(entries=[entry], complete=True),
-        ):
+
+        def fake(
+            path: str,
+            params: dict[str, str | int],
+            *,
+            limit: int | None,
+            keep: Callable[[dict[str, MutablePlainTree]], bool],
+            session: FetchSession | None = None,
+        ) -> Page:
+            del path, params, limit, session
+            return Page(entries=[entry] if keep(entry) else [], complete=True)
+
+        with patch.object(s2, "paginate", side_effect=fake):
             listing = citations("doi", "10.1/x", limit=None, year_from=2020)
 
         assert [r.title for r in listing.records] == ["boundary"]
@@ -271,9 +279,9 @@ class TestOpenAlexGraphSource:
         # OpenAlex's meta.count is an estimate and can come back BELOW what the
         # walk returned. Re-deriving `complete or total <= len(records)` turned
         # the paginator's honest "not exhausted" into a claim of completeness.
-        recs = [PaperRecord(title=f"c{i}", sources=("openalex",)) for i in range(200)]
-        with patch.object(openalex, "citations", return_value=(recs, 150, False)):
-            listing = citations("doi", "10.1/x", limit=200, source="openalex")
+        recs = [PaperRecord(title=f"c{i}", sources=("openalex",)) for i in range(2)]
+        with patch.object(openalex, "citations", return_value=(recs, 1, False)):
+            listing = citations("doi", "10.1/x", limit=2, source="openalex")
         assert not listing.complete
 
     def test_an_unknown_graph_source_is_rejected(self) -> None:

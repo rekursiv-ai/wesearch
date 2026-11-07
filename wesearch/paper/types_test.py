@@ -36,10 +36,15 @@ def test_paper_merge_fills_empty_primary_values() -> None:
 
 
 def test_author_record_defaults_are_sparse() -> None:
-    assert AuthorRecord(author_id="1", name="Ada") == AuthorRecord(
-        author_id="1",
-        name="Ada",
-    )
+    author = AuthorRecord(author_id="1", name="Ada")
+    assert author.author_id == "1"
+    assert author.name == "Ada"
+    assert author.aliases == ()
+    assert author.affiliations == ()
+    assert author.homepage == ""
+    assert author.h_index is None
+    assert author.citation_count is None
+    assert author.paper_count is None
 
 
 if __name__ == "__main__":

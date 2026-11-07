@@ -8,14 +8,19 @@ leaves every browser it opened resident.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
+from unittest.mock import Mock, patch
 
 import ast
+import inspect
 
 from codedoctor.testing.tiers import TIERS
 
 import pytest
+
+from wesearch import conftest as fixtures
 
 
 _THIS: Final = Path(__file__).resolve()
@@ -77,11 +82,24 @@ def test_the_package_conftest_binds_browser_teardown() -> None:
         "browser teardown must be autouse, so it covers every test file "
         "without each one opting in"
     )
-    assert _stops_launched(fixture), (
-        "wesearch/conftest.py never calls BrowserPool().shutdown(stop_launched=True); "
-        "the shared Chrome is detached and outlives a disconnect, so every "
-        "isolated test profile leaves one running"
-    )
+    shutdown = Mock()
+    with patch.object(
+        fixtures,
+        "BrowserPool",
+        return_value=Mock(shutdown=shutdown),
+    ) as pool:
+        unwrapped = cast(
+            Callable[[], Iterator[None]],
+            inspect.unwrap(fixtures.stop_launched_chromes),
+        )
+        lifecycle = unwrapped()
+        assert next(lifecycle) is None
+        pool.assert_not_called()
+        shutdown.assert_not_called()
+        with pytest.raises(StopIteration):
+            next(lifecycle)
+    pool.assert_called_once_with()
+    shutdown.assert_called_once_with(stop_launched=True)
 
 
 def _fixture_def(path: Path, *, name: str) -> ast.FunctionDef:

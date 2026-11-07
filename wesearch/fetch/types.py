@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -110,10 +111,11 @@ class FetchSession:
             sessions = list(self.curl.values())
             self.curl.clear()
             browsers, self.browsers = self.browsers, None
-        for curl_session in sessions:
-            curl_session.close()
-        if browsers is not None:
-            browsers.shutdown()
+        with ExitStack() as cleanup:
+            if browsers is not None:
+                cleanup.callback(browsers.shutdown)
+            for curl_session in reversed(sessions):
+                cleanup.callback(curl_session.close)
 
     def __enter__(self) -> Self:
         return self

@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import Literal, cast, get_args
 from unittest.mock import patch
 
-import importlib
 import json
+import runpy
 
 import pytest
 
@@ -50,19 +50,21 @@ type _OneTab = Literal["general"]
 def test_import_refuses_a_tab_without_a_categories_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The guard runs at import, so re-import against a vocabulary that has a tab
-    # ``CATEGORIES`` does not list, then restore the real module.
-    monkeypatch.setattr(types, "SearxngCategory", _OneTab)
-    try:
+    categories = searxng_module.CATEGORIES
+    category_type = searxng_module.CategoryInfo
+    with monkeypatch.context() as local:
+        local.setattr(types, "SearxngCategory", _OneTab)
         with pytest.raises(
             ValueError,
             match=r"^every SearxngCategory needs a CATEGORIES record$",
         ):
-            importlib.reload(searxng_module)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(searxng_module)
-    assert set(searxng_module.CATEGORIES) == set(
+            _ = runpy.run_path(
+                searxng_module.__file__ or "",
+                run_name=f"{searxng_module.__name__}_fresh",
+            )
+    assert searxng_module.CATEGORIES is categories
+    assert searxng_module.CategoryInfo is category_type
+    assert set(categories) == set(
         get_args(cast(object, types.SearxngCategory.__value__)),
     )
 
@@ -323,6 +325,28 @@ def test_searxng_public_request_decodes_and_caps(
     assert fetch_mock.call_args.args[0] == (
         "https://search.example/search?q=q&format=json&pageno=1&categories=general"
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"null", b"[]", b'{"results": null}', b'{"results": 7}', b'{"results": {}}'],
+)
+def test_searxng_malformed_containers_return_no_results(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    monkeypatch.setenv("SEARXNG_URL", "https://search.example")
+    with patch("wesearch.search.searxng.fetch", return_value=payload):
+        assert searxng("q") == []
+
+
+def test_searxng_discards_malformed_items_before_capping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARXNG_URL", "https://search.example")
+    payload = b'{"results": [null, 7, "bad", {"title": " t "}, {"title": "u"}]}'
+    with patch("wesearch.search.searxng.fetch", return_value=payload):
+        assert searxng("q", 1) == [SearchResult(url="", title="t", snippet="")]
 
 
 def test_searxng_public_request_forwards_parameters(

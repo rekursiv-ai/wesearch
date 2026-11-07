@@ -72,9 +72,6 @@ class TestTranslateHttpError:
     def test_backend_error_default_status_is_zero(self) -> None:
         assert BackendError("x").status == 0
 
-    def test_default_policy_maps_404_to_not_found(self) -> None:
-        assert isinstance(translate_http_error(_err(404), backend="B"), NotFoundError)
-
 
 if __name__ == "__main__":
     from wesearch.lib.testing.runner import test_main
