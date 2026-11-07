@@ -348,6 +348,8 @@ def test_only_html_can_be_a_shell(body: bytes) -> None:
             True,
         ),
         ("<META HTTP-EQUIV=Refresh CONTENT='3; URL=../2.15/x.html'>", True),
+        ('<meta http-equiv="refresh" content="5;url=/next">', True),
+        ('<meta http-equiv="refresh" content="6;url=/next">', False),
         ('<meta http-equiv="refresh" content="60;url=/next">', False),
         ('<meta http-equiv="refresh" content="300">', False),
         ("<p>refresh content=0;url=/x</p>", False),
@@ -391,9 +393,9 @@ def test_a_shell_is_a_page_something_will_replace(body: bytes, shell: bool) -> N
 
 
 def test_shell_text_budget_is_retunable() -> None:
-    body = b"<html><body>ab<script></script></body></html>"
-    assert not is_shell(body, min_text_chars=2)
-    assert is_shell(body, min_text_chars=3)
+    body = b"<html><body>" + b"a" * 500 + b"<script></script></body></html>"
+    assert not is_shell(body)
+    assert is_shell(body, min_text_chars=501)
 
 
 def test_visible_chars_skip_hidden_elements_in_any_case() -> None:
@@ -499,6 +501,9 @@ def test_cloudflare_ambient_beacon_only_counts_on_error() -> None:
 
 def test_marker_groups_are_retunable() -> None:
     assert classify_challenge("<div class='widgetguard-v2'></div>") is None
+    wall = "<div class='cf-challenge'>" + "a" * 2_000 + "</div>"
+    assert classify_challenge(wall) is CloudflareChallengeError
+    assert classify_challenge(wall + "a") is None
     assert (
         classify_challenge(
             "<div class='widgetguard-v2'>ab</div>",

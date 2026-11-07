@@ -290,7 +290,15 @@ class TestExpiresDeletion:
     def test_cookie_malformed_expiry_is_not_deletion(self) -> None:
         assert parse_set_cookie("a=1; Max-Age=wat") == {"a": "1"}
 
-    def test_malformed_max_age_does_not_hide_later_expiry(self) -> None:
+    def test_malformed_expires_does_not_hide_later_expiry(self) -> None:
+        assert (
+            parse_set_cookie(
+                "a=1; Expires=not-a-date; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+            )
+            == {}
+        )
+
+    def test_malformed_max_age_keeps_a_cookie_even_with_past_expiry(self) -> None:
         assert not profile._is_deletion(
             ["Max-Age=wat=bad", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"],
         )

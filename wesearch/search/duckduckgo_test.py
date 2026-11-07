@@ -69,6 +69,8 @@ def test_quote_bangs_only_quotes_bang_tokens() -> None:
             "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fp",
             "https://example.com/p",
         ),
+        ("https://duckduckgo.com/l/", "https://duckduckgo.com/l/"),
+        ("https://duckduckgo.com/l/?uddg=", "https://duckduckgo.com/l/?uddg="),
         (
             "https://example.com/l/?uddg=https%3A%2F%2Fbad",
             "https://example.com/l/?uddg=https%3A%2F%2Fbad",
