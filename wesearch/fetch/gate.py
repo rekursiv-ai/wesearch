@@ -37,7 +37,7 @@ from wesearch.types.errors import BotDetectionError, CooldownError, FetchError
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Sequence
+    from collections.abc import Awaitable, Callable, Generator, Sequence
     from pathlib import Path
 
 
@@ -46,21 +46,23 @@ __all__ = [
     "Admission",
     "FileGate",
     "Gate",
+    "GatePolicy",
     "GateState",
-    "SitePolicy",
     "admitted",
     "challenged_urls",
     "clear_host",
     "gated",
+    "waited",
 ]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SitePolicy:
+class GatePolicy:
     """How one key is paced, and how a block on it is recovered from.
 
     Attributes:
-      host: Exact hostname the policy covers; for a key that is no site, its name.
+      host: Exact hostname whose URLs ``gated`` paces by this policy; ``""`` for
+        a key that is no site, as an account, which no URL matches.
       path_prefix: Narrows the policy to URLs under this path; the longest
         matching prefix wins.
       interval_sec: Mean seconds between requests across every process; ``0``
@@ -79,7 +81,7 @@ class SitePolicy:
 
     """
 
-    host: str
+    host: str = ""
     path_prefix: str = "/"
     interval_sec: float = 0.0
     jitter_sec: float = 0.0
@@ -91,9 +93,9 @@ class SitePolicy:
     max_wait_sec: float = 0.0
 
 
-SITE_POLICIES: Final[tuple[SitePolicy, ...]] = (
+SITE_POLICIES: Final[tuple[GatePolicy, ...]] = (
     # Google flags an IP that searches faster than a person.
-    SitePolicy(
+    GatePolicy(
         host="www.google.com",
         path_prefix="/search",
         interval_sec=5.0,
@@ -101,7 +103,7 @@ SITE_POLICIES: Final[tuple[SitePolicy, ...]] = (
     ),
     # A result link answers a client that follows more than ~3 quickly with a
     # 3-second refresh page, and a 400 if followed sooner (measured 2026-10-30).
-    SitePolicy(
+    GatePolicy(
         host="www.google.com",
         path_prefix="/goto",
         interval_sec=3.5,
@@ -110,7 +112,7 @@ SITE_POLICIES: Final[tuple[SitePolicy, ...]] = (
     # Scholar flags a fixed cadence: uniform 4-10s held ~23 requests per IP before a
     # CAPTCHA where a fixed interval at the same mean burned in ~21. Its bans last
     # roughly a day or two, so a probe sooner only renews one.
-    SitePolicy(
+    GatePolicy(
         host="scholar.google.com",
         path_prefix="/scholar",
         interval_sec=4.0,
@@ -119,14 +121,14 @@ SITE_POLICIES: Final[tuple[SitePolicy, ...]] = (
         max_cooldown_sec=48 * 3600.0,
     ),
     # DuckDuckGo drops a flagged IP's packets, so a timeout IS its block.
-    SitePolicy(
+    GatePolicy(
         host="html.duckduckgo.com",
         interval_sec=2.0,
         burst=5,
         unreachable_blocks=True,
     ),
     # Brave's plan allows 50 requests/s shared by every key.
-    SitePolicy(
+    GatePolicy(
         host="api.search.brave.com",
         interval_sec=0.025,
         burst=40,
@@ -134,14 +136,14 @@ SITE_POLICIES: Final[tuple[SitePolicy, ...]] = (
         max_cooldown_sec=60.0,
     ),
     # S2's authenticated tier is 1 request/s across every holder of the key.
-    SitePolicy(
+    GatePolicy(
         host="api.semanticscholar.org",
         interval_sec=1.0,
         cooldown_sec=2.0,
         max_cooldown_sec=60.0,
     ),
     # OpenAlex budgets credits per day; a light pace smooths bursts.
-    SitePolicy(
+    GatePolicy(
         host="api.openalex.org",
         interval_sec=0.1,
         cooldown_sec=2.0,
@@ -195,11 +197,11 @@ class Admission:
 class Gate(Protocol):
     """Paces and locks keys for every caller that shares it."""
 
-    def admit(self, key: str, policy: SitePolicy) -> Admission:
+    def admit(self, key: str, policy: GatePolicy) -> Admission:
         """Admit the caller, make it the probe, or say how long to wait."""
         ...
 
-    async def admitted(self, key: str, policy: SitePolicy) -> Admission:
+    async def admitted(self, key: str, policy: GatePolicy) -> Admission:
         """Wait until the caller is admitted to ``key``, seeing a lock set meanwhile.
 
         Args:
@@ -213,7 +215,7 @@ class Gate(Protocol):
         """
         ...
 
-    def trip(self, key: str, policy: SitePolicy, *, challenge_url: str = "") -> None:
+    def trip(self, key: str, policy: GatePolicy, *, challenge_url: str = "") -> None:
         """Lock ``key`` for twice the previous lock, capped; the first uses the base."""
         ...
 
@@ -226,7 +228,7 @@ class Gate(Protocol):
         ...
 
     def reset(self, key: str, *, forget: bool = False) -> None:
-        """Unlock every caller of ``key``; ``forget`` also drops its pace."""
+        """Lift the lock a block drew on ``key``; a server's hold stays to its time."""
         ...
 
     def states(self) -> dict[str, GateState]:
@@ -246,7 +248,7 @@ class FileGate:
     def __init__(self, *, base_dir: Path | None = None) -> None:
         self._base = base_dir
 
-    def admit(self, key: str, policy: SitePolicy) -> Admission:
+    def admit(self, key: str, policy: GatePolicy) -> Admission:
         """Admit the caller, make it the probe, or say how long to wait.
 
         An unpaced key with no state is admitted without a file: else every
@@ -267,7 +269,7 @@ class FileGate:
             admission, box[0] = _admit(box[0], policy, now=time.time())
         return admission
 
-    async def admitted(self, key: str, policy: SitePolicy) -> Admission:
+    async def admitted(self, key: str, policy: GatePolicy) -> Admission:
         """Wait until the caller is admitted to ``key``.
 
         Files wake no one: a lock another caller sets during a wait is seen when
@@ -282,16 +284,13 @@ class FileGate:
             of a lock or probe longer than ``policy.max_wait_sec``.
 
         """
-        while True:
-            admission = await asyncio.to_thread(self.admit, key, policy)
-            if not admission.admitted and admission.wait_sec > policy.max_wait_sec:
-                return admission
-            if admission.wait_sec:
-                await asyncio.sleep(admission.wait_sec)
-            if admission.admitted:
-                return Admission()
 
-    def trip(self, key: str, policy: SitePolicy, *, challenge_url: str = "") -> None:
+        async def admit() -> Admission:
+            return await asyncio.to_thread(self.admit, key, policy)
+
+        return await waited(admit, policy, wait=_slept)
+
+    def trip(self, key: str, policy: GatePolicy, *, challenge_url: str = "") -> None:
         """Lock ``key`` for twice the previous lock, capped; the first uses the base.
 
         Args:
@@ -367,9 +366,8 @@ class FileGate:
             return {}
         found: dict[str, GateState] = {}
         for path in base.glob("*.gate"):
-            # Unlocked: a lock would recreate a file deleted since the glob.
             try:
-                found[unquote(path.stem)] = _read(path.read_bytes())
+                found[unquote(path.stem)] = _read_shared(path)
             except FileNotFoundError:
                 continue
         return found
@@ -389,7 +387,7 @@ def gated(
     *,
     egress: str,
     gate: Gate,
-    policies: Sequence[SitePolicy] = SITE_POLICIES,
+    policies: Sequence[GatePolicy] = SITE_POLICIES,
 ) -> Generator[None]:
     """Hold one paced slot for ``url``'s site; record how the request ended.
 
@@ -398,7 +396,7 @@ def gated(
       egress: This host's public IP, or ``""`` when not yet known.
       gate: The state every caller on the host shares.
       policies: Per-site pace and recovery; an unlisted site is unpaced and
-        recovers with the :class:`SitePolicy` defaults.
+        recovers with the :class:`GatePolicy` defaults.
 
     Yields:
       slot: ``None``; holding it is the permission to send one request.
@@ -450,7 +448,7 @@ def gated(
 def admitted(
     gate: Gate,
     key: str,
-    policy: SitePolicy,
+    policy: GatePolicy,
     *,
     refuse: Callable[[str], Exception],
 ) -> None:
@@ -476,6 +474,37 @@ def admitted(
         time.sleep(admission.wait_sec)
         if admission.admitted:
             return
+
+
+async def waited(
+    admit: Callable[[], Awaitable[Admission]],
+    policy: GatePolicy,
+    *,
+    wait: Callable[[float], Awaitable[bool]],
+) -> Admission:
+    """Ask ``admit`` until it admits the caller, waiting as each answer says.
+
+    The async callers' one loop; ``admitted`` is the sync callers'.
+
+    Args:
+      admit: Asks the gate once.
+      policy: The longest lock or probe sat out, as ``max_wait_sec``.
+      wait: Waits the seconds given; ``True`` when cut short by a change to the
+        key, so the slot a pace reserved goes unused and the gate is asked again.
+
+    Returns:
+      admission: ``Admission()`` once admitted; else, unwaited, the refusal of a
+        lock or probe longer than ``policy.max_wait_sec``.
+
+    """
+    while True:
+        admission = await admit()
+        if not admission.admitted and admission.wait_sec > policy.max_wait_sec:
+            return admission
+        if admission.wait_sec and await wait(admission.wait_sec):
+            continue
+        if admission.admitted:
+            return Admission()
 
 
 def clear_host(host: str, *, gate: Gate) -> int:
@@ -515,15 +544,15 @@ def challenged_urls(*, gate: Gate) -> list[str]:
     return list(dict.fromkeys(s.challenge_url for s in held))
 
 
-def _site_policy(host: str, path: str, policies: Sequence[SitePolicy]) -> SitePolicy:
+def _site_policy(host: str, path: str, policies: Sequence[GatePolicy]) -> GatePolicy:
     """Return the longest-prefix policy for ``host``/``path``, else the default."""
     matches = [p for p in policies if p.host == host and path.startswith(p.path_prefix)]
-    return max(matches, key=lambda p: len(p.path_prefix), default=SitePolicy(host=host))
+    return max(matches, key=lambda p: len(p.path_prefix), default=GatePolicy(host=host))
 
 
 def _admit(
     state: GateState,
-    policy: SitePolicy,
+    policy: GatePolicy,
     *,
     now: float,
 ) -> tuple[Admission, GateState]:
@@ -531,7 +560,7 @@ def _admit(
     lock_ends = max(state.locked_until, state.held_until)
     if now < lock_ends:
         wait = lock_ends - now
-        reason = f"cooling down for {wait:.0f}s after a block"
+        reason = f"cooling down for {wait:.0f}s"
         # Callers one lock released together would meet the next block together.
         jitter = random.SystemRandom().uniform(0.0, policy.jitter_sec)
         return Admission(wait_sec=wait + jitter, admitted=False, reason=reason), state
@@ -587,6 +616,25 @@ def _state(path: Path) -> Generator[list[GateState]]:
             os.write(fd, json_dumps(box[0], target=GateState).encode())
     finally:
         os.close(fd)
+
+
+# Opened without ``O_CREAT``: a file deleted since it was listed is not made again, and
+# raises ``FileNotFoundError``.
+def _read_shared(path: Path) -> GateState:
+    """Read the key's state between writes, under a shared ``flock``."""
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        # A writer truncates, then writes: unlocked, a read between saw no state.
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        return _read(os.read(fd, os.fstat(fd).st_size))
+    finally:
+        os.close(fd)
+
+
+async def _slept(seconds: float) -> bool:
+    """Sleep ``seconds``; return ``False``, for a file wakes no one early."""
+    await asyncio.sleep(seconds)
+    return False
 
 
 def _read(raw: bytes) -> GateState:
