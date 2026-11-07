@@ -6,8 +6,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from http import client
-from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import os
@@ -35,11 +34,9 @@ from wesearch.chrome.conftest import (
 )
 
 
-_THIS: Final = Path(__file__).resolve()
-_CWD: Final = _THIS.parent
-
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 class TestHeaderParsing:
@@ -194,12 +191,8 @@ class TestSelfSignedCert:
         tmp_path: Path,
     ) -> None:
         cert_path, key_path = tmp_path / "c.pem", tmp_path / "k.pem"
-        private_key = serialization.load_pem_private_key(
-            (_THIS.with_name("testdata") / "localhost_key.pem").read_bytes(),
-            password=None,
-            # The fixture is fixed; the newly written key is validated below.
-            unsafe_skip_rsa_key_validation=True,
-        )
+        # Made before the patch, so the patched generator hands out this one key.
+        private_key = rsa.generate_private_key(public_exponent=65_537, key_size=2048)
         with patch.object(
             rsa,
             "generate_private_key",
