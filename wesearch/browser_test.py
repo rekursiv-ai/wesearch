@@ -56,7 +56,7 @@ class _Element:
 class _Tab:
     def __init__(self, tab_id: str, url: str) -> None:
         self.target_id = tab_id
-        self.target = SimpleNamespace(title="Signup")
+        self.target: SimpleNamespace | None = SimpleNamespace(title="Signup")
         self.url = url
         self.closed = False
         self.element = _Element()
@@ -419,12 +419,35 @@ def test_screenshot_returns_bytes_without_writing_a_file(
     assert result.tab.tab_id == "existing"
 
 
-def test_inspection_is_bounded(driver: tuple[_Pool, FetchSession]) -> None:
+@pytest.mark.parametrize("max_chars", [1, 3])
+def test_inspection_is_bounded(
+    driver: tuple[_Pool, FetchSession],
+    max_chars: int,
+) -> None:
     pool, session = driver
     pool.chrome.tabs[0].snapshot["text"] = "abcdefgh"
-    result = api.browser("inspect", tab_id="existing", max_chars=3, session=session)
-    assert result.text == "abc"
+    result = api.browser(
+        "inspect",
+        tab_id="existing",
+        max_chars=max_chars,
+        session=session,
+    )
+    assert result.text == "abcdefgh"[:max_chars]
     assert result.truncated
+
+
+def test_tabs_without_target_metadata_keep_their_identity(
+    driver: tuple[_Pool, FetchSession],
+) -> None:
+    pool, session = driver
+    pool.chrome.tabs[0].target = None
+    assert api.browser("tabs", session=session).tabs == (
+        api.BrowserTab(
+            tab_id="existing",
+            url="https://example.com/account",
+            title="",
+        ),
+    )
 
 
 def test_unknown_target_never_falls_back_to_the_active_tab(

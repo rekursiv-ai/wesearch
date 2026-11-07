@@ -401,10 +401,12 @@ def test_fetch_web_forwards_policy_to_reader_fallback() -> None:
     policy would silently fetch it unvalidated.
     """
     policy = PolicyParams(transport="curl", allow_private_hosts=True)
+    session = FetchSession()
     with patch("wesearch.web.fetch_with_reader_fallback") as fallback:
         fallback.return_value = (b"<html></html>", False)
-        fetch_web("https://example.com/x", policy=policy)
+        fetch_web("https://example.com/x", policy=policy, session=session)
     assert fallback.call_args.kwargs["policy"] is policy
+    assert fallback.call_args.kwargs["session"] is session
 
 
 def test_fetch_body_post_maps_to_html_kind() -> None:
@@ -491,10 +493,11 @@ def test_format_rss_expands_google_news_cluster() -> None:
     assert "- [Sibling two](https://sib.example/2) -- BBC" in out
 
 
-def test_atom_entry_uses_published_when_updated_missing() -> None:
+@pytest.mark.parametrize("missing_link", ["", "<link/>"])
+def test_atom_entry_uses_published_when_updated_missing(missing_link: str) -> None:
     entry = ElementTree.fromstring(
         "<entry><title>T</title><published>2026-01-01</published>"
-        "<link href=' https://example.test/x '/>"
+        f"{missing_link}<link href=' https://example.test/x '/>"
         "<summary>summary</summary></entry>",
     )
     lines: list[str] = []
@@ -576,12 +579,21 @@ def test_format_rss_empty_channel_no_items() -> None:
     assert "# Empty feed" in out
 
 
-def test_parse_rss_cluster_unescapes_entities() -> None:
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        (
+            '<li><a href="https://example.com/x">It&#8217;s here</a>'
+            "&nbsp;&nbsp;<font>The &amp; Co.</font></li>"
+        ),
+        (
+            '<Li><A HREF="https://example.com/x">It&#8217;s here</A>'
+            "&nbsp;&nbsp;<Font>The &amp; Co.</Font></Li>"
+        ),
+    ],
+)
+def test_parse_rss_cluster_unescapes_entities(fragment: str) -> None:
     """HTML entities in titles and sources are decoded."""
-    fragment = (
-        '<li><a href="https://example.com/x">It&#8217;s here</a>'
-        "&nbsp;&nbsp;<font>The &amp; Co.</font></li>"
-    )
     entries = _parse_rss_cluster(fragment)
     assert len(entries) == 1
     title, link, source = entries[0]
@@ -612,6 +624,7 @@ def test_extract_text_json_detection_accepts_leading_whitespace() -> None:
 
 def test_fetch_body_forwards_url_policy_and_request_fields() -> None:
     policy = PolicyParams(transport="curl", allow_private_hosts=True)
+    session = FetchSession()
     with patch("wesearch.web.fetch", return_value=b"ok") as mock_fetch:
         body, kind = _fetch_body(
             "https://api.example/x",
@@ -619,7 +632,9 @@ def test_fetch_body_forwards_url_policy_and_request_fields() -> None:
             json_body=NO_BODY,
             form_body={"b": "2"},
             policy=policy,
+            session=session,
         )
+    assert mock_fetch.call_args.kwargs["session"] is session
     request = cast(RequestParams, mock_fetch.call_args.kwargs["request"])
     assert body == b"ok"
     assert kind == "html"
@@ -686,6 +701,7 @@ def test_format_rss_exactly_handles_missing_channel_and_namespaces() -> None:
 
 def test_fetch_body_forwards_provider_urls_and_policies() -> None:
     policy = PolicyParams(transport="curl", allow_private_hosts=True)
+    session = FetchSession()
     with (
         patch("wesearch.web.google_news.matches", return_value=True),
         patch(
@@ -700,9 +716,10 @@ def test_fetch_body_forwards_provider_urls_and_policies() -> None:
             json_body=NO_BODY,
             form_body=None,
             policy=policy,
+            session=session,
         ) == (b"x", "html")
     assert news.call_args.args == ("https://news",)
-    assert news.call_args.kwargs == {"policy": policy, "session": None}
+    assert news.call_args.kwargs == {"policy": policy, "session": session}
 
     with (
         patch("wesearch.web.x.matches", return_value=True),
@@ -714,9 +731,10 @@ def test_fetch_body_forwards_provider_urls_and_policies() -> None:
             json_body=NO_BODY,
             form_body=None,
             policy=policy,
+            session=session,
         ) == (b"md", "markdown")
     assert x_fetch.call_args.args == ("https://x",)
-    assert x_fetch.call_args.kwargs == {"policy": policy, "session": None}
+    assert x_fetch.call_args.kwargs == {"policy": policy, "session": session}
 
 
 def test_local_name_strips_only_namespace_prefix() -> None:

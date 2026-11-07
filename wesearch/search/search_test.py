@@ -144,13 +144,38 @@ class TestSearchDispatch:
             search("cats", backend="duckduckgo")
         assert "captcha" in exc.value.guidance.lower()
 
-    def test_transport_forwarded_to_backend(self) -> None:
+    @pytest.mark.parametrize("backend", DEFAULT_SEARCH_CHAIN)
+    @pytest.mark.parametrize("num_results", [0, 3])
+    def test_caller_arguments_reach_each_backend(
+        self,
+        backend: SearchBackends,
+        num_results: int,
+    ) -> None:
+        session = FetchSession()
         with patch(
-            "wesearch.search.search.duckduckgo",
+            f"wesearch.search.search.{backend}",
             return_value=[],
         ) as provider:
-            search("cats", backend="duckduckgo", transport="zendriver")
-        assert provider.call_args.kwargs["transport"] == "zendriver"
+            assert (
+                search(
+                    "cats",
+                    backend=backend,
+                    num_results=num_results,
+                    headers={"Accept-Language": "es"},
+                    transport="zendriver",
+                    session=session,
+                )
+                == []
+            )
+        assert provider.call_args.args == (
+            "cats",
+            num_results,
+            {"Accept-Language": "es"},
+        )
+        expected: dict[str, object] = {"transport": "zendriver", "session": session}
+        if backend == "searxng":
+            expected["categories"] = "general"
+        assert provider.call_args.kwargs == expected
 
     def test_negative_num_results_rejected_duckduckgo(self) -> None:
         # O-WEB-003: negative num_results was accepted inconsistently (ddg had no
@@ -1230,9 +1255,16 @@ class TestSearchFallbackChain:
             search("q")
         assert reached == ["searxng"]
 
-    def test_every_failure_is_named_when_the_whole_chain_fails(self) -> None:
+    @pytest.mark.parametrize(
+        "failure",
+        [[], FetchError("https://searx", 503, {}, b"")],
+    )
+    def test_every_failure_is_named_when_the_whole_chain_fails(
+        self,
+        failure: list[SearchResult] | FetchError,
+    ) -> None:
         context, _ = self._chain(
-            searxng=FetchError("https://searx", 503, {}, b""),
+            searxng=failure,
             duckduckgo=PuzzleChallengeError("challenge"),
         )
         with context, pytest.raises(SearchError) as raised:
@@ -1244,9 +1276,16 @@ class TestSearchFallbackChain:
     def test_a_cached_answer_skips_the_backend(self) -> None:
         context, reached = self._chain(duckduckgo=[_HIT])
         with context:
-            assert search("q") == [_HIT]
-            assert search("q") == [_HIT]
-        assert reached == ["duckduckgo"]
+            for language in ("en", "es"):
+                for _ in range(2):
+                    assert search("q", headers={"Accept-Language": language}) == [_HIT]
+            assert reached == ["duckduckgo", "duckduckgo"]
+            assert search(
+                "q",
+                headers={"Accept-Language": "es"},
+                cache_ttl_sec=0,
+            ) == [_HIT]
+        assert reached == ["duckduckgo", "duckduckgo", "duckduckgo"]
 
     def test_unknown_backend_message_is_exact(self) -> None:
         with pytest.raises(ValueError, match=r"^Unknown backend: 'bogus'$"):

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import argparse
 import sys
@@ -34,13 +36,17 @@ def test_probe_reports_results_and_bypasses_the_cache(
         seen.update(kwargs, query=query)
         return [_HIT]
 
+    clock = iter((10.0, 10.25))
+    monkeypatch.setattr(canary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     monkeypatch.setattr(canary, "search", fake_search)
-    ok, detail, _ = canary._probe_backend("duckduckgo", "q")
+    ok, detail, elapsed = canary._probe_backend("duckduckgo", "q")
 
     assert ok
     assert "https://hit.example/" in detail
+    assert seen["query"] == "q"
     assert seen["backend"] == "duckduckgo"
     assert seen["cache_ttl_sec"] == 0
+    assert elapsed == 0.25
 
 
 @pytest.mark.parametrize(
@@ -58,11 +64,14 @@ def test_probe_reports_a_failure(
             raise outcome
         return outcome
 
+    clock = iter((10.0, 10.25))
+    monkeypatch.setattr(canary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     monkeypatch.setattr(canary, "search", fake_search)
-    ok, detail, _ = canary._probe_backend("searxng", "q")
+    ok, detail, elapsed = canary._probe_backend("searxng", "q")
 
     assert not ok
     assert expected in detail
+    assert elapsed == 0.25
 
 
 def test_main_exits_with_the_failure_count(
@@ -101,15 +110,19 @@ def test_main_probes_the_shared_browser_from_every_process(
         fetched.append(url)
         return next(outcomes)
 
-    monkeypatch.setattr(canary, "ProcessPoolExecutor", ThreadPoolExecutor)
+    pool = Mock(wraps=ThreadPoolExecutor)
+    clock = iter((10.0, 10.25))
+    monkeypatch.setattr(canary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(canary, "ProcessPoolExecutor", pool)
     monkeypatch.setattr(canary, "_browser_fetch", fetch)
     argv = ["canary", "--backends", "--processes", "2", "--url", "https://u.example/"]
     monkeypatch.setattr(sys, "argv", argv)
 
     assert canary.main() == failures
+    pool.assert_called_once_with(2)
     assert fetched == ["https://u.example/"] * 2
     out = capsys.readouterr().out
-    assert f"{2 - failures}/2 processes fetched https://u.example/" in out
+    assert f"{0.25:5.1f}s  {2 - failures}/2 processes fetched https://u.example/" in out
     assert out.startswith("FAIL browser" if failures else "ok   browser")
 
 
@@ -126,6 +139,10 @@ def test_main_probes_concurrent_threads_in_one_browser_session(
         fetched.append(url)
         return next(outcomes)
 
+    pool = Mock(wraps=ThreadPoolExecutor)
+    clock = iter((10.0, 10.25))
+    monkeypatch.setattr(canary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(canary, "ThreadPoolExecutor", pool)
     monkeypatch.setattr(canary, "_browser_fetch", fetch)
     monkeypatch.setattr(
         sys,
@@ -133,9 +150,10 @@ def test_main_probes_concurrent_threads_in_one_browser_session(
         ["canary", "--backends", "--threads", "2", "--url", "https://u.example/"],
     )
     assert canary.main() == int(not all(landed))
+    pool.assert_called_once_with(2)
     assert fetched == ["https://u.example/"] * 2
     out = capsys.readouterr().out
-    assert f"{sum(landed)}/2 threads fetched https://u.example/" in out
+    assert f"{0.25:5.1f}s  {sum(landed)}/2 threads fetched https://u.example/" in out
     assert out.startswith(f"{'ok  ' if all(landed) else 'FAIL'} {'browser':<11} ")
 
 
@@ -209,15 +227,51 @@ def test_browser_action_probe_checks_form_values_and_native_screenshot(
             return BrowserResult(tab=probe_tab, screenshot=image)
         return BrowserResult(tab=probe_tab, text='{"custname": "wesearch-canary"}')
 
-    monkeypatch.setattr(canary, "browser", act, raising=False)
-    ok, detail, _ = canary._probe_browser_actions()
+    clock = iter((10.0, 10.25))
+    monkeypatch.setattr(canary, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(canary, "browser", act)
+    ok, detail, elapsed = canary._probe_browser_actions()
     assert ok is bool(image), detail
-    assert any(
-        action == "fill" and args["text"] == "wesearch-canary" for action, args in calls
-    )
-    assert any(action == "press" for action, _ in calls)
+    expected: list[tuple[BrowserAction, dict[str, object]]] = [
+        ("tabs", {}),
+        ("open", {"url": probe_tab.url}),
+        ("inspect", {"tab_id": probe_tab.tab_id}),
+        (
+            "fill",
+            {
+                "tab_id": probe_tab.tab_id,
+                "selector": "input[name=custname]",
+                "text": "wesearch-canary",
+            },
+        ),
+        (
+            "press",
+            {
+                "tab_id": probe_tab.tab_id,
+                "selector": "input[name=custname]",
+                "key": "Tab",
+            },
+        ),
+        (
+            "click",
+            {
+                "tab_id": probe_tab.tab_id,
+                "selector": "input[name=size][value=small]",
+            },
+        ),
+        ("screenshot", {"tab_id": probe_tab.tab_id}),
+    ]
+    if image:
+        expected.append(("click", {"tab_id": probe_tab.tab_id, "selector": "button"}))
+    expected.append(("close", {"tab_id": probe_tab.tab_id}))
+    if image:
+        expected.append(("tabs", {}))
+    assert calls == expected
     assert not opened
-    assert len({id(session) for session in sessions}) == 2
+    assert sessions[0] is sessions[1]
+    assert sessions[1] is not sessions[2]
+    assert all(session is sessions[2] for session in sessions[2:])
+    assert elapsed == 0.25
 
 
 @pytest.mark.parametrize("ok", [False, True])

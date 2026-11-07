@@ -575,10 +575,16 @@ class TestDownload:
         kind: UserAgentKind,
         platform: ChromePlatform,
     ) -> None:
-        assert useragents._refresh_user_agent(kind) == chrome_user_agent(
-            newest_chrome_major(platform),
-            platform,
-        )
+        with patch.object(
+            useragents,
+            "newest_chrome_major",
+            return_value=151,
+        ) as newest:
+            assert useragents._refresh_user_agent(kind) == chrome_user_agent(
+                151,
+                platform,
+            )
+        newest.assert_called_once_with(platform)
 
     def test_download_uses_stdlib_with_fixed_identity(self) -> None:
         with patch.object(

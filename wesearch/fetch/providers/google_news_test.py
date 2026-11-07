@@ -28,6 +28,12 @@ class TestFetch:
         [
             ("https://news.google.com/", "https://news.google.com/rss", "rss"),
             ("https://news.google.com/home", "https://news.google.com/rss", "rss"),
+            (
+                "https://news.google.com/topstories",
+                "https://news.google.com/rss",
+                "rss",
+            ),
+            ("https://news.google.com/foryou", "https://news.google.com/rss", "rss"),
             ("https://news.google.com/rss/", "https://news.google.com/rss/", "rss"),
             ("https://news.google.com/RSS", "https://news.google.com/RSS", "html"),
             ("https://news.google.com/homeX", "https://news.google.com/homeX", "html"),
@@ -87,7 +93,8 @@ class TestFetch:
         )
 
     def test_fetch_forwards_policy_request(self) -> None:
-        policy = PolicyParams()
+        policy = PolicyParams(transport="curl")
+        session = FetchSession()
         seen: list[object] = []
 
         def fake_fetch(
@@ -96,17 +103,19 @@ class TestFetch:
             request: object,
             session: FetchSession | None = None,
         ) -> bytes:
-            del session
-            seen.extend((url, request))
+            seen.extend((url, request, session))
             return b"body"
 
         with patch.object(google_news, "fetch", fake_fetch):
             assert google_news.fetch_google_news(
                 "https://news.google.com/articles/a",
                 policy=policy,
+                session=session,
             ) == (b"body", "html")
+        assert seen[0] == "https://news.google.com/articles/a"
         assert isinstance(seen[1], RequestParams)
         assert seen[1].policy is policy
+        assert seen[2] is session
 
 
 if __name__ == "__main__":

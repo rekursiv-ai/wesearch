@@ -123,6 +123,7 @@ class TestCredentialedUrls:
         assert "secret" not in str(error.value)
         assert error.value.url == "https://walled.example/x"
         assert gate.call_args.args == ("https://walled.example/x",)
+        assert gate.call_args.kwargs == {"egress": session.egress, "gate": session.gate}
 
 
 class TestUrlParams:
@@ -1118,12 +1119,33 @@ class TestEgressIp:
             patch("wesearch.fetch.fetch.fetch", echo),
             patch("wesearch.fetch.fetch.time.monotonic", lambda: clock[0]),
         ):
-            assert egress_ip(session, v4_echoes=("https://echo.example",)) == ""
-            clock[0] += 59.0
-            assert egress_ip(session, v4_echoes=("https://echo.example",)) == ""
+            assert (
+                egress_ip(
+                    session,
+                    v4_echoes=("https://echo.example",),
+                    retry_after_sec=2,
+                )
+                == ""
+            )
+            clock[0] += 1.0
+            assert (
+                egress_ip(
+                    session,
+                    v4_echoes=("https://echo.example",),
+                    retry_after_sec=2,
+                )
+                == ""
+            )
             assert echo.call_count == 1
-            clock[0] += 2.0
-            assert egress_ip(session, v4_echoes=("https://echo.example",)) == ""
+            clock[0] += 1.0
+            assert (
+                egress_ip(
+                    session,
+                    v4_echoes=("https://echo.example",),
+                    retry_after_sec=2,
+                )
+                == ""
+            )
         assert echo.call_count == 2
 
     def test_refresh_probes_through_the_backoff(self) -> None:
@@ -1734,13 +1756,20 @@ class TestCurlThenZendriverBackend:
                     )
         assert via.call_count == rendered
 
+    @pytest.mark.parametrize(
+        "page",
+        [
+            b"<!doctype html><html><body><p>OK</p></body></html>",
+            b'<!doctype html><html><body><div class="g-recaptcha"></div></body></html>',
+        ],
+    )
     def test_a_short_page_with_nothing_to_run_never_reaches_the_browser(
         self,
         session: FetchSession,
+        page: bytes,
     ) -> None:
         # Curl already has the whole page; a browser could only fail where curl
         # succeeded.
-        page = b"<!doctype html><html><body><p>OK</p></body></html>"
         with (
             patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
             patch.object(
@@ -1806,6 +1835,7 @@ class TestCurlThenZendriverBackend:
         [
             (b"<html><body>" + b"word " * 200 + b"</body></html>", "rendered"),
             (b"<html><body>tiny</body></html>", "shell"),
+            (_REDIRECT_STUB.replace(b"Redirecting", b"Replacement"), "shell"),
         ],
     )
     def test_a_shell_is_rendered_and_the_fuller_page_wins(
@@ -1901,7 +1931,11 @@ class TestCurlThenZendriverBackend:
             raise PuzzleChallengeError("challenge served")
 
         with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"<form id=x>"),
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                return_value=b"<form id=x>",
+            ) as sent,
+            patch("wesearch.fetch.fetch.egress_ip") as probe,
             pytest.raises(PuzzleChallengeError, match="challenge served"),
         ):
             fetch.fetch(
@@ -1916,6 +1950,8 @@ class TestCurlThenZendriverBackend:
                 session=session,
             )
         assert seen == [b"<form id=x>"]
+        assert sent.call_args.kwargs["session"] is session
+        probe.assert_not_called()
 
     def test_a_validator_block_names_the_page_to_clear_it_on(
         self,

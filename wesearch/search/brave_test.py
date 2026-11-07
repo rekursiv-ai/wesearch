@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import json
 
@@ -28,6 +29,8 @@ _PAYLOAD = {
             },
             {"url": "javascript:alert(1)", "title": "bad", "description": ""},
             {"url": "https://b.example/", "title": "B", "description": ""},
+            {"url": "http://c.example/"},
+            {"title": "No URL", "description": "Drop this row."},
         ],
     },
 }
@@ -56,19 +59,44 @@ def test_parses_and_cleans_results() -> None:
             snippet="Learn python.",
         ),
         SearchResult(url="https://b.example/", title="B", snippet=""),
+        SearchResult(url="http://c.example/", title="", snippet=""),
     ]
 
 
-def test_sends_the_key_and_caps_count() -> None:
+@pytest.mark.parametrize(("num_results", "want_count"), [(2, "2"), (50, "3")])
+def test_sends_the_key_and_caps_count(
+    num_results: int,
+    want_count: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAVE_API_KEY", "  test-key  ")
     with _fetching({"web": {"results": []}}) as fetch_mock:
-        brave("q", 50)
+        brave(
+            "q&lang=es",
+            num_results,
+            headers={"X-Probe": "yes"},
+            max_count=3,
+            timeout_sec=2.5,
+            connect_timeout_sec=1.25,
+            retries=2,
+            transport="stdlib",
+        )
 
-    url = cast(str, fetch_mock.call_args.args[0])
+    url = urlparse(cast(str, fetch_mock.call_args.args[0]))
     request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
-    assert url.startswith("https://api.search.brave.com/res/v1/web/search?")
-    assert "count=20" in url
-    assert request.content.headers is not None
-    assert request.content.headers["X-Subscription-Token"] == "test-key"
+    assert (url.scheme, url.netloc, url.path) == (
+        "https",
+        "api.search.brave.com",
+        "/res/v1/web/search",
+    )
+    assert parse_qs(url.query) == {"q": ["q&lang=es"], "count": [want_count]}
+    headers = {name.lower(): value for name, value in request.content.headers.items()}
+    assert (headers.pop("accept") or "").lower() == "application/json"
+    assert headers == {"x-subscription-token": "test-key", "x-probe": "yes"}
+    assert request.retry.retries == 2
+    assert request.retry.timeout_sec == 2.5
+    assert request.retry.connect_timeout_sec == 1.25
+    assert request.policy.transport == "stdlib"
 
 
 def test_truncates_to_num_results() -> None:

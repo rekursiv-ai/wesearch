@@ -26,7 +26,11 @@ from curl_cffi.requests import Headers
 
 import pytest
 
-from wesearch.chrome.headers import chrome_identity_headers, chrome_platform
+from wesearch.chrome.headers import (
+    chrome_headers_for_google,
+    chrome_identity_headers,
+    chrome_platform,
+)
 from wesearch.fetch import (
     ContentParams,
     FetchSession,
@@ -45,6 +49,8 @@ from wesearch.types.errors import FetchError
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator, Mapping
+
+    from wesearch.types.params import HttpMethod
 
 
 # A public egress, so ``fetch`` never probes for one.
@@ -162,12 +168,37 @@ class TestFetchCurl:
             assert fetch_curl("https://example.com/", session=session) == b"hop"
         assert request.call_count == 11
         assert request.call_args.kwargs["timeout"] == (10.0, 30.0)
+        assert "origin" not in lower_headers(request.call_args_list[0].kwargs)
 
-    def test_a_get_sends_no_origin_and_no_data(self, session: FetchSession) -> None:
+    @pytest.mark.parametrize("method", ["GET", "HEAD"])
+    def test_navigation_sends_no_origin_and_no_data(
+        self,
+        session: FetchSession,
+        method: HttpMethod,
+    ) -> None:
         with _serve(_response()) as request:
-            fetch_curl("https://example.com/", session=session)
+            fetch_curl("https://example.com/", method=method, session=session)
         assert "origin" not in lower_headers(request.call_args.kwargs)
         assert request.call_args.kwargs["data"] is None
+
+    @pytest.mark.parametrize("host", ["www.google.com", "example.com"])
+    def test_only_google_gets_its_matching_browser_integrity_headers(
+        self,
+        session: FetchSession,
+        host: str,
+    ) -> None:
+        with _serve(_response()) as request:
+            fetch_curl(f"https://{host}/", session=session)
+        target = cc_requests.impersonate.REAL_TARGET_MAP["chrome"]
+        expected = chrome_headers_for_google(
+            major=int(target.removeprefix("chrome")),
+            platform=chrome_platform(target),
+        )
+        sent = lower_headers(request.call_args.kwargs)
+        if host == "www.google.com":
+            assert {name: sent[name] for name in expected} == expected
+        else:
+            assert not expected.keys() & sent.keys()
 
     def test_a_none_header_reaches_curl_cffi_so_it_drops_its_own(
         self,

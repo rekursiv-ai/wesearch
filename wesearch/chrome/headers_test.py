@@ -108,14 +108,47 @@ class TestGoogleChromeHeaders:
             == "custom-token"
         )
 
-    def test_validation_is_base64_sha1_of_key_plus_ua(self) -> None:
-        # x-browser-validation = base64(sha1(linux_api_key + linux UA)).
-        h = chrome_headers_for_google(major=146, platform="Linux")
+    @pytest.mark.parametrize(
+        ("platform", "key", "os_token", "tail"),
+        [
+            (
+                "Linux",
+                "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
+                "X11; Linux x86_64",
+                "Safari/537.36",
+            ),
+            (
+                "Windows",
+                "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
+                "Windows NT 10.0; Win64; x64",
+                "Safari/537.36",
+            ),
+            (
+                "macOS",
+                "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+                "Macintosh; Intel Mac OS X 10_15_7",
+                "Safari/537.36",
+            ),
+            (
+                "Android",
+                "AIzaSyA8Hr8czk2cWyLu-a_RSPVYUEHozUnu6bA",
+                "Linux; Android 10; K",
+                "Mobile Safari/537.36",
+            ),
+        ],
+    )
+    def test_validation_is_base64_sha1_of_key_plus_ua(
+        self,
+        platform: ChromePlatform,
+        key: str,
+        os_token: str,
+        tail: str,
+    ) -> None:
+        h = chrome_headers_for_google(major=146, platform=platform)
         ua = (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+            f"Mozilla/5.0 ({os_token}) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/146.0.0.0 {tail}"
         )
-        key = "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM"
         want = base64.b64encode(hashlib.sha1((key + ua).encode()).digest()).decode()  # noqa: S324 -- The fixture uses the protocol's legacy digest representation.
         assert h["x-browser-validation"] == want
 
@@ -206,6 +239,7 @@ class TestImpersonateVersionPlatform:
             (chrome_user_agent(150, "Linux"), "Linux"),
             (chrome_user_agent(150, "macOS"), "macOS"),
             (chrome_user_agent(150, "Windows"), "Windows"),
+            (f"{chrome_user_agent(150, 'Windows')} (Android compatibility)", "Windows"),
             ("Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/150.0.0.0", "Android"),
             (
                 (
@@ -355,14 +389,26 @@ class TestImpersonateVersionPlatform:
 
     @pytest.mark.parametrize(
         "host",
-        ["google.com", "SCHOLAR.GOOGLE.COM.", "a.gstatic.com", "x.googleapis.com"],
+        [
+            "google.com",
+            "SCHOLAR.GOOGLE.COM.",
+            "a.gstatic.com",
+            "x.googleapis.com",
+            "lh3.googleusercontent.com",
+        ],
     )
     def test_google_property_domains(self, host: str) -> None:
         assert is_google_property(host)
 
     @pytest.mark.parametrize(
         "host",
-        ["google.com.evil", "evilgoogle.com", "example.com", "google.comX"],
+        [
+            "google.com.evil",
+            "evilgoogle.com",
+            "example.com",
+            "google.comX",
+            "googleusercontent.com.evil",
+        ],
     )
     def test_non_google_domains(self, host: str) -> None:
         assert not is_google_property(host)

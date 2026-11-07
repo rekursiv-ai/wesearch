@@ -77,6 +77,8 @@ def test_learned_entry_expires_after_its_ttl(
 
     monkeypatch.setattr(time, "time", lambda: 1_099.0)
     assert zendriver_domains(path=path, ttl_sec=100) == {"walled.example"}
+    monkeypatch.setattr(time, "time", lambda: 1_100.0)
+    assert zendriver_domains(path=path, ttl_sec=100) == {"walled.example"}
     monkeypatch.setattr(time, "time", lambda: 1_101.0)
     assert zendriver_domains(path=path, ttl_sec=100) == frozenset()
 
@@ -226,6 +228,7 @@ def test_corrupt_cache_is_discarded_whole_not_mangled(tmp_path: Path) -> None:
     remember_zendriver_domain("fresh.example", path=path)
 
     assert zendriver_domains(path=path) == frozenset({"fresh.example"})
+    assert _names(path) == ["fresh.example"]
     assert "\ufffd" not in path.read_text()
 
 
