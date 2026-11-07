@@ -4,19 +4,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import os
 import time
+
+import pytest
 
 from wesearch.lib.userdirs import cache_dir
 from wesearch.search import cache
 from wesearch.search.cache import cached_search
 from wesearch.search.types import PaperResult, SearchResult
-
-
-if TYPE_CHECKING:
-    import pytest
 
 
 _ROWS = [
@@ -32,15 +29,21 @@ _ROWS = [
 ]
 
 
-def test_a_hit_skips_the_backend_and_keeps_result_subclasses() -> None:
+@pytest.mark.parametrize("ttl_sec", [3600.0, 0.5])
+def test_a_hit_skips_the_backend_and_keeps_result_subclasses(
+    ttl_sec: float,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
     calls = [0]
 
     def compute() -> list[SearchResult]:
         calls[0] += 1
         return list(_ROWS)
 
-    first = cached_search({"q": "x"}, compute)
-    second = cached_search({"q": "x"}, compute)
+    first = cached_search({"q": "x", "backend": "a"}, compute, ttl_sec=ttl_sec)
+    second = cached_search({"backend": "a", "q": "x"}, compute, ttl_sec=ttl_sec)
 
     assert calls == [1]
     assert second == first == _ROWS
@@ -130,21 +133,28 @@ def test_prune_tolerates_an_entry_removed_concurrently(
 ) -> None:
     base = cache_dir() / "rekursiv-ai" / "wesearch" / "search"
     base.mkdir(parents=True)
-    gone = base / "gone.json"
-    gone.write_text("x")
+    entries = {base / "gone.json", base / "stale.json"}
+    for entry in entries:
+        entry.write_text("x")
+        old = time.time() - 2
+        os.utime(entry, (old, old))
     real = Path.stat
     probed: list[Path] = []
 
     # Only the entry vanishes: 3.12's ``glob`` stats the directory itself first.
     def vanished(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
-        if self.name != gone.name:
+        if self not in entries:
             return real(self, follow_symlinks=follow_symlinks)
         probed.append(self)
-        raise FileNotFoundError
+        if len(probed) == 1:
+            self.unlink()
+            raise FileNotFoundError
+        return real(self, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(Path, "stat", vanished)
     cache._prune(base, ttl_sec=1.0)
-    assert probed == [gone]
+    assert set(probed) == entries
+    assert list(base.iterdir()) == []
 
 
 def test_a_corrupt_entry_is_recomputed() -> None:

@@ -31,6 +31,9 @@ class TestCitations:
         entries: list[dict[str, MutablePlainTree]] = [
             {"isInfluential": True, "citingPaper": {"title": "new", "year": 2024}},
             {"isInfluential": False, "citingPaper": {"title": "old", "year": 2010}},
+            {"citingPaper": None},
+            {"citingPaper": "malformed"},
+            {"citingPaper": ["malformed"]},
         ]
 
         def fake(
@@ -212,10 +215,10 @@ class TestReferences:
         )
         assert paginate.call_args.kwargs == {"limit": 7, "session": None}
 
-    def test_skips_empty_inner_edge(self) -> None:
-        # An edge row with no inner paper object is skipped, not mapped to a stub.
+    @pytest.mark.parametrize("inner", [{}, None, "malformed", ["malformed"]])
+    def test_skips_empty_or_malformed_inner_edge(self, inner: MutablePlainTree) -> None:
         page = Page(
-            entries=[{"citedPaper": {}}, {"citedPaper": {"title": "real"}}],
+            entries=[{"citedPaper": inner}, {"citedPaper": {"title": "real"}}],
             complete=True,
         )
         with patch.object(s2, "paginate", return_value=page):

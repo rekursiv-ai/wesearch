@@ -166,8 +166,16 @@ class TestCorruptFileResilience:
     atomic.
     """
 
-    def test_decode_drops_non_string_cookie_values(self) -> None:
-        raw = b'{"cookies": {"a": 1}, "created": 1}'
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b'{"cookies": {"a": 1}, "created": 1}',
+            b'{"cookies": null, "created": 1}',
+            b'{"cookies": "malformed", "created": 1}',
+            b'{"cookies": ["malformed"], "created": 1}',
+        ],
+    )
+    def test_decode_drops_non_string_cookie_values(self, raw: bytes) -> None:
         assert profile._try_decode(raw) == Profile(cookies={}, created=1.0)
 
     def test_decode_accepts_complete_profile(self) -> None:

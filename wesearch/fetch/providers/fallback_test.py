@@ -196,15 +196,27 @@ class TestFallback:
 
     @pytest.mark.parametrize("status", [404, 500, 401])
     def test_non_bot_wall_raises_immediately(self, status: int) -> None:
+        error = FetchError(
+            "https://s.example/",
+            status,
+            {"content-type": "text/html"} if status == 404 else {},
+            b"missing",
+        )
         with (
-            patch.object(fallback, "fetch", _fetch_raising(status)),
+            patch.object(fallback, "fetch", side_effect=error),
+            patch.object(
+                fallback,
+                "fetch_reader_proxy",
+                return_value=b"proxy",
+            ) as proxy,
             pytest.raises(FetchError) as exc,
         ):
             fallback.fetch_with_reader_fallback(
                 "https://s.example/",
                 policy=PolicyParams(),
             )
-        assert exc.value.status == status
+        assert exc.value is error
+        proxy.assert_not_called()
 
     def test_proxy_failure_reraises_primary(self) -> None:
         def proxy_fail(
@@ -230,7 +242,8 @@ class TestFallback:
 
     def test_forwards_url_and_policy_to_both_hops(self) -> None:
         policy = PolicyParams()
-        calls: list[tuple[str, object]] = []
+        session = FetchSession()
+        calls: list[tuple[str, object, FetchSession | None]] = []
 
         def primary(
             url: str,
@@ -238,8 +251,7 @@ class TestFallback:
             request: object,
             session: FetchSession | None = None,
         ) -> bytes:
-            del session
-            calls.append((url, request))
+            calls.append((url, request, session))
             raise FetchError(url, 429, {}, b"blocked")
 
         def proxy(
@@ -248,8 +260,7 @@ class TestFallback:
             policy: object,
             session: FetchSession | None = None,
         ) -> bytes:
-            del session
-            calls.append((url, policy))
+            calls.append((url, policy, session))
             return b"proxy"
 
         with (
@@ -259,9 +270,11 @@ class TestFallback:
             assert fallback.fetch_with_reader_fallback(
                 "https://s.example/path",
                 policy=policy,
+                session=session,
             ) == (b"proxy", True)
         assert calls[0][0] == "https://s.example/path"
-        assert calls[1] == ("https://s.example/path", policy)
+        assert calls[0][2] is session
+        assert calls[1] == ("https://s.example/path", policy, session)
         request = calls[0][1]
         assert isinstance(request, RequestParams)
         assert request.policy is policy

@@ -432,13 +432,17 @@ def test_download_open_discovers_an_open_access_copy() -> None:
 
 
 def test_download_open_serves_a_pre_resolved_open_access_copy() -> None:
-    with patch.object(fetch, "fetch", return_value=_PDF):
+    session = FetchSession()
+    pdfs = _SessionFetch(_PDF)
+    with patch.object(fetch, "fetch", pdfs):
         assert fetch.download_open(
             "doi",
             "10.1/x",
             oa_url="https://oa/pdf",
             oa_looked_up=True,
+            session=session,
         ) == (_PDF, "open_access")
+    assert pdfs.sessions == [session]
 
 
 if __name__ == "__main__":

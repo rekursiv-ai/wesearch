@@ -300,8 +300,13 @@ def test_a_non_html_success_body_is_never_a_wall(body: bytes) -> None:
 
 
 def test_html_is_recognized_past_a_byte_order_mark_and_without_a_doctype() -> None:
-    wall = "\ufeff<head><title>Just a moment...</title></head>".encode()
-    assert classify_challenge(wall, on_success_body=True) is CloudflareChallengeError
+    for prefix in ("\ufeff", " \r\n\t"):
+        wall = (
+            f"{prefix}<head><title>Just a moment...</title></head>".encode() + b"\xff"
+        )
+        assert (
+            classify_challenge(wall, on_success_body=True) is CloudflareChallengeError
+        )
 
 
 def test_xhtml_behind_an_xml_prolog_is_html() -> None:
@@ -349,11 +354,15 @@ def test_only_html_can_be_a_shell(body: bytes) -> None:
 )
 def test_only_an_imminent_meta_refresh_redirects_soon(page: str, soon: bool) -> None:
     assert redirects_soon(page) is soon
+    assert redirects_soon(page.encode() + b"\xff") is soon
 
 
 def test_a_redirect_stub_redirects_soon() -> None:
     # Chrome read PyTorch's stub before its refresh fired.
     assert redirects_soon(_REDIRECT_STUB)
+    delayed = _REDIRECT_STUB.replace('content="0;', 'content="2;')
+    assert redirects_soon(delayed, max_delay_sec=2)
+    assert not redirects_soon(delayed, max_delay_sec=1)
 
 
 @pytest.mark.parametrize("body", [b"", b" \r\n\t"])
@@ -380,8 +389,14 @@ def test_a_shell_is_a_page_something_will_replace(body: bytes, shell: bool) -> N
     assert is_shell(body) is shell
 
 
+def test_shell_text_budget_is_retunable() -> None:
+    body = b"<html><body>ab<script></script></body></html>"
+    assert not is_shell(body, min_text_chars=2)
+    assert is_shell(body, min_text_chars=3)
+
+
 def test_visible_chars_skip_hidden_elements_in_any_case() -> None:
-    assert visible_chars(b"<SCRIPT>x x</SCRIPT><p>ab cd</p><!-- e -->") == 4
+    assert visible_chars(b"<SCRIPT>\xff x</SCRIPT><p>ab cd</p><!-- \xff -->") == 4
 
 
 @pytest.mark.parametrize(
@@ -485,10 +500,19 @@ def test_marker_groups_are_retunable() -> None:
     assert classify_challenge("<div class='widgetguard-v2'></div>") is None
     assert (
         classify_challenge(
-            "<div class='widgetguard-v2'></div>",
+            "<div class='widgetguard-v2'>ab</div>",
             cloudflare=("widgetguard-v2",),
+            max_wall_text_chars=2,
         )
         is CloudflareChallengeError
+    )
+    assert (
+        classify_challenge(
+            "<div class='widgetguard-v2'>ab</div>",
+            cloudflare=("widgetguard-v2",),
+            max_wall_text_chars=1,
+        )
+        is None
     )
 
 

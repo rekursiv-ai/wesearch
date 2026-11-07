@@ -196,6 +196,7 @@ def test_a_block_belongs_to_the_egress_that_drew_it() -> None:
 
 def test_a_block_belongs_to_the_site_that_drew_it(gate: FileGate) -> None:
     policies = (
+        GatePolicy(host="probe.example", path_prefix="/"),
         GatePolicy(host="probe.example", path_prefix="/search"),
         GatePolicy(host="probe.example", path_prefix="/scholar"),
     )
@@ -285,13 +286,16 @@ def test_clearing_a_host_with_no_state_clears_nothing(gate: FileGate) -> None:
 def test_the_burst_is_free_and_then_paced(clock: _Clock, gate: FileGate) -> None:
     policies = (GatePolicy(host="probe.example", interval_sec=0.05, burst=2),)
     start = clock.time()
-    for _ in range(2):
+    elapsed: list[float] = []
+    for _ in range(4):
         with gated(_URL, egress="", gate=gate, policies=policies):
-            pass
-    assert clock.time() - start < 0.04
-    with gated(_URL, egress="", gate=gate, policies=policies):
-        pass
-    assert clock.time() - start >= 0.04
+            elapsed.append(clock.time() - start)
+    assert elapsed == pytest.approx([0.0, 0.0, 0.05, 0.10])
+    clock.sleep(0.10)
+    for _ in range(3):
+        with gated(_URL, egress="", gate=gate, policies=policies):
+            elapsed.append(clock.time() - start)
+    assert elapsed[4:] == pytest.approx([0.20, 0.20, 0.25])
 
 
 @pytest.mark.asyncio
@@ -307,11 +311,11 @@ async def test_a_caller_sits_out_a_lock_it_may_wait_for_then_probes(
         clock.sleep(delay)
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
-    patient = GatePolicy(host="probe.example", cooldown_sec=0.05, max_wait_sec=1.0)
+    patient = GatePolicy(host="probe.example", cooldown_sec=0.5, max_wait_sec=0.5)
     gate.trip("probe.example", patient)
 
     assert await gate.admitted("probe.example", patient) == Admission()
-    assert slept == [pytest.approx(0.05)]
+    assert slept == [pytest.approx(0.5)]
 
 
 @pytest.mark.asyncio
@@ -398,6 +402,10 @@ def test_a_paced_site_that_recovered_keeps_its_pace(
     with gated(_URL, egress="", gate=gate, policies=policies):
         pass
     assert clear_host("probe.example", gate=gate) == 1
+    start = clock.time()
+    with gated(_URL, egress="", gate=gate, policies=policies):
+        pass
+    assert clock.time() - start == pytest.approx(0.05)
 
 
 def test_a_block_that_waited_on_a_deleted_gate_still_locks() -> None:
@@ -445,7 +453,10 @@ def test_an_ordinary_failure_frees_the_probe(clock: _Clock, gate: FileGate) -> N
         gated(_URL, egress="203.0.113.1", gate=gate, policies=_FAST),
     ):
         raise FetchError(_URL, 503, {}, b"")
-    _send()
+    _block()
+    clock.sleep(0.06)
+    with pytest.raises(CooldownError):
+        _send()
 
 
 def test_a_timeout_on_a_site_that_answers_frees_the_probe(
@@ -476,11 +487,17 @@ def test_an_interrupted_request_frees_the_probe(clock: _Clock, gate: FileGate) -
 # -- hold and admitted: a lock a server names, and a wait sat out ----------------
 
 
-def test_a_hold_short_enough_is_sat_out(clock: _Clock, gate: FileGate) -> None:
+@pytest.mark.parametrize("duration", [39.0, 60.0])
+def test_a_hold_short_enough_is_sat_out(
+    clock: _Clock,
+    gate: FileGate,
+    duration: float,
+) -> None:
     policy = GatePolicy(max_wait_sec=60.0)
-    gate.hold("anthropic@work", until=clock.now + 39.0)
+    start = clock.now
+    gate.hold("anthropic@work", until=start + duration)
     admitted(gate, "anthropic@work", policy, refuse=RuntimeError)
-    assert clock.now == pytest.approx(1_039.0)
+    assert clock.now == pytest.approx(start + duration)
 
 
 def test_a_hold_longer_than_the_wait_refuses(clock: _Clock, gate: FileGate) -> None:
@@ -552,6 +569,11 @@ def test_waiting_on_a_probe_polls_at_the_cooldown(
     assert gate.admit("k", policy).admitted
     waiting = gate.admit("k", policy)
     assert (waiting.admitted, waiting.wait_sec) == (False, 2.0)
+    clock.now += policy.probe_lease_sec - policy.cooldown_sec / 2
+    waiting = gate.admit("k", policy)
+    assert (waiting.admitted, waiting.wait_sec) == (False, 1.0)
+    clock.now += waiting.wait_sec
+    assert gate.admit("k", policy).admitted
 
 
 def test_keys_that_are_no_filenames_round_trip(gate: FileGate) -> None:

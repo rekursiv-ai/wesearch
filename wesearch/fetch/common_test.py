@@ -516,8 +516,11 @@ class TestOriginBound:
 class TestCookieHeader:
     def test_new_cookies_win_and_keep_the_sent_order(self) -> None:
         assert (
-            cookie_header({"COOKIE": "a=1; b=2"}, {"b": "3", "c": "4"})
-            == "a=1; b=3; c=4"
+            cookie_header(
+                {"Cookie": "discard=old", "COOKIE": "a=YQ==; b=2"},
+                {"a": "Yg==", "b": "3", "c": "4"},
+            )
+            == "a=Yg==; b=3; c=4"
         )
 
     def test_no_cookie_header_and_no_cookies_is_empty(self) -> None:
@@ -624,6 +627,7 @@ class TestDecompress:
         data = b"hello world"
         chained = gzip.compress(brotli.compress(data))
         assert decompress(chained, "br, gzip") == data
+        assert decompress(zlib.compress(gzip.compress(data)), "gzip, deflate") == data
 
 
 class TestSharedHelpers:

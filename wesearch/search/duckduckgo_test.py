@@ -314,9 +314,8 @@ def test_duckduckgo_public_request_and_validation() -> None:
     assert request.retry.timeout_sec == 2
     assert request.retry.connect_timeout_sec == 1
     assert request.policy.transport == "curl"
-    assert request.observe.body_validator is not None
     with pytest.raises(PuzzleChallengeError):
-        _duckduckgo_validate_body(b"<form id='challenge-form'></form>")
+        request.observe.body_validator(b"<form id='challenge-form'></form>")
 
 
 if __name__ == "__main__":

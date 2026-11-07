@@ -15,6 +15,11 @@ import ssl
 
 import pytest
 
+from wesearch.chrome.headers import (
+    chrome_headers_for_google,
+    chrome_navigation_headers,
+    chrome_user_agent,
+)
 from wesearch.fetch.transport.stdlib import (
     _connect,
     _PinnedHTTPSConnection,
@@ -30,6 +35,7 @@ class _Conn:
     def __init__(self, *responses: Mock | Exception, sock: Mock | None = None) -> None:
         self.sock = sock
         self.requests: list[tuple[str, str, dict[str, str]]] = []
+        self.bodies: list[bytes | None] = []
         self.closed = False
         self._responses = list(responses)
 
@@ -41,7 +47,7 @@ class _Conn:
         body: bytes | None,
         headers: dict[str, str],
     ) -> None:
-        del body
+        self.bodies.append(body)
         self.requests.append((method, path, dict(headers)))
 
     def getresponse(self) -> Mock:
@@ -69,7 +75,9 @@ def _response(
 
 
 def test_a_public_only_request_dials_the_pin_and_names_the_host_first() -> None:
-    conn = _Conn(_response())
+    response = _response()
+    response.read = Mock(side_effect=[b"o", b"k", b""])
+    conn = _Conn(response)
     pin = ValidatedHost(host="example.com", ip="93.184.216.34")
     with (
         patch("wesearch.fetch.transport.stdlib.pinned_host", return_value=pin),
@@ -78,14 +86,99 @@ def test_a_public_only_request_dials_the_pin_and_names_the_host_first() -> None:
             return_value=conn,
         ) as opened,
     ):
-        fetch_stdlib("https://example.com:8443/p?q=1", headers={"Accept": "*/*"})
-    assert opened.call_args.kwargs["ip"] == "93.184.216.34"
-    assert opened.call_args.kwargs["port"] == 8443
+        assert (
+            fetch_stdlib(
+                "https://example.com:8443/p?q=1",
+                headers={"Accept": "*/*"},
+                connect_timeout_sec=2.5,
+            )
+            == b"ok"
+        )
+    opened.assert_called_once_with(
+        "https",
+        "example.com",
+        port=8443,
+        ip="93.184.216.34",
+        connect_timeout_sec=2.5,
+    )
     [(method, path, headers)] = conn.requests
     assert (method, path) == ("GET", "/p?q=1")
     assert next(iter(headers)) == "Host"
     assert headers["Host"] == "example.com:8443"
     assert headers["Accept"] == "*/*"
+    assert conn.bodies == [None]
+    assert conn.closed
+
+
+@pytest.mark.parametrize("host", ["www.google.com", "example.com"])
+@pytest.mark.parametrize("content_type", ["", "text/plain"])
+def test_a_post_forwards_its_body_headers_and_navigation_policy(
+    host: str,
+    content_type: str,
+) -> None:
+    supplied = {"X-Ignore": None, "X-Key": "key"}
+    if content_type:
+        supplied["cOnTeNt-TyPe"] = content_type
+    conn = _Conn(_response())
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib._connect",
+            return_value=conn,
+        ) as opened,
+        patch(
+            "wesearch.fetch.transport.stdlib.chrome_platform",
+            return_value="macOS",
+        ),
+        patch(
+            "wesearch.fetch.transport.stdlib.newest_chrome_major",
+            return_value=151,
+        ) as newest,
+        patch(
+            "wesearch.fetch.transport.stdlib.chrome_navigation_headers",
+            wraps=chrome_navigation_headers,
+        ) as navigation,
+    ):
+        assert (
+            fetch_stdlib(
+                f"https://{host}",
+                method="POST",
+                body=b"sent",
+                headers=supplied,
+                allow_private_hosts=True,
+            )
+            == b"ok"
+        )
+    assert conn.bodies == [b"sent"]
+    [(method, path, headers)] = conn.requests
+    sent = {name.lower(): value for name, value in headers.items()}
+    assert (method, path) == ("POST", "/")
+    assert sent["origin"] == f"https://{host}"
+    assert sent["user-agent"] == chrome_user_agent(151, "macOS")
+    if content_type:
+        assert sent["content-type"] == content_type
+        assert navigation.call_args.kwargs["content_type"] == content_type
+    else:
+        assert "content-type" not in sent
+    assert "x-ignore" not in sent
+    assert navigation.call_args.kwargs["method"] == "POST"
+    assert opened.call_args.kwargs["ip"] == ""
+    newest.assert_called_once_with("macOS")
+    expected = chrome_headers_for_google(major=151, platform="macOS")
+    if host == "www.google.com":
+        assert {name: sent[name] for name in expected} == expected
+    else:
+        assert not expected.keys() & sent.keys()
+    assert conn.closed
+
+
+def test_a_compressed_success_is_decoded() -> None:
+    conn = _Conn(
+        _response(body=gzip.compress(b"plain"), headers=[("Content-Encoding", "gzip")]),
+    )
+    with patch("wesearch.fetch.transport.stdlib._connect", return_value=conn):
+        assert (
+            fetch_stdlib("https://example.com/", allow_private_hosts=True) == b"plain"
+        )
     assert conn.closed
 
 
@@ -168,14 +261,50 @@ def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
     assert conn.closed
 
 
-def test_an_error_status_raises_a_fetch_error_with_the_body() -> None:
-    conn = _Conn(_response(404, b"nope"))
+@pytest.mark.parametrize("elapsed", [2.5, 3.0])
+def test_the_callers_read_deadline_includes_its_exact_boundary(elapsed: float) -> None:
+    read = Mock(side_effect=[b"ok", b""])
+    response = _response()
+    response.read = read
+    conn = _Conn(response)
+    with (
+        patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
+        patch(
+            "wesearch.fetch.transport.stdlib.time.monotonic",
+            side_effect=[0.0, elapsed, elapsed, elapsed],
+        ),
+    ):
+        if elapsed == 3.0:
+            with pytest.raises(FetchError) as error:
+                fetch_stdlib(
+                    "https://example.com/",
+                    timeout_sec=3.0,
+                    allow_private_hosts=True,
+                )
+            assert error.value.status == 0
+            read.assert_not_called()
+        else:
+            assert (
+                fetch_stdlib(
+                    "https://example.com/",
+                    timeout_sec=3.0,
+                    allow_private_hosts=True,
+                )
+                == b"ok"
+            )
+    assert conn.closed
+
+
+@pytest.mark.parametrize("status", [400, 404])
+def test_an_error_status_raises_a_fetch_error_with_the_body(status: int) -> None:
+    conn = _Conn(_response(status, b"nope", [("X-Reason", "refused")]))
     with (
         patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
         pytest.raises(FetchError) as error,
     ):
         fetch_stdlib("http://127.0.0.1/gone", allow_private_hosts=True)
-    assert (error.value.url, error.value.status) == ("http://127.0.0.1/gone", 404)
+    assert (error.value.url, error.value.status) == ("http://127.0.0.1/gone", status)
+    assert error.value.headers == {"x-reason": "refused"}
     assert error.value.body == b"nope"
     assert conn.closed
 
@@ -209,6 +338,7 @@ def test_a_failed_connection_is_a_status_zero_fetch_error(failure: Exception) ->
     ):
         fetch_stdlib("http://127.0.0.1/x", allow_private_hosts=True)
     assert (error.value.url, error.value.status) == ("http://127.0.0.1/x", 0)
+    assert error.value.headers == {}
     assert error.value.body == str(failure).encode()
     assert error.value.__cause__ is failure
     assert conn.closed
@@ -238,27 +368,22 @@ def test_a_pinned_http_connection_dials_the_ip() -> None:
     )
     assert type(conn) is client.HTTPConnection
     assert conn.host == "93.184.216.34"
+    assert conn.timeout == 1.0
 
 
 def test_an_unpinned_connection_dials_the_hostname() -> None:
-    https = _connect("https", "example.com", port=None, ip="", connect_timeout_sec=5.0)
+    https = _connect("https", "example.com", port=8443, ip="", connect_timeout_sec=5.0)
     http = _connect("http", "example.com", port=8080, ip="", connect_timeout_sec=5.0)
     assert type(https) is client.HTTPSConnection
-    assert https.host == "example.com"
+    assert (https.host, https.port) == ("example.com", 8443)
     assert https.timeout == 5.0
     assert type(http) is client.HTTPConnection
     assert (http.host, http.port) == ("example.com", 8080)
+    assert http.timeout == 5.0
 
 
 def test_the_pinned_connection_wraps_its_socket_for_the_hostname() -> None:
-    conn = _PinnedHTTPSConnection(
-        "93.184.216.34",
-        port=None,
-        hostname="example.com",
-        timeout=1.0,
-    )
     context = cast("ssl.SSLContext", Mock(spec=ssl.SSLContext))
-    conn._context = context
     raw = Mock(spec=socket.socket)
     wrapped = Mock(spec=ssl.SSLSocket)
 
@@ -266,9 +391,19 @@ def test_the_pinned_connection_wraps_its_socket_for_the_hostname() -> None:
         self.sock = raw
 
     with (
+        patch(
+            "wesearch.fetch.transport.stdlib.ssl.create_default_context",
+            return_value=context,
+        ),
         patch.object(client.HTTPConnection, "connect", connect),
         patch.object(context, "wrap_socket", return_value=wrapped) as wrap,
     ):
+        conn = _PinnedHTTPSConnection(
+            "93.184.216.34",
+            port=None,
+            hostname="example.com",
+            timeout=1.0,
+        )
         conn.connect()
     wrap.assert_called_once_with(raw, server_hostname="example.com")
     assert conn.sock is wrapped

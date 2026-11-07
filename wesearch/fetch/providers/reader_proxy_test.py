@@ -104,14 +104,22 @@ class TestFetch:
 
     @pytest.mark.parametrize(
         ("title", "walled"),
-        [("Just a moment...", True), ("Just a moment: a history", False)],
+        [
+            (b"Just a moment...", True),
+            (b"Just a moment: a history", False),
+            (b"Article \xff", False),
+        ],
     )
-    def test_a_rendered_cloudflare_wall_raises(self, title: str, walled: bool) -> None:
+    def test_a_rendered_cloudflare_wall_raises(
+        self,
+        title: bytes,
+        walled: bool,
+    ) -> None:
         # Verbatim shape of the proxy's render of Quora on 2026-10-30.
         body = (
-            f"Title: {title}\n\nURL Source: https://quora.com/\n\n"
-            "Markdown Content:\nVerify you are human."
-        ).encode()
+            b"Title: " + title + b"\n\nURL Source: https://quora.com/\n\n"
+            b"Markdown Content:\nVerify you are human."
+        )
 
         def fake_fetch(
             url: str,
@@ -138,9 +146,12 @@ class TestFetch:
                     policy=PolicyParams(),
                 )
         assert raised.value.url == "https://quora.com/"
+        assert raised.value.status == 200
+        assert raised.value.body == body
 
-    def test_soft_fail_sentinel_raises(self) -> None:
-        soft = b"A" * 200 + b"Warning: Target URL returned error 404 while fetching"
+    @pytest.mark.parametrize("warning", [b"Warning:", b"warning:"])
+    def test_soft_fail_sentinel_raises(self, warning: bytes) -> None:
+        soft = b"A" * 200 + warning + b" Target URL returned error 404 while fetching"
 
         def fake_fetch(
             url: str,
@@ -167,6 +178,7 @@ class TestFetch:
     ) -> None:
         monkeypatch.delenv("JINA_AI_API_KEY", raising=False)
         policy = PolicyParams()
+        session = FetchSession()
         seen: list[object] = []
 
         def fake_fetch(
@@ -175,8 +187,7 @@ class TestFetch:
             request: RequestParams,
             session: FetchSession | None = None,
         ) -> bytes:
-            del session
-            seen.extend((url, request))
+            seen.extend((url, request, session))
             return b"ok"
 
         with patch.object(reader_proxy, "fetch", fake_fetch):
@@ -184,6 +195,7 @@ class TestFetch:
                 reader_proxy.fetch_reader_proxy(
                     "https://x.com/a?q=1&x=2",
                     policy=policy,
+                    session=session,
                 )
                 == b"ok"
             )
@@ -191,6 +203,7 @@ class TestFetch:
         assert isinstance(seen[1], RequestParams)
         assert seen[1].policy is policy
         assert seen[1].retry == RetryParams(timeout_sec=30)
+        assert seen[2] is session
 
     @pytest.mark.parametrize("value", [" TRUE ", "YeS", "ON"])
     def test_consent_strips_and_casefolds(
