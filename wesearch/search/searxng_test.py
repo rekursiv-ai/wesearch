@@ -12,6 +12,7 @@ import runpy
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
+from wesearch.lib.userdirs import base_dir_variables
 from wesearch.search import (
     searxng as searxng_module,
     types,
@@ -50,6 +51,7 @@ type _OneTab = Literal["general"]
 def test_import_refuses_a_tab_without_a_categories_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    isolated = base_dir_variables()
     categories = searxng_module.CATEGORIES
     category_type = searxng_module.CategoryInfo
     with monkeypatch.context() as local:
@@ -62,6 +64,7 @@ def test_import_refuses_a_tab_without_a_categories_record(
                 searxng_module.__file__ or "",
                 run_name=f"{searxng_module.__name__}_fresh",
             )
+    assert base_dir_variables() == isolated
     assert searxng_module.CATEGORIES is categories
     assert searxng_module.CategoryInfo is category_type
     assert set(categories) == set(

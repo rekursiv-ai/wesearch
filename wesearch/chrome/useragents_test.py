@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from email.message import Message
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import patch
 from urllib import request
 from urllib.error import HTTPError, URLError
 
 import gzip
 import io
-import json
 import tempfile
 
 import pytest
@@ -143,37 +142,18 @@ class TestRefresh:
         },
     ]
 
-    def _refresh(self, kind: UserAgentKind, tmp_path: Path) -> list[str]:
-        pool_file = tmp_path / f"{kind}.txt"
-        with (
-            patch.object(useragents, "_download_records", return_value=self._DATASET),
-            patch.object(useragents, "_pool_path", return_value=pool_file),
-        ):
-            useragents.refresh(kind)
-        return pool_file.read_text().splitlines()
-
-    def test_desktop_filter_keeps_only_desktop_plain_chrome(
+    @pytest.mark.parametrize(
+        ("kind", "indices"),
+        [("chrome_desktop", [0, 2]), ("chrome_android", [1, 3])],
+    )
+    def test_selection_keeps_exact_plain_chrome_identities(
         self,
-        tmp_path: Path,
+        kind: UserAgentKind,
+        indices: list[int],
     ) -> None:
-        lines = self._refresh("chrome_desktop", tmp_path)
-        assert len(lines) == 2
-        assert all("Mobile" not in line for line in lines)
-        assert all("Edg/" not in line for line in lines)
-
-    def test_android_filter_keeps_only_android_chrome(self, tmp_path: Path) -> None:
-        lines = self._refresh("chrome_android", tmp_path)
-        assert len(lines) == 2
-        assert all("Android" in line for line in lines)
-
-    def test_empty_result_raises(self, tmp_path: Path) -> None:
-        pool_file = tmp_path / "chrome_desktop.txt"
-        with (
-            patch.object(useragents, "_download_records", return_value=[]),
-            patch.object(useragents, "_pool_path", return_value=pool_file),
-            pytest.raises(RuntimeError, match="fewer than 2 distinct"),
-        ):
-            useragents.refresh("chrome_desktop")
+        assert useragents._select_user_agents(list(self._DATASET), kind=kind) == [
+            self._DATASET[index]["userAgent"] for index in indices
+        ]
 
     def test_refresh_all_downloads_once_and_rewrites_both_pools(
         self,
@@ -203,20 +183,26 @@ class TestRefresh:
         assert len(pool_paths["chrome_desktop"].read_text().splitlines()) == 2
         assert len(pool_paths["chrome_android"].read_text().splitlines()) == 2
 
-    def test_refresh_rejects_fewer_than_two_distinct_identities(
+    @pytest.mark.parametrize("indices", [[], [0, 0]], ids=["empty", "duplicates"])
+    def test_selection_rejects_fewer_than_two_distinct_identities(
         self,
-        tmp_path: Path,
+        indices: list[int],
     ) -> None:
-        pool_file = tmp_path / "chrome_desktop.txt"
-        duplicate_only = [self._DATASET[0], self._DATASET[0].copy()]
+        records: list[object] = [self._DATASET[index].copy() for index in indices]
+        with pytest.raises(RuntimeError, match="fewer than 2 distinct"):
+            useragents._select_user_agents(records, kind="chrome_desktop")
+
+    def test_refresh_does_not_replace_an_invalid_pool(self) -> None:
+        invalid = RuntimeError("invalid selection")
         with (
-            patch.object(useragents, "_download_records", return_value=duplicate_only),
-            patch.object(useragents, "_pool_path", return_value=pool_file),
-            pytest.raises(RuntimeError, match="fewer than 2 distinct"),
+            patch.object(useragents, "_download_records", return_value=[]),
+            patch.object(useragents, "_select_user_agents", side_effect=invalid),
+            patch.object(useragents, "_replace_pool") as replace,
+            pytest.raises(RuntimeError) as raised,
         ):
             useragents.refresh("chrome_desktop")
-
-        assert not pool_file.exists()
+        assert raised.value is invalid
+        replace.assert_not_called()
 
     def test_refresh_all_validates_both_before_replacing_either_pool(
         self,
@@ -283,19 +269,6 @@ class TestRefresh:
         assert pool_paths["chrome_android"].read_text() == originals["chrome_android"]
         assert user_agent_pool.cache_info().currsize == 0
         assert set(tmp_path.iterdir()) == set(pool_paths.values())
-
-    def test_pool_replacement_does_not_leave_temporary_file(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        pool_file = tmp_path / "chrome_desktop.txt"
-        with (
-            patch.object(useragents, "_download_records", return_value=self._DATASET),
-            patch.object(useragents, "_pool_path", return_value=pool_file),
-        ):
-            useragents.refresh("chrome_desktop")
-
-        assert not list(tmp_path.glob("*.tmp"))
 
     @pytest.mark.parametrize(
         "marker",
@@ -415,27 +388,13 @@ class TestRefresh:
         pool_path.assert_called_with("chrome_android")
         assert caplog.records[0].getMessage() == f"wrote 2 user agents to {pool_file}"
 
-    def test_refresh_logs_exact_count_and_path(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        pool_file = tmp_path / "pool.txt"
-        with (
-            patch.object(useragents, "_download_records", return_value=self._DATASET),
-            patch.object(useragents, "_pool_path", return_value=pool_file),
-            caplog.at_level("INFO", logger=useragents.logger.name),
-        ):
-            useragents.refresh("chrome_desktop")
-        assert [record.getMessage() for record in caplog.records] == [
-            f"wrote 2 user agents to {pool_file}",
-        ]
-
     def test_replace_uses_exact_default_mode_when_new(self, tmp_path: Path) -> None:
         pool_file = tmp_path / "pool.txt"
         with patch.object(useragents, "_pool_path", return_value=pool_file):
             useragents._replace_pool("chrome_desktop", ["a", "b"])
+        assert pool_file.read_text() == "a\nb\n"
         assert pool_file.stat().st_mode & 0o777 == 0o644
+        assert set(tmp_path.iterdir()) == {pool_file}
 
     def test_replace_preserves_existing_mode(self, tmp_path: Path) -> None:
         pool_file = tmp_path / "pool.txt"
@@ -540,31 +499,31 @@ class TestRefresh:
 
 
 class TestDownload:
-    """The stdlib downloader parses gzip JSON and retries transient failures."""
+    """The downloader parses gzip JSON and retries only transient failures."""
 
-    _PAYLOAD = gzip.compress(json.dumps(TestRefresh._DATASET).encode())
+    _PAYLOAD: ClassVar[bytes] = gzip.compress(b'[{"userAgent":"Chrome/149"}]')
 
     def test_download_builds_exact_request_and_refresh_identity(self) -> None:
         sent_request = object()
         with (
-            patch.object(
-                request,
-                "Request",
-                return_value=sent_request,
-            ) as request_factory,
+            patch.object(request, "Request", return_value=sent_request) as factory,
+            patch.object(useragents, "_refresh_user_agent", return_value="UA") as ua,
             patch.object(
                 useragents,
-                "_refresh_user_agent",
-                return_value="UA",
-            ) as refresh_ua,
-            patch.object(useragents, "_read_response", return_value=self._PAYLOAD),
+                "_read_response",
+                side_effect=[
+                    self._PAYLOAD,
+                    AssertionError("retried a successful read"),
+                ],
+            ) as read,
         ):
-            assert useragents._download_records() == TestRefresh._DATASET
-        refresh_ua.assert_called_once_with("chrome_desktop")
-        request_factory.assert_called_once_with(
+            assert useragents._download_records() == [{"userAgent": "Chrome/149"}]
+        ua.assert_called_once_with("chrome_desktop")
+        factory.assert_called_once_with(
             "https://raw.githubusercontent.com/intoli/user-agents/main/src/user-agents.json.gz",
             headers={"User-Agent": "UA"},
         )
+        read.assert_called_once_with(sent_request)
 
     @pytest.mark.parametrize(
         ("kind", "platform"),
@@ -586,130 +545,96 @@ class TestDownload:
             )
         newest.assert_called_once_with(platform)
 
-    def test_download_uses_stdlib_with_fixed_identity(self) -> None:
-        with patch.object(
-            request,
-            "urlopen",
-            return_value=io.BytesIO(self._PAYLOAD),
-        ) as urlopen_mock:
-            records = useragents._download_records()
+    def test_read_response_uses_the_request_and_closes_its_body(self) -> None:
+        sent = request.Request("https://example.test/user-agents.json.gz")
+        response = io.BytesIO(b"compressed body")
+        with patch.object(request, "urlopen", return_value=response) as opened:
+            assert useragents._read_response(sent) == b"compressed body"
+        opened.assert_called_once_with(sent, timeout=30)
+        assert response.closed
 
-        assert records == TestRefresh._DATASET
-        sent_request = cast(request.Request, urlopen_mock.call_args.args[0])
-        assert sent_request.full_url == (
-            "https://raw.githubusercontent.com/intoli/user-agents/"
-            "main/src/user-agents.json.gz"
-        )
-        assert sent_request.get_header("User-agent") == useragents._refresh_user_agent(
-            "chrome_desktop",
-        )
-        assert urlopen_mock.call_args.kwargs == {"timeout": 30}
-
-    def test_download_retries_transient_url_error(self) -> None:
-        with patch.object(
-            request,
-            "urlopen",
-            side_effect=[URLError("temporary"), io.BytesIO(self._PAYLOAD)],
-        ) as urlopen_mock:
-            assert useragents._download_records() == TestRefresh._DATASET
-
-        assert urlopen_mock.call_count == 2
-
-    @pytest.mark.parametrize("status", [429, 500, 503, 599])
-    def test_download_retries_transient_http_error(self, status: int) -> None:
-        error = HTTPError(
-            "https://example.test/user-agents.json.gz",
-            status,
-            "Transient",
-            hdrs=Message(),
-            fp=None,
-        )
-        with patch.object(
-            request,
-            "urlopen",
-            side_effect=[error, io.BytesIO(self._PAYLOAD)],
-        ) as urlopen_mock:
-            assert useragents._download_records() == TestRefresh._DATASET
-
-        assert urlopen_mock.call_count == 2
-
-    @pytest.mark.parametrize("status", [429, 503])
-    def test_download_stops_after_three_transient_http_errors(
+    @pytest.mark.parametrize("failure", [URLError, TimeoutError, 429, 500, 503, 599])
+    def test_download_retries_transient_failures(
         self,
-        status: int,
+        failure: int | type[OSError],
     ) -> None:
-        error = HTTPError(
-            "https://example.test/user-agents.json.gz",
-            status,
-            "Transient",
-            hdrs=Message(),
-            fp=None,
-        )
+        error = _download_failure(failure)
+        with patch.object(
+            useragents,
+            "_read_response",
+            side_effect=[
+                error,
+                self._PAYLOAD,
+                AssertionError("retried a successful read"),
+            ],
+        ) as read:
+            assert useragents._download_records() == [{"userAgent": "Chrome/149"}]
+        assert read.call_count == 2
+        assert read.call_args_list[0] == read.call_args_list[1]
+
+    @pytest.mark.parametrize("failure", [URLError, TimeoutError, 429, 503])
+    def test_download_stops_after_three_transient_failures(
+        self,
+        failure: int | type[OSError],
+    ) -> None:
+        error = _download_failure(failure)
         with (
             patch.object(
-                request,
-                "urlopen",
-                side_effect=[error, error, error, io.BytesIO(self._PAYLOAD)],
-            ) as urlopen_mock,
+                useragents,
+                "_read_response",
+                side_effect=[
+                    error,
+                    error,
+                    error,
+                    AssertionError("exceeded three reads"),
+                ],
+            ) as read,
+            pytest.raises(type(error)) as raised,
+        ):
+            useragents._download_records()
+        assert raised.value is error
+        assert read.call_count == 3
+        assert read.call_args_list == [read.call_args_list[0]] * 3
+
+    @pytest.mark.parametrize("status", [404, 499, 600])
+    def test_download_does_not_retry_other_http_errors(self, status: int) -> None:
+        error = _download_failure(status)
+        with (
+            patch.object(
+                useragents,
+                "_read_response",
+                side_effect=[error, AssertionError("retried a permanent failure")],
+            ) as read,
             pytest.raises(HTTPError) as raised,
         ):
             useragents._download_records()
-
         assert raised.value is error
-        assert urlopen_mock.call_count == 3
-
-    def test_download_stops_after_three_transient_failures(self) -> None:
-        with (
-            patch.object(
-                request,
-                "urlopen",
-                side_effect=URLError("temporary"),
-            ) as urlopen_mock,
-            pytest.raises(URLError),
-        ):
-            useragents._download_records()
-
-        assert urlopen_mock.call_count == 3
-
-    def test_download_does_not_retry_other_client_http_error(self) -> None:
-        error = HTTPError(
-            "https://example.test/user-agents.json.gz",
-            404,
-            "Not Found",
-            hdrs=Message(),
-            fp=None,
-        )
-        with (
-            patch.object(request, "urlopen", side_effect=error) as urlopen_mock,
-            pytest.raises(HTTPError),
-        ):
-            useragents._download_records()
-
-        urlopen_mock.assert_called_once()
-
-    @pytest.mark.parametrize("status", [499, 600])
-    def test_download_does_not_retry_boundary_http_errors(self, status: int) -> None:
-        error = HTTPError(
-            "https://example.test/user-agents.json.gz",
-            status,
-            "Error",
-            hdrs=Message(),
-            fp=None,
-        )
-        with (
-            patch.object(request, "urlopen", side_effect=error) as urlopen_mock,
-            pytest.raises(HTTPError),
-        ):
-            useragents._download_records()
-        urlopen_mock.assert_called_once()
+        read.assert_called_once()
 
     def test_download_rejects_non_array_json(self) -> None:
-        payload = gzip.compress(json.dumps({"userAgent": "Chrome/149"}).encode())
+        payload = gzip.compress(b'{"userAgent":"Chrome/149"}')
         with (
-            patch.object(request, "urlopen", return_value=io.BytesIO(payload)),
+            patch.object(
+                useragents,
+                "_read_response",
+                side_effect=[payload, AssertionError("retried a malformed body")],
+            ) as read,
             pytest.raises(RuntimeError, match=r"^expected JSON array$"),
         ):
             useragents._download_records()
+        read.assert_called_once()
+
+
+def _download_failure(failure: int | type[OSError]) -> OSError:
+    if isinstance(failure, int):
+        return HTTPError(
+            "https://example.test/user-agents.json.gz",
+            failure,
+            "refused",
+            hdrs=Message(),
+            fp=None,
+        )
+    return failure("temporary")
 
 
 if __name__ == "__main__":

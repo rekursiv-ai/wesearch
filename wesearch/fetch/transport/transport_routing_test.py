@@ -98,12 +98,16 @@ def test_relearning_refreshes_the_entry(
     assert path.read_text() == "walled.example\t1090\n"
 
 
-def test_untimestamped_learned_entry_reads_as_expired(tmp_path: Path) -> None:
+def test_untimestamped_learned_entry_reads_as_expired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A learned list written before expiry existed must not route forever."""
     path = tmp_path / "domains.txt"
     path.write_text("stale.example\n")
+    monkeypatch.setattr(time, "time", lambda: 1.0)
 
-    assert zendriver_domains(path=path) == frozenset()
+    assert zendriver_domains(path=path, ttl_sec=0) == frozenset()
 
 
 def test_blank_and_nameless_lines_are_skipped(tmp_path: Path) -> None:
@@ -165,21 +169,14 @@ def test_unreadable_domain_list_degrades_to_empty(tmp_path: Path) -> None:
     assert zendriver_domains(path=path) == frozenset()
 
 
-def test_remember_preserves_domains_past_the_read_chunk(tmp_path: Path) -> None:
-    # The domain list must be read to EOF before rewrite; a fixed read cap would
-    # silently drop every domain past it on the next remember.
+def test_remember_preserves_existing_domains(tmp_path: Path) -> None:
     path = tmp_path / "domains.txt"
-    # One entry beyond 1 MiB proves the reader reaches EOF without 50k parses.
-    beyond_chunk = "a" * ((1 << 20) + 1)
-    path.write_text(f"{beyond_chunk}\t{time.time():.0f}\n")
-    assert path.stat().st_size > (1 << 20)
+    path.write_text(f"kept.example\t{time.time():.0f}\n")
 
     remember_zendriver_domain("fresh.example", path=path)
 
-    result = zendriver_domains(path=path)
-    assert "fresh.example" in result
-    assert beyond_chunk in result
-    assert len(result) == 2
+    assert zendriver_domains(path=path) == {"fresh.example", "kept.example"}
+    assert _names(path) == ["fresh.example", "kept.example"]
 
 
 def test_read_failure_after_open_degrades_to_empty(
@@ -287,32 +284,20 @@ def test_read_domains_logs_decode_failure(
     ]
 
 
-def test_read_all_reads_beyond_one_megabyte(tmp_path: Path) -> None:
-    path = tmp_path / "domains.txt"
-    payload = b"a" * ((1 << 21) + 1)
-    path.write_bytes(payload)
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        assert transport_routing._read_all(descriptor) == payload
-    finally:
-        os.close(descriptor)
-
-
-def test_read_all_uses_one_megabyte_chunks(
+def test_read_all_joins_short_reads_in_order_until_eof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[int] = []
-    chunks = iter((b"first", b""))
+    calls: list[tuple[int, int]] = []
+    chunks = iter((b"first", b"second", b""))
 
     def read(descriptor: int, size: int) -> bytes:
-        del descriptor
-        calls.append(size)
+        calls.append((descriptor, size))
         return next(chunks)
 
     monkeypatch.setattr(os, "read", read)
 
-    assert transport_routing._read_all(3) == b"first"
-    assert calls == [1 << 20, 1 << 20]
+    assert transport_routing._read_all(3) == b"firstsecond"
+    assert calls == [(3, 1 << 20)] * 3
 
 
 def test_read_domains_uses_close_on_exec_flag(

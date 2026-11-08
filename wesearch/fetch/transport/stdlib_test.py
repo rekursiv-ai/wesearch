@@ -1,7 +1,4 @@
-"""Tests for what only the stdlib transport does: its sockets and its pins.
-
-The behavior it shares with curl is in ``transport_test.py``.
-"""
+"""Unit tests for stdlib requests, response handling, and pinned connections."""
 
 from __future__ import annotations
 
@@ -118,7 +115,12 @@ def test_a_post_forwards_its_body_headers_and_navigation_policy(
 ) -> None:
     supplied = {"X-Ignore": None, "X-Key": "key"}
     if content_type:
-        supplied["cOnTeNt-TyPe"] = content_type
+        supplied |= {
+            "cOnTeNt-TyPe": content_type,
+            "User-Agent": "Android GSA",
+            "sec-ch-ua-platform": '"Android"',
+            "Accept": None,
+        }
     conn = _Conn(_response())
     with (
         patch(
@@ -153,11 +155,31 @@ def test_a_post_forwards_its_body_headers_and_navigation_policy(
     sent = {name.lower(): value for name, value in headers.items()}
     assert (method, path) == ("POST", "/")
     assert sent["origin"] == f"https://{host}"
-    assert sent["user-agent"] == chrome_user_agent(151, "macOS")
+    assert sent["x-key"] == "key"
+    navigation_headers = {
+        name.lower(): value
+        for name, value in chrome_navigation_headers(
+            major=151,
+            platform="macOS",
+            method="POST",
+            content_type=content_type,
+            origin=f"https://{host}",
+        ).items()
+    }
     if content_type:
+        navigation_headers.pop("accept")
+        navigation_headers["user-agent"] = "Android GSA"
+        navigation_headers["sec-ch-ua-platform"] = '"Android"'
+    assert {name: sent[name] for name in navigation_headers} == navigation_headers
+    if content_type:
+        assert sent["user-agent"] == "Android GSA"
+        assert sent["sec-ch-ua-platform"] == '"Android"'
+        assert "accept" not in sent
         assert sent["content-type"] == content_type
         assert navigation.call_args.kwargs["content_type"] == content_type
     else:
+        assert sent["user-agent"] == chrome_user_agent(151, "macOS")
+        assert sent["accept"]
         assert "content-type" not in sent
     assert "x-ignore" not in sent
     assert navigation.call_args.kwargs["method"] == "POST"
@@ -168,6 +190,18 @@ def test_a_post_forwards_its_body_headers_and_navigation_policy(
         assert {name: sent[name] for name in expected} == expected
     else:
         assert not expected.keys() & sent.keys()
+    assert conn.closed
+
+
+def test_an_already_closed_response_needs_no_read() -> None:
+    response = _response()
+    response.isclosed = Mock(return_value=True)
+    read = Mock(side_effect=AssertionError("closed response read"))
+    response.read = read
+    conn = _Conn(response)
+    with patch("wesearch.fetch.transport.stdlib._connect", return_value=conn):
+        assert fetch_stdlib("https://example.com/", allow_private_hosts=True) == b""
+    read.assert_not_called()
     assert conn.closed
 
 
@@ -187,18 +221,16 @@ def test_a_cross_host_redirect_reopens_and_re_pins() -> None:
         _response(302, b"", [("Location", "https://other.example/next?x=1")]),
     )
     second = _Conn(_response(body=b"final"))
-    pins = iter(
-        [
+    pin = Mock(
+        side_effect=[
             ValidatedHost(host="example.com", ip="93.184.216.34"),
             ValidatedHost(host="other.example", ip="93.184.216.35"),
         ],
     )
-
-    def pin(url: str, *, allow_private_hosts: bool) -> ValidatedHost:
-        del url
-        assert not allow_private_hosts
-        return next(pins)
-
+    observed, response, redirect = Mock(), Mock(), Mock()
+    observed.attach_mock(response, "response")
+    observed.attach_mock(redirect, "redirect")
+    cookies = Mock(return_value={"B": "2"})
     with (
         patch("wesearch.fetch.transport.stdlib.pinned_host", pin),
         patch(
@@ -206,14 +238,95 @@ def test_a_cross_host_redirect_reopens_and_re_pins() -> None:
             side_effect=[first, second],
         ) as opened,
     ):
-        assert fetch_stdlib("https://example.com/start", headers={"host": "x"}) == (
-            b"final"
+        assert (
+            fetch_stdlib(
+                "https://example.com/start",
+                headers={"host": "x", "Cookie": "A=1", "Authorization": "Bearer x"},
+                on_response=response,
+                on_redirect=redirect,
+                cookies_for_host=cookies,
+            )
+            == b"final"
         )
     assert first.closed
+    assert second.closed
+    assert pin.call_args_list == [
+        call("https://example.com/start", allow_private_hosts=False),
+        call("https://other.example/next?x=1", allow_private_hosts=False),
+    ]
+    assert observed.mock_calls == [
+        (
+            "response",
+            (
+                302,
+                {"location": "https://other.example/next?x=1"},
+                "https://example.com/start",
+            ),
+            {},
+        ),
+        ("redirect", ("https://other.example/next?x=1",), {}),
+        ("response", (200, {}, "https://other.example/next?x=1"), {}),
+    ]
+    cookies.assert_called_once_with("other.example")
     assert opened.call_args.kwargs["ip"] == "93.184.216.35"
     [(_, path, headers)] = second.requests
     assert path == "/next?x=1"
     assert headers["Host"] == "other.example"
+    assert headers["Cookie"] == "B=2"
+    assert not any(name.lower() == "authorization" for name in headers)
+
+
+def test_a_zero_redirect_budget_returns_the_body_without_another_connection() -> None:
+    conn = _Conn(_response(302, b"hop", [("Location", "/next")]))
+    redirect, response = Mock(), Mock()
+    with patch(
+        "wesearch.fetch.transport.stdlib._connect",
+        side_effect=[conn, AssertionError("followed beyond zero redirect budget")],
+    ) as opened:
+        assert (
+            fetch_stdlib(
+                "https://example.com/start",
+                max_redirects=0,
+                on_redirect=redirect,
+                on_response=response,
+                allow_private_hosts=True,
+            )
+            == b"hop"
+        )
+    opened.assert_called_once()
+    response.assert_called_once_with(
+        302,
+        {"location": "/next"},
+        "https://example.com/start",
+    )
+    redirect.assert_not_called()
+    assert conn.closed
+
+
+def test_a_redirect_refusal_escapes_after_the_connection_closes() -> None:
+    conn = _Conn(_response(302, b"", [("Location", "/next")]))
+    refused = ValueError("refused")
+
+    def refuse(url: str) -> None:
+        assert url == "https://example.com/next"
+        assert conn.closed
+        raise refused
+
+    with (
+        patch(
+            "wesearch.fetch.transport.stdlib._connect",
+            return_value=conn,
+        ) as opened,
+        pytest.raises(ValueError, match="refused") as error,
+    ):
+        fetch_stdlib(
+            "https://example.com/start",
+            on_redirect=refuse,
+            allow_private_hosts=True,
+        )
+    assert error.value is refused
+    opened.assert_called_once()
+    assert conn.closed
 
 
 def test_the_read_budget_widens_only_once_connected() -> None:
@@ -298,11 +411,28 @@ def test_the_callers_read_deadline_includes_its_exact_boundary(elapsed: float) -
 @pytest.mark.parametrize("status", [400, 404])
 def test_an_error_status_raises_a_fetch_error_with_the_body(status: int) -> None:
     conn = _Conn(_response(status, b"nope", [("X-Reason", "refused")]))
+    classified = FetchError(
+        "http://127.0.0.1/gone",
+        status,
+        {"x-reason": "refused"},
+        b"nope",
+    )
     with (
         patch("wesearch.fetch.transport.stdlib._connect", return_value=conn),
+        patch(
+            "wesearch.fetch.transport.stdlib.classify_http_error",
+            return_value=classified,
+        ) as classify,
         pytest.raises(FetchError) as error,
     ):
         fetch_stdlib("http://127.0.0.1/gone", allow_private_hosts=True)
+    assert error.value is classified
+    classify.assert_called_once_with(
+        "http://127.0.0.1/gone",
+        status,
+        {"x-reason": "refused"},
+        b"nope",
+    )
     assert (error.value.url, error.value.status) == ("http://127.0.0.1/gone", status)
     assert error.value.headers == {"x-reason": "refused"}
     assert error.value.body == b"nope"
