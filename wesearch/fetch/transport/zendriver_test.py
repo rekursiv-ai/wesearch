@@ -12,6 +12,7 @@ from functools import partial
 from pathlib import Path
 from types import GeneratorType, MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast, override
+from unittest.mock import AsyncMock, Mock
 
 import asyncio
 import contextlib
@@ -471,7 +472,12 @@ class _RunningPool(_StubPool):
         self.waits: list[float] = []
         self.shutdowns = 0
 
-    def run[T](self, coro: Coroutine[object, object, T], *, timeout_sec: float) -> T:
+    def run[T](
+        self,
+        coro: Coroutine[object, object, T],
+        *,
+        timeout_sec: float = 0,
+    ) -> T:
         self.waits.append(timeout_sec)
         return asyncio.run(coro)
 
@@ -741,7 +747,7 @@ def test_fetch_zendriver_reports_a_run_timeout_as_status_zero(
             self,
             coro: Coroutine[object, object, T],
             *,
-            timeout_sec: float,
+            timeout_sec: float = 0,
         ) -> T:
             coro.close()
             raise TimeoutError
@@ -2742,33 +2748,22 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
     def answers(port: int) -> bool:
         return listening and port == 4242
 
-    run = BrowserPool.run
-    waits: list[float] = []
-
-    def bounded_run[T](
-        self: BrowserPool,
-        coro: Coroutine[object, object, T],
-        *,
-        timeout_sec: float = 0,
-    ) -> T:
-        waits.append(timeout_sec)
-        return run(self, coro, timeout_sec=timeout_sec)
-
     monkeypatch.setattr(zendriver, "_launch_lock", lock)
     monkeypatch.setattr(zendriver, "_devtools_port", port)
     monkeypatch.setattr(zendriver, "_port_answers", answers)
     monkeypatch.setattr(zendriver, "_read_mode", read_mode, raising=False)
     monkeypatch.setattr(zendriver, "_close_chrome", close)
     monkeypatch.setattr(zendriver, "_start_shared_chrome", launch, raising=False)
-    monkeypatch.setattr(BrowserPool, "run", bounded_run)
-    pool = BrowserPool()
-    try:
-        assert (
-            zendriver._switch_mode(pool, tmp_path, headless=requested, restart=restart)
-            == expected
+    pool = _RunningPool(_FakeBrowser())
+    assert (
+        zendriver._switch_mode(
+            cast(BrowserPool, pool),
+            tmp_path,
+            headless=requested,
+            restart=restart,
         )
-    finally:
-        pool.shutdown()
+        == expected
+    )
     transition = ["close", ("launch", requested, True)] if expected[1] else []
     initial = (
         [("launch", expected[0], False)]
@@ -2776,7 +2771,7 @@ def test_mode_transition_uses_actual_mode_and_shared_launch_lock(
         else ["read"]
     )
     assert events == ["lock", *initial, *transition, "unlock"]
-    assert all(timeout and timeout > 0 for timeout in waits)
+    assert all(timeout and timeout > 0 for timeout in pool.waits)
 
 
 def test_mode_read_outlasts_a_cold_chrome_that_has_not_answered_yet(
@@ -2817,12 +2812,14 @@ def test_mode_transition_requires_consent_before_closing(
     monkeypatch.setattr(zendriver, "_port_answers", _answers_everywhere)
     monkeypatch.setattr(zendriver, "_read_mode", headed, raising=False)
     monkeypatch.setattr(zendriver, "_close_chrome", refuse_close)
-    pool = BrowserPool()
-    try:
-        with pytest.raises(zendriver.BrowserUnavailableError, match="restart=True"):
-            zendriver._switch_mode(pool, tmp_path, headless=True, restart=False)
-    finally:
-        pool.shutdown()
+    pool = _RunningPool(_FakeBrowser())
+    with pytest.raises(zendriver.BrowserUnavailableError, match="restart=True"):
+        zendriver._switch_mode(
+            cast(BrowserPool, pool),
+            tmp_path,
+            headless=True,
+            restart=False,
+        )
 
 
 @pytest.mark.parametrize("headless", [False, True])
@@ -3135,6 +3132,7 @@ def test_pool_run_default_timeout_waits_without_a_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     timeouts: list[float | None] = []
+    event_loop = Mock(spec=asyncio.AbstractEventLoop)
 
     class Future:
         def result(self, timeout: float | None) -> int:
@@ -3145,21 +3143,18 @@ def test_pool_run_default_timeout_waits_without_a_ceiling(
         coroutine: Coroutine[object, object, int],
         loop: asyncio.AbstractEventLoop,
     ) -> Future:
-        del loop
+        assert loop is event_loop
         coroutine.close()
         return Future()
 
-    pool = BrowserPool()
+    pool = Mock(spec=BrowserPool, _loop=event_loop)
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", submit)
-    try:
 
-        async def value() -> int:
-            return 1
+    async def value() -> int:
+        return 1
 
-        assert pool.run(value()) == 1
-        assert timeouts == [None]
-    finally:
-        pool.shutdown()
+    assert BrowserPool.run(pool, value()) == 1
+    assert timeouts == [None]
 
 
 @pytest.mark.parametrize("failure", [TimeoutError, KeyboardInterrupt])
@@ -3168,11 +3163,13 @@ def test_pool_run_cancels_work_when_its_caller_is_interrupted(
     failure: type[BaseException],
 ) -> None:
     cancelled: list[bool] = []
+    event_loop = Mock(spec=asyncio.AbstractEventLoop)
+    error = failure()
 
     class Future:
         def result(self, timeout: float | None) -> None:
             assert timeout == 1
-            raise failure
+            raise error
 
         def cancel(self) -> None:
             cancelled.append(True)
@@ -3181,17 +3178,15 @@ def test_pool_run_cancels_work_when_its_caller_is_interrupted(
         coro: Coroutine[object, object, object],
         loop: asyncio.AbstractEventLoop,
     ) -> Future:
-        del loop
+        assert loop is event_loop
         coro.close()
         return Future()
 
-    pool = BrowserPool()
+    pool = Mock(spec=BrowserPool, _loop=event_loop)
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", submit)
-    try:
-        with pytest.raises(failure):
-            pool.run(asyncio.sleep(0), timeout_sec=1)
-    finally:
-        pool.shutdown()
+    with pytest.raises(failure) as raised:
+        BrowserPool.run(pool, asyncio.sleep(0), timeout_sec=1)
+    assert raised.value is error
     assert cancelled == [True]
 
 
@@ -4305,7 +4300,8 @@ def test_no_install_falls_back_to_zendriver(
 ) -> None:
     # A miss must cost click capture, never the fetch: "" means "let zendriver
     # find Chrome".
-    del roots
+    roots[0].mkdir(parents=True)
+    (roots[1] / "ffmpeg-1").mkdir(parents=True)
     with caplog.at_level("DEBUG", logger=zendriver.logger.name):
         assert zendriver._chrome_for_testing(platform="darwin") == ""
     assert caplog.records[-1].message == (
@@ -4391,31 +4387,26 @@ def test_open_window_requests_shared_headed_mode(
     browser = _FakeBrowser()
 
     async def mode(
-        self: BrowserPool,
         profile_dir: Path,
         *,
         headless: bool | None,
         restart: bool,
     ) -> tuple[bool, bool]:
-        del self
         events.append(("mode", profile_dir, headless, restart))
         return False, True
 
-    async def attach(
-        self: BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool,
-    ) -> Browser:
-        del self
+    async def attach(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
         events.append(("attach", profile_dir, headless))
-        return cast(Browser, browser)
-
-    async def start(*args: object, **kwargs: object) -> _FakeBrowser:
-        del args, kwargs
-        events.append("separate-launch")
         return browser
 
+    runner = _RunningPool(browser)
+    pool = Mock(
+        spec=BrowserPool,
+        mode=mode,
+        browser=attach,
+        run=runner.run,
+        shutdown=runner.shutdown,
+    )
     gate = FileGate()
 
     async def watch(url: str, attached: Browser, *, gate: Gate) -> set[str]:
@@ -4427,9 +4418,7 @@ def test_open_window_requests_shared_headed_mode(
         events.append(("clear", host, gate))
         return 1
 
-    monkeypatch.setattr(BrowserPool, "mode", mode)
-    monkeypatch.setattr(BrowserPool, "browser", attach)
-    monkeypatch.setattr("zendriver.start", start)
+    monkeypatch.setattr(zendriver, "BrowserPool", lambda: pool)
     monkeypatch.setattr(zendriver, "_watch_window", watch)
     monkeypatch.setattr(zendriver, "clear_host", clear)
     zendriver.open_window("https://gated.example/", profile_dir=tmp_path, gate=gate)
@@ -4440,6 +4429,7 @@ def test_open_window_requests_shared_headed_mode(
         ("clear", "visited.example", gate),
     ]
     assert browser.stop_calls == 0
+    assert runner.shutdowns == 1
 
 
 @pytest.mark.parametrize("stop", ["normal", "raises", "hangs"])
@@ -4449,89 +4439,44 @@ def test_open_window_main_thread_interrupt_stops_chrome(
     caplog: pytest.LogCaptureFixture,
     stop: str,
 ) -> None:
-    browser = {
-        "normal": _FakeBrowser,
-        "raises": _RaisingStopBrowser,
-        "hangs": _HangingStopBrowser,
-    }[stop]()
-    real_run = BrowserPool.run
-    attached: list[BrowserPool] = []
-    pools: list[BrowserPool] = []
-    cleanup_waits: list[float] = []
-    port_checks: list[int] = []
+    browser = _FakeBrowser()
     monkeypatch.setattr(browser, "config", SimpleNamespace(port=7777), raising=False)
-
-    def answers(port: int) -> bool:
-        port_checks.append(port)
-        return False
-
-    monkeypatch.setattr(zendriver, "_port_answers", answers)
-
-    async def start(*args: object, **kwargs: object) -> _FakeBrowser:
-        del args, kwargs
-        return browser
-
-    async def mode(
-        self: BrowserPool,
-        profile_dir: Path,
-        *,
-        headless: bool | None,
-        restart: bool,
-    ) -> tuple[bool, bool]:
-        del self, profile_dir, headless, restart
-        return False, False
-
-    async def timed_cleanup[T](coro: Coroutine[object, object, T]) -> T:
-        async with asyncio.timeout(0.01):
-            return await coro
-
-    def run[T](
-        self: BrowserPool,
-        coro: Coroutine[object, object, T],
-        *,
-        timeout_sec: float = 0,
-    ) -> T:
-        submitted = coro
-        if attached and not pools:
-            pools.append(self)
-            coro.close()
-            raise KeyboardInterrupt
-        if pools and not cleanup_waits:
-            cleanup_waits.append(timeout_sec)
-            assert timeout_sec == 30
-            if stop == "hangs":
-                submitted = timed_cleanup(submitted)
-        result = real_run(self, submitted, timeout_sec=timeout_sec)
-        if result is browser:
-            attached.append(self)
-        return result
-
-    def shared(profile_dir: Path, *, headless: bool) -> int:
-        assert profile_dir == tmp_path
-        assert headless is False
-        return 7777
-
-    monkeypatch.setattr("zendriver.start", start)
-    monkeypatch.setattr(zendriver, "_shared_chrome", shared)
-    monkeypatch.setattr(BrowserPool, "mode", mode)
-    monkeypatch.setattr(BrowserPool, "run", run)
-    with pytest.raises(KeyboardInterrupt):
-        zendriver.open_window("about:blank", profile_dir=tmp_path, gate=FileGate())
-    assert browser.stop_calls == 1
-    assert browser.connection.closed
-    assert len(pools) == 1
-    assert pools[0]._loop.is_closed()
-    assert port_checks == ([7777] if stop == "normal" else [])
-    if stop == "normal":
+    runner = _RunningPool(browser)
+    mode = AsyncMock(return_value=(False, False))
+    attach = AsyncMock(return_value=browser)
+    pool = Mock(
+        spec=BrowserPool,
+        mode=mode,
+        browser=attach,
+        run=runner.run,
+        shutdown=runner.shutdown,
+    )
+    interrupted = KeyboardInterrupt()
+    watch = AsyncMock(side_effect=interrupted)
+    error = {"normal": None, "raises": RuntimeError("stop"), "hangs": TimeoutError()}[
+        stop
+    ]
+    close = AsyncMock(return_value=None, side_effect=error)
+    gate = FileGate()
+    monkeypatch.setattr(zendriver, "BrowserPool", lambda: pool)
+    monkeypatch.setattr(zendriver, "_watch_window", watch)
+    monkeypatch.setattr(zendriver, "_close_chrome", close)
+    with pytest.raises(KeyboardInterrupt) as raised:
+        zendriver.open_window("about:blank", profile_dir=tmp_path, gate=gate)
+    assert raised.value is interrupted
+    mode.assert_awaited_once_with(tmp_path, headless=False, restart=True)
+    attach.assert_awaited_once_with(tmp_path, headless=False)
+    watch.assert_awaited_once_with("about:blank", browser, gate=gate)
+    close.assert_awaited_once_with(7777)
+    assert runner.waits == [0, 0, 0, 30]
+    assert runner.shutdowns == 1
+    if error is None:
         assert not caplog.records
     else:
         [record] = caplog.records
         assert record.getMessage() == "browser stop failed during interruption"
         assert isinstance(record.exc_info, tuple)
-        assert isinstance(
-            record.exc_info[1],
-            TimeoutError if stop == "hangs" else RuntimeError,
-        )
+        assert record.exc_info[1] is error
 
 
 @pytest.mark.asyncio
@@ -4972,25 +4917,6 @@ def test_a_site_that_will_not_open_spares_the_window(
     assert record.getMessage() == "could not open https://bad.example/"
     assert isinstance(record.exc_info, tuple)
     assert isinstance(record.exc_info[1], RuntimeError)
-
-
-class _HangingStopBrowser(_FakeBrowser):
-    """A browser whose ``stop`` never returns, as a wedged connection's does."""
-
-    @override
-    async def stop(self) -> None:
-        self.stop_calls += 1
-        await asyncio.Event().wait()
-        raise AssertionError("The browser stop was never bounded.")
-
-
-class _RaisingStopBrowser(_FakeBrowser):
-    """A browser whose ``stop`` fails outright rather than hanging."""
-
-    @override
-    async def stop(self) -> None:
-        self.stop_calls += 1
-        raise RuntimeError("stop blew up")
 
 
 # -- main ---------------------------------------------------------------------

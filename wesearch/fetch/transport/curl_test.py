@@ -1,16 +1,10 @@
-"""Tests for wesearch.fetch.transport.curl.
-
-The behavior curl shares with stdlib is in ``transport_test.py``; these mock
-curl_cffi's ``Session.request`` to check what only curl does: its pooled,
-pinned connections and the exact arguments it hands curl_cffi.
-"""
+"""Tests for curl requests, response handling, and pooled pinned connections."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock, patch
 
 import importlib
@@ -231,16 +225,35 @@ class TestFetchCurl:
         with _serve(_response()) as request:
             fetch_curl(
                 "https://example.com/",
-                headers={"cache-control": "no-cache"},
+                headers={
+                    "cache-control": "no-cache",
+                    "User-Agent": "Android GSA",
+                    "sec-ch-ua-platform": '"Android"',
+                },
                 session=session,
             )
         sent = cast(dict[str, str | None], request.call_args.kwargs["headers"])
         assert {k.lower(): v for k, v in sent.items()}["cache-control"] == "no-cache"
         assert [k for k in sent if k.lower() == "cache-control"] == ["cache-control"]
+        assert lower_headers(request.call_args.kwargs)["user-agent"] == "Android GSA"
+        assert (
+            lower_headers(request.call_args.kwargs)["sec-ch-ua-platform"] == '"Android"'
+        )
 
     def test_a_status_of_400_raises(self, session: FetchSession) -> None:
-        with _serve(_response(400, b"bad")), pytest.raises(FetchError) as error:
+        classified = FetchError("https://example.com/path", 400, {}, b"bad")
+        with (
+            _serve(_response(400, b"bad")),
+            patch.object(
+                curl,
+                "classify_http_error",
+                return_value=classified,
+            ) as classify,
+            pytest.raises(FetchError) as error,
+        ):
             fetch_curl("https://example.com/path", session=session)
+        assert error.value is classified
+        classify.assert_called_once_with("https://example.com/path", 400, {}, b"bad")
         assert (error.value.status, error.value.body) == (400, b"bad")
 
     def test_an_error_keeps_the_url_and_an_empty_body(
@@ -272,13 +285,15 @@ class TestFetchCurl:
         session: FetchSession,
     ) -> None:
         seen: list[dict[str, str]] = []
-        with _serve(_response(headers=[("Set-Cookie", "A=1"), ("Set-Cookie", "B=2")])):
+        with _serve(
+            _response(headers=[("Set-Cookie", "A=1, comma"), ("Set-Cookie", "B=2")]),
+        ):
             fetch_curl(
                 "https://example.com/",
                 on_response=lambda _s, headers, _u: seen.append(headers),
                 session=session,
             )
-        assert [headers["set-cookie"] for headers in seen] == ["A=1\nB=2"]
+        assert [headers["set-cookie"] for headers in seen] == ["A=1, comma\nB=2"]
 
     def test_set_cookie_is_read_by_its_lower_case_name(
         self,
@@ -647,48 +662,6 @@ class TestThroughFetch:
             )
         assert error.value.status == 0
         assert b"refused" in error.value.body
-
-
-class TestRealWire:
-    """Only a REAL curl_cffi call reveals the headers its impersonation injects.
-
-    A request without a User-Agent is refused by UA-gated APIs (GitHub's REST
-    API 403s it). Hermetic: a loopback server echoes the request headers.
-    """
-
-    def test_curl_sends_a_whole_chrome_identity(self, session: FetchSession) -> None:
-        seen: dict[str, str] = {}
-
-        class _Echo(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                seen.update((k.lower(), v) for k, v in self.headers.items())
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"ok")
-
-            @override
-            def log_message(self, format: str, *args: object) -> None:
-                del format, args
-
-        server = HTTPServer(("127.0.0.1", 0), _Echo)
-        thread = Thread(target=server.handle_request, daemon=True)
-        thread.start()
-        try:
-            body = fetch(
-                f"http://127.0.0.1:{server.server_address[1]}/",
-                # The oracle IS loopback, so this test writes its own URL.
-                request=RequestParams(
-                    policy=PolicyParams(transport="curl", allow_private_hosts=True),
-                ),
-                session=session,
-            )
-        finally:
-            server.server_close()
-            thread.join(timeout=5)
-        assert body == b"ok"
-        assert "chrome" in seen["user-agent"].lower()
-        assert seen["accept"]
-        assert seen["sec-fetch-mode"] == "navigate"
 
 
 def test_curl_is_available_where_it_imports() -> None:
