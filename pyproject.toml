@@ -275,7 +275,7 @@ do_not_mutate_patterns = [
 select = "ALL"
 fix = "ALL"
 # Each export sets its own package and directory policy.
-set = ["import-alias.first-party=wesearch", "test-footer.runner=wesearch.lib.testing.runner"]
+set = ["import-alias.first-party=wesearch", "test-footer.runner=wesearch.lib.testing.runner", "xdg-literal.helper=wesearch.lib.userdirs", "userdirs-namespace.namespace=rekursiv-ai"]
 exclude = [
     "**/third_party/** typings/** **/.export/typings/** **/torch-types/shed/**",
     """*_test.py **/tests/test*.py =
