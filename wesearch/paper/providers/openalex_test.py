@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import json
 
@@ -11,6 +11,7 @@ import pytest
 
 from wesearch.fetch import FetchSession
 from wesearch.paper.errors import BackendError, NotFoundError, RateLimitError
+from wesearch.paper.paginate import Page
 from wesearch.paper.providers import openalex
 from wesearch.types.errors import CooldownError, FetchError
 
@@ -612,105 +613,6 @@ class TestCitations:
         with pytest.raises(BackendError, match="DOIs only"):
             openalex.citations("arxiv", "1706.03762", limit=None)
 
-    def test_limit_over_page_max_paginates(self) -> None:
-        # BUG 1: a limit above the 200 per-page ceiling must paginate, never
-        # request per-page>200 (which OpenAlex 400s). Two 200-work pages satisfy
-        # a limit of 250; no single request may set per-page above 200.
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [{"id": "https://openalex.org/W1"}],
-        }
-        page1: dict[str, MutablePlainTree] = {
-            "meta": {"count": 500},
-            "results": [{"title": f"c{i}"} for i in range(200)],
-        }
-        page2: dict[str, MutablePlainTree] = {
-            "meta": {"count": 500},
-            "results": [{"title": f"c{200 + i}"} for i in range(200)],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(page1).encode(),
-            json.dumps(page2).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            records, total, complete = openalex.citations("doi", "10.1/x", limit=250)
-        assert len(records) == 250
-        assert total == 500
-        assert not complete
-        for request in fetch.requests:
-            params = request.content.params
-            assert params is not None
-            per_page = params.get("per-page")
-            assert per_page is None or isinstance(per_page, int)
-            assert per_page is None or per_page <= 200
-
-    def test_limit_none_reports_honest_completeness(self) -> None:
-        # BUG 2: with no limit, a single default page of 25 against a total of
-        # 500 is NOT complete. ``complete`` must mean "cursor exhausted", never
-        # be True merely because ``limit is None``.
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [{"id": "https://openalex.org/W1"}],
-        }
-        # One page shorter than ``count`` -> cursor not exhausted.
-        citing: dict[str, MutablePlainTree] = {
-            "meta": {"count": 500},
-            "results": [{"title": f"c{i}"} for i in range(200)],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(citing).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            _, total, complete = openalex.citations("doi", "10.1/x", limit=None)
-        assert total == 500
-        assert not complete
-
-    def test_exact_full_page_is_complete(self) -> None:
-        # BUG D: a full final page whose length equals the requested size but
-        # exhausts ``count`` must report complete=True. The len>=size heuristic
-        # alone lies here; exhaustion must consult ``meta.count``.
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [{"id": "https://openalex.org/W1"}],
-        }
-        citing: dict[str, MutablePlainTree] = {
-            "meta": {"count": 200},
-            "results": [{"title": f"c{i}"} for i in range(200)],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(citing).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            records, total, complete = openalex.citations("doi", "10.1/x", limit=None)
-        assert total == 200
-        assert len(records) == 200
-        assert complete  # Cursor exhausted: 200 of 200 returned.
-
-    def test_multi_page_exact_total_is_complete(self) -> None:
-        # Two full 200-pages reaching count=400 exactly: walking to limit=400
-        # exhausts the cursor and reports complete=True (no lying full-page).
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [{"id": "https://openalex.org/W1"}],
-        }
-        page1: dict[str, MutablePlainTree] = {
-            "meta": {"count": 400},
-            "results": [{"title": f"c{i}"} for i in range(200)],
-        }
-        page2: dict[str, MutablePlainTree] = {
-            "meta": {"count": 400},
-            "results": [{"title": f"c{200 + i}"} for i in range(200)],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(page1).encode(),
-            json.dumps(page2).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            records, total, complete = openalex.citations("doi", "10.1/x", limit=400)
-        assert total == 400
-        assert len(records) == 400
-        assert complete  # 400 of 400 -> cursor exhausted.
-
 
 def _fetch_returning(payload: object) -> _RecordingFetch:
     return _RecordingFetch(json.dumps(payload).encode())
@@ -976,36 +878,77 @@ class TestExactInternals:
         )
 
     def test_resolve_works_batches_and_forwards_transport(self) -> None:
-        payload = {"meta": {"count": 2}, "results": [{"title": "a"}, {"title": "b"}]}
-        fetch = _fetch_returning(payload)
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
+        pages = [
+            (Page(entries=[{"title": "a"}, {"title": "b"}], complete=True), 2),
+            (Page(entries=[{"title": "c"}], complete=True), 1),
+        ]
+        with patch.object(openalex, "_paginate_works", side_effect=pages) as paginate:
             records = openalex._resolve_works(
-                ["W1", "W2"],
+                ["W1", "W2", "W3"],
                 per_page_max=2,
                 transport="curl",
             )
-        assert [record.title for record in records] == ["a", "b"]
-        assert fetch.requests[0].policy.transport == "curl"
-        params = fetch.requests[0].content.params
-        assert params is not None
-        assert params["filter"] == "openalex:W1|W2"
+        assert [record.title for record in records] == ["a", "b", "c"]
+        assert paginate.call_args_list == [
+            call(
+                {"filter": "openalex:W1|W2"},
+                limit=2,
+                per_page_max=2,
+                transport="curl",
+                session=None,
+            ),
+            call(
+                {"filter": "openalex:W3"},
+                limit=2,
+                per_page_max=2,
+                transport="curl",
+                session=None,
+            ),
+        ]
 
-    def test_paginate_works_builds_page_params_and_total(self) -> None:
-        body: dict[str, MutablePlainTree] = {"meta": {"count": 1}, "results": [{}]}
-        with patch.object(openalex, "_get", return_value=body) as get:
+    @pytest.mark.parametrize(
+        ("limit", "count", "expected", "complete"),
+        [
+            (None, 3, ["a", "b"], False),
+            (None, 2, ["a", "b"], True),
+            (3, 5, ["a", "b", "c"], False),
+            (4, 4, ["a", "b", "c", "d"], True),
+        ],
+        ids=["one-page-incomplete", "one-page-complete", "capped", "exhausted"],
+    )
+    def test_paginate_works_builds_page_params_and_total(
+        self,
+        limit: int | None,
+        count: int,
+        expected: list[str],
+        complete: bool,
+    ) -> None:
+        bodies: list[dict[str, MutablePlainTree]] = [
+            {"meta": {"count": count}, "results": [{"title": "a"}, {"title": "b"}]},
+            {"meta": {"count": count}, "results": [{"title": "c"}, {"title": "d"}]},
+        ]
+        with patch.object(openalex, "_get", side_effect=bodies) as get:
             page, total = openalex._paginate_works(
                 {"filter": "x"},
-                limit=None,
+                limit=limit,
+                per_page_max=2,
                 transport="curl",
             )
-        assert total == 1
-        assert page.complete
-        get.assert_called_once()
-        assert get.call_args.args == (
-            "/works",
-            {"select": openalex._select(), "filter": "x", "page": 1, "per-page": 200},
-        )
-        assert get.call_args.kwargs == {"transport": "curl", "session": None}
+        assert page.entries == [{"title": title} for title in expected]
+        assert (total, page.complete) == (count, complete)
+        pages = 1 if limit is None else 2
+        assert get.call_count == pages
+        for page_no, invocation in enumerate(get.call_args_list, start=1):
+            assert invocation.args == (
+                "/works",
+                {
+                    "select": openalex._select(),
+                    "filter": "x",
+                    "page": page_no,
+                    "per-page": 2,
+                },
+            )
+            assert invocation.kwargs == {"transport": "curl", "session": None}
 
     def test_paginate_works_limit_zero_does_not_fetch(self) -> None:
         with patch.object(openalex, "_get") as get:
