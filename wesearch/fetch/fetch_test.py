@@ -2140,16 +2140,33 @@ class TestCurlThenZendriverBackend:
         assert browser.call_args.args == ("https://x.example/",)
         assert _sent_headers(browser) == {"X": "1", "Cookie": "c=2"}
 
-    def test_a_hostless_url_remembers_no_domain(self, session: FetchSession) -> None:
+    @pytest.mark.parametrize(
+        "block",
+        [
+            CloudflareChallengeError(),
+            FetchError("https:///x", 403, {"content-type": "text/html"}, b"Denied"),
+        ],
+        ids=["marked", "bare-html"],
+    )
+    def test_a_hostless_url_remembers_no_domain(
+        self,
+        session: FetchSession,
+        block: FetchError,
+    ) -> None:
         with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=CloudflareChallengeError(),
-            ),
+            patch("wesearch.fetch.fetch.fetch_curl", side_effect=block),
             patch.object(transport_routing, "remember_zendriver_domain") as remember,
-            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered"),
+            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered") as via,
         ):
-            fetch.fetch("https:///x", request=_curl_then_zendriver(), session=session)
+            assert (
+                fetch.fetch(
+                    "https:///x",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == b"rendered"
+            )
+        via.assert_called_once()
         remember.assert_not_called()
 
     def test_a_bodyless_post_to_a_learned_domain_stays_on_curl(

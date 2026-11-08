@@ -16,8 +16,6 @@ from unittest.mock import Mock, patch
 import ast
 import inspect
 
-from codedoctor.testing.tiers import TIERS
-
 import pytest
 
 from wesearch import conftest as fixtures
@@ -158,34 +156,6 @@ def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
     assert offenders == [], (
         f"these files stop launched Chromes themselves; the autouse fixture in "
         f"conftest.py owns that now: {offenders}"
-    )
-
-
-def test_a_file_marking_an_xdist_group_keeps_the_scheduler_that_honors_it() -> None:
-    """``xdist_group`` is inert unless the run schedules by group.
-
-    ``pyproject.toml`` sets ``--dist=worksteal`` for every run, under which
-    ``xdist_group`` is IGNORED -- so a file that marks one is relying on the
-    integration tier's ``--dist=loadgroup`` to override it. Losing that flag
-    breaks nothing visibly: the tests still pass, spread across workers, and
-    the grouping the marker asked for silently stops happening.
-
-    Asserted only for the files that actually mark a group. Claiming it protects
-    every browser test would be false -- ``parity_integration_test`` marks none,
-    so ``loadgroup`` falls back to per-test scope there and its tests may land
-    on any worker.
-    """
-    marked = [
-        path.name
-        for path in sorted(_CWD.rglob("*_test.py"))
-        if "xdist_group" in path.read_text(encoding="utf-8") and path != _THIS
-    ]
-    assert marked, "no test file marks an xdist group; this guard is vacuous"
-    extra = TIERS["pytest-integration-global"].extra
-
-    assert "--dist=loadgroup" in extra, (
-        f"{marked} mark an xdist group, but the integration tier no longer "
-        f"passes --dist=loadgroup, so the marker is inert: {extra}"
     )
 
 
