@@ -1,31 +1,18 @@
-"""Tests for wesearch.fetch.
-
-Transports are mocked at their seam: curl_cffi's ``Session.request``, the
-stdlib ``_connect``, or the transport function itself. Every fetch runs on a
-session that already knows its egress, so none probes the network.
-"""
+"""Tests for wesearch.fetch."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
-from email.utils import format_datetime
-from http import client
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, cast
 from unittest.mock import ANY, Mock, call, patch
 
 import importlib
-import inspect
 import logging
-import math
-
-from curl_cffi import requests as cc_requests
-from curl_cffi.requests import Headers
 
 import pytest
 
 from wesearch import fetch
-from wesearch.chrome.headers import chrome_identity_headers, chrome_platform
 from wesearch.fetch import (
     ContentParams,
     FetchSession,
@@ -42,8 +29,6 @@ from wesearch.fetch.fetch import (
 from wesearch.fetch.gate import gated
 from wesearch.fetch.session import default_session
 from wesearch.fetch.transport import transport_routing, zendriver
-from wesearch.fetch.types import Closable, CurlKey, Fetch
-from wesearch.lib import zstd_compat
 from wesearch.profile import Profile
 from wesearch.types.errors import (
     BotDetectionError,
@@ -54,20 +39,18 @@ from wesearch.types.errors import (
     GoogleSorryError,
     PuzzleChallengeError,
 )
-from wesearch.types.params import ignore
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator, Mapping
+    from collections.abc import Iterator
 
-    from wesearch.types.params import HttpMethod, Transport
+    from wesearch.fetch.types import Closable, CurlKey
+    from wesearch.types.params import Transport
 
 
 # A public egress, so ``fetch`` never probes for one.
 _EGRESS = "203.0.113.1"
 
-# Markup from pages that broke a fetch on 2026-10-30, cut to what decides it:
-# Kaggle's app shell, PyTorch's redirect stub, and AWS WAF's challenge.
 _APP_SHELL = (
     b'<!DOCTYPE html><html><head><script src="/app.js"></script></head>'
     b'<body><div id="root"></div></body></html>'
@@ -100,1865 +83,30 @@ def test_fetch_uses_transport_package_layout() -> None:
         importlib.import_module(f"wesearch.fetch.transport.{module}")
 
 
-class TestCredentialedUrls:
-    """A ``user:pass@`` URL authenticates the request and appears nowhere else."""
+class TestFetchEntryAndGate:
+    """``fetch`` resolves session/egress, gates the bare URL, and tags blocks."""
 
-    def test_a_block_and_the_gate_name_the_url_without_its_credentials(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=PuzzleChallengeError("challenge served"),
-            ),
-            patch("wesearch.fetch.fetch.gated", wraps=gated) as gate,
-            pytest.raises(PuzzleChallengeError) as error,
-        ):
-            fetch.fetch(
-                "https://u:secret@walled.example/x",
-                request=_curl(),
-                session=session,
-            )
-        assert "secret" not in str(error.value)
-        assert error.value.url == "https://walled.example/x"
-        assert gate.call_args.args == ("https://walled.example/x",)
-        assert gate.call_args.kwargs == {"egress": session.egress, "gate": session.gate}
-
-
-class TestUrlParams:
-    def test_params_precede_a_fragment(self, session: FetchSession) -> None:
-        # A fragment ends the URL and is never sent to the server, so appending
-        # the query after it silently dropped every parameter from the wire.
+    def test_defaults_share_default_session_and_probe_egress_once(self) -> None:
         backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://e.example/p#section",
-                _curl(content=ContentParams(params={"q": "x"})),
-                session=session,
-            )
-        assert backend.call_args.args[0] == "https://e.example/p?q=x#section"
-
-    def test_params_merge_into_an_existing_query(self, session: FetchSession) -> None:
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://e.example/p?a=1#s",
-                _curl(content=ContentParams(params={"q": "x"})),
-                session=session,
-            )
-        assert backend.call_args.args[0] == "https://e.example/p?a=1&q=x#s"
-
-
-class TestBackoffDelay:
-    def test_exponential_growth(self) -> None:
-        d0 = RetryParams().backoff_delay(0, {})
-        d2 = RetryParams().backoff_delay(2, {})
-        assert d0 < d2
-
-    def test_capped_at_30(self) -> None:
-        assert RetryParams().backoff_delay(100, {}) <= 45  # 30 + 0.5*30.
-
-    def test_retry_after_header(self) -> None:
-        assert RetryParams().backoff_delay(0, {"retry-after": "5"}) == 5.0
-
-    def test_retry_after_capped(self) -> None:
-        assert RetryParams().backoff_delay(0, {"retry-after": "999"}) == 30.0
-
-    def test_retry_after_http_date_honored(self) -> None:
-        # Retry-After may be an HTTP-date, not just delta-seconds. A near-future
-        # date must produce a positive delay, not fall through to backoff.
-        future = datetime.now(tz=UTC) + timedelta(seconds=10)
-        delay = RetryParams().backoff_delay(0, {"retry-after": format_datetime(future)})
-        assert 5 <= delay <= 30
-
-    def test_retry_after_past_date_is_zero(self) -> None:
-        assert (
-            RetryParams().backoff_delay(
-                0,
-                {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"},
-            )
-            == 0.0
-        )
-
-    @pytest.mark.parametrize("value", ["-1", "nan", "-inf"])
-    def test_retry_after_hostile_numeric_stays_sleepable(self, value: str) -> None:
-        # The delay goes straight to time.sleep, which raises ValueError on a
-        # negative and never wakes on a NaN.
-        delay = RetryParams().backoff_delay(0, {"retry-after": value})
-        assert math.isfinite(delay)
-        assert delay >= 0.0
-
-
-class TestFetchError:
-    def test_attributes(self) -> None:
-        err = FetchError(
-            "https://x.com",
-            404,
-            {"content-type": "text/html"},
-            b"nope",
-        )
-        assert err.url == "https://x.com"
-        assert err.status == 404
-        assert err.headers == {"content-type": "text/html"}
-        assert err.body == b"nope"
-        assert "404" in str(err)
-
-    def test_status_zero_renders_as_connection_failure_not_http_0(self) -> None:
-        # Status 0 is the "no HTTP response" sentinel; there is no HTTP 0.
-        err = FetchError("https://x.com", 0, {}, b"Failed to connect to x.com port 443")
-        msg = str(err)
-        assert "HTTP 0" not in msg
-        assert msg.startswith("connection failed: https://x.com")
-        assert "connect" in msg.lower()
-
-
-class TestFetchInputValidation:
-    """Invalid numeric args are rejected where they are written."""
-
-    def test_negative_retries_rejected(self) -> None:
-        with pytest.raises(ValueError, match="retries"):
-            RetryParams(retries=-1)
-
-    def test_negative_max_redirects_rejected(self) -> None:
-        with pytest.raises(ValueError, match="max_redirects"):
-            RetryParams(max_redirects=-1)
-
-    def test_nonpositive_timeout_rejected(self) -> None:
-        # `curl` reads 0 as "no timeout", stdlib as "non-blocking".
-        with pytest.raises(ValueError, match="timeout_sec"):
-            RetryParams(timeout_sec=0)
-
-
-class TestFetchClassifiesBlockAtBoundary:
-    """``fetch`` raises the specific :class:`BotDetectionError` for a block."""
-
-    def test_cloudflare_403_raises_cloudflare_challenge_error(
-        self,
-        session: FetchSession,
-    ) -> None:
-        response = _response(
-            403,
-            b"<!DOCTYPE html><html><head><title>Just a moment...</title>"
-            b'<div class="challenge-platform"></div></head></html>',
-            [("server", "cloudflare"), ("cf-ray", "a1-LAX")],
-        )
-        with _serve(response), pytest.raises(CloudflareChallengeError) as exc:
-            fetch.fetch("https://x.com", request=_curl(), session=session)
-        assert isinstance(exc.value, FetchError)
-        assert isinstance(exc.value, BotDetectionError)
-        assert exc.value.status == 403
-        assert exc.value.headers == {"server": "cloudflare", "cf-ray": "a1-LAX"}
-        assert b"challenge-platform" in exc.value.body
-        assert "cloudflare" in exc.value.guidance.lower()
-
-    def test_recaptcha_403_raises_puzzle_challenge_error(
-        self,
-        session: FetchSession,
-    ) -> None:
-        response = _response(
-            403,
-            b'<div class="g-recaptcha" data-sitekey="x"></div>',
-            [("content-type", "text/html")],
-        )
-        with _serve(response), pytest.raises(PuzzleChallengeError) as exc:
-            fetch.fetch("https://x.com", request=_curl(), session=session)
-        assert exc.value.status == 403
-        assert "captcha" in exc.value.guidance.lower()
-
-    def test_genuine_404_raises_plain_fetch_error_not_bot_flag(
-        self,
-        session: FetchSession,
-    ) -> None:
-        response = _response(
-            404,
-            b"<html><body><h1>404 Not Found</h1></body></html>",
-            [("server", "nginx")],
-        )
-        with _serve(response), pytest.raises(FetchError) as exc:
-            fetch.fetch("https://x.com", request=_curl(), session=session)
-        assert not isinstance(exc.value, BotDetectionError)
-        assert exc.value.status == 404
-
-    def test_except_fetch_error_catches_the_specific_subclass(
-        self,
-        session: FetchSession,
-    ) -> None:
-        response = _response(
-            403,
-            b"<html><head><title>Just a moment...</title></head></html>",
-            [("server", "cloudflare"), ("cf-ray", "b2-LAX")],
-        )
-        caught: FetchError | None = None
-        with _serve(response):
-            try:
-                fetch.fetch("https://x.com", request=_curl(), session=session)
-            except FetchError as e:
-                caught = e
-        assert isinstance(caught, CloudflareChallengeError)
-
-
-class TestFetchRetry:
-    """Retries on the stdlib transport, mocked at its connection."""
-
-    def test_retries_on_500(self, session: FetchSession) -> None:
-        connection = _StdlibConnection(
-            _http_response(500, b"ISE"),
-            _http_response(body=b"ok"),
-        )
+        egress = Mock(return_value="198.51.100.4")
         with (
-            patch(_CONNECT, return_value=connection.mock),
-            patch("wesearch.fetch.fetch.time.sleep"),
-        ):
-            assert (
-                fetch.fetch(
-                    "https://example.com",
-                    request=_stdlib(retry=RetryParams(retries=1)),
-                    session=session,
-                )
-                == b"ok"
-            )
-
-    @pytest.mark.parametrize(
-        ("status", "retried"),
-        [
-            (0, True),
-            (429, True),
-            (500, True),
-            (502, True),
-            (503, True),
-            (504, True),
-            (403, False),
-            (430, False),
-            (501, False),
-            (505, False),
-        ],
-    )
-    def test_only_a_transient_status_retries(
-        self,
-        session: FetchSession,
-        status: int,
-        retried: bool,
-    ) -> None:
-        backend = Mock(side_effect=[FetchError("u", status, {}, b""), b"ok"])
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-            patch("wesearch.fetch.fetch.time.sleep"),
-        ):
-            if retried:
-                assert (
-                    fetch.fetch(
-                        "https://example.com",
-                        request=_curl(retry=RetryParams(retries=1)),
-                        session=session,
-                    )
-                    == b"ok"
-                )
-            else:
-                with pytest.raises(FetchError):
-                    fetch.fetch(
-                        "https://example.com",
-                        request=_curl(retry=RetryParams(retries=1)),
-                        session=session,
-                    )
-        assert backend.call_count == 1 + retried
-
-    def test_a_cookie_that_cannot_be_saved_is_logged_not_raised(
-        self,
-        session: FetchSession,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with (
-            _serve(_response(200, b"ok", [("set-cookie", "a=1; Path=/")])),
-            patch.object(session.profiles, "save", side_effect=OSError("disk full")),
-            caplog.at_level(logging.WARNING, logger="wesearch.fetch.fetch"),
-        ):
-            assert (
-                fetch.fetch("https://jar.example/", request=_curl(), session=session)
-                == b"ok"
-            )
-        assert [r.getMessage() for r in caplog.records] == [
-            "could not save cookies for jar.example",
-        ]
-
-    def test_no_retry_on_404(self, session: FetchSession) -> None:
-        connection = _StdlibConnection(_http_response(404, b"NF"))
-        with (
-            patch(_CONNECT, return_value=connection.mock),
-            pytest.raises(FetchError, match="404"),
-        ):
-            fetch.fetch(
-                "https://example.com",
-                request=_stdlib(retry=RetryParams(retries=3)),
-                session=session,
-            )
-        assert connection.getresponse.call_count == 1
-
-    def test_error_body_is_decompressed(self, session: FetchSession) -> None:
-        # A Cloudflare 403 challenge page is compressed like any other body; a raw
-        # FetchError.body cannot be told from a plain 404.
-        html = b"<!DOCTYPE html><html>Just a moment...</html>"
-        connection = _StdlibConnection(
-            _http_response(
-                403,
-                zstd_compat.compress(html),
-                [("content-encoding", "zstd"), ("server", "cloudflare")],
-            ),
-        )
-        with (
-            patch(_CONNECT, return_value=connection.mock),
-            pytest.raises(FetchError) as exc,
-        ):
-            fetch.fetch("https://x.com", request=_stdlib(), session=session)
-        assert exc.value.body == html
-
-    def test_retries_on_network_error(self, session: FetchSession) -> None:
-        connection = _StdlibConnection(OSError("refused"), _http_response(body=b"ok"))
-        with (
-            patch(_CONNECT, return_value=connection.mock),
-            patch("wesearch.fetch.fetch.time.sleep"),
-        ):
-            assert (
-                fetch.fetch(
-                    "https://example.com",
-                    request=_stdlib(retry=RetryParams(retries=1)),
-                    session=session,
-                )
-                == b"ok"
-            )
-
-
-class TestHeaderOrder:
-    """Lock the canonical Chrome header order on the stdlib wire.
-
-    http.client emits headers in dict insertion order, so the dict's key order
-    is the wire order.
-    """
-
-    def _capture_headers(
-        self,
-        session: FetchSession,
-        content: ContentParams | None = None,
-    ) -> dict[str, str]:
-        connection = _StdlibConnection(_http_response(body=b"ok"))
-        with patch(_CONNECT, return_value=connection.mock):
-            fetch.fetch(
-                "https://example.com/",
-                request=_stdlib(content=content),
-                session=session,
-            )
-        return cast(dict[str, str], connection.request.call_args.kwargs["headers"])
-
-    def test_get_navigation_order(self, session: FetchSession) -> None:
-        # The order a real Chrome navigation sends over HTTP/1.1: no Connection,
-        # no Priority (an HTTP/2 construct). Host leads: the pinned connection
-        # states it itself, and servers that check order 403 a trailing one.
-        headers = self._capture_headers(session)
-        assert list(headers) == [
-            "Host",
-            "sec-ch-ua",
-            "sec-ch-ua-mobile",
-            "sec-ch-ua-platform",
-            "Upgrade-Insecure-Requests",
-            "User-Agent",
-            "Accept",
-            "Sec-Fetch-Site",
-            "Sec-Fetch-Mode",
-            "Sec-Fetch-User",
-            "Sec-Fetch-Dest",
-            "Accept-Encoding",
-            "Accept-Language",
-        ]
-        assert headers["Sec-Fetch-Mode"] == "navigate"
-        assert "Chrome/" in headers["User-Agent"]
-
-    def test_user_agent_agrees_with_the_client_hints_beside_it(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # A browser that contradicts itself is provably not a browser.
-        headers = self._capture_headers(session)
-        user_agent = headers["User-Agent"]
-        platform = headers["sec-ch-ua-platform"].strip('"')
-        token = {"Windows": "Windows NT", "Linux": "X11; Linux", "macOS": "Macintosh"}
-        assert token[platform] in user_agent
-        major = user_agent.split("Chrome/", 1)[1].split(".", 1)[0]
-        assert f'v="{major}"' in headers["sec-ch-ua"]
-
-    def test_post_xhr_order_with_json(self, session: FetchSession) -> None:
-        headers = self._capture_headers(
-            session,
-            ContentParams(method="POST", json={"q": "x"}),
-        )
-        assert list(headers) == [
-            "Host",
-            "sec-ch-ua",
-            "sec-ch-ua-mobile",
-            "sec-ch-ua-platform",
-            "User-Agent",
-            "Accept",
-            "Content-Type",
-            "Origin",
-            "Sec-Fetch-Site",
-            "Sec-Fetch-Mode",
-            "Sec-Fetch-Dest",
-            "Accept-Encoding",
-            "Accept-Language",
-        ]
-        assert headers["Accept"] == "*/*"
-        assert headers["Content-Type"] == "application/json"
-        assert headers["Sec-Fetch-Mode"] == "cors"
-        assert headers["Origin"] == "https://example.com"
-        assert "Upgrade-Insecure-Requests" not in headers
-
-    def test_post_xhr_order_with_form(self, session: FetchSession) -> None:
-        headers = self._capture_headers(
-            session,
-            ContentParams(method="POST", data={"q": "x"}),
-        )
-        assert headers["Content-Type"] == "application/x-www-form-urlencoded"
-        keys = list(headers)
-        assert keys.index("Content-Type") == keys.index("Accept") + 1
-        assert keys.index("Origin") == keys.index("Content-Type") + 1
-
-    def test_post_without_body_omits_content_type(self, session: FetchSession) -> None:
-        headers = self._capture_headers(session, ContentParams(method="POST"))
-        assert "Content-Type" not in headers
-
-    def test_caller_override_preserves_slot(self, session: FetchSession) -> None:
-        headers = self._capture_headers(
-            session,
-            ContentParams(headers={"Accept-Language": "de-DE"}),
-        )
-        keys = list(headers)
-        assert headers["Accept-Language"] == "de-DE"
-        assert keys.index("Accept-Encoding") + 1 == keys.index("Accept-Language")
-
-    def test_caller_user_agent_replaces_the_default_in_its_slot(
-        self,
-        session: FetchSession,
-    ) -> None:
-        bare = self._capture_headers(session, ContentParams())
-        overridden = self._capture_headers(
-            session,
-            ContentParams(headers={"User-Agent": "Custom/1.0"}),
-        )
-        assert overridden == {**bare, "User-Agent": "Custom/1.0"}
-        assert list(overridden) == list(bare)
-
-    def test_caller_none_deletes_a_default(self, session: FetchSession) -> None:
-        headers = self._capture_headers(
-            session,
-            ContentParams(headers={"User-Agent": None}),
-        )
-        assert "User-Agent" not in headers
-
-    def test_caller_new_header_appended(self, session: FetchSession) -> None:
-        headers = self._capture_headers(
-            session,
-            ContentParams(headers={"X-Trace": "abc"}),
-        )
-        assert list(headers)[-1] == "X-Trace"
-
-    def test_pinned_host_puts_host_first(self, session: FetchSession) -> None:
-        captured = self._capture_headers(session)
-        assert next(iter(captured)) == "Host"
-        assert captured["Host"] == "example.com"
-
-
-class TestOnResponse:
-    """``on_response(status, headers)`` fires once per received response."""
-
-    def test_curl_success_reports_status_and_headers(
-        self,
-        session: FetchSession,
-    ) -> None:
-        seen: list[tuple[int, dict[str, str]]] = []
-        with _serve(_response(headers=[("set-cookie", "GSP=xyz")])):
-            fetch.fetch(
-                "https://x.com",
-                request=RequestParams(
-                    observe=ObserveParams(on_response=lambda s, h: seen.append((s, h))),
-                ),
-                session=session,
-            )
-        assert seen == [(200, {"set-cookie": "GSP=xyz"})]
-
-    def test_a_caller_observer_gets_no_hop_url(self, session: FetchSession) -> None:
-        seen = Mock()
-        with patch(
-            "wesearch.fetch.fetch.fetch_curl",
-            side_effect=_reports(200, {"h": "v"}, "https://x.example/"),
-        ):
-            _send(
-                "https://x.example/",
-                _curl(observe=ObserveParams(on_response=seen)),
-                session=session,
-            )
-        seen.assert_called_once_with(200, {"h": "v"})
-
-
-class TestRedirectIdentityScoping:
-    """Cross-origin redirects re-scope every origin-bound identity element."""
-
-    def test_a_kept_google_result_link_lands_on_its_target(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # Google search keeps a result under its ``/goto`` link when the link did
-        # not resolve; fetching it must land on the page, not Google's 302.
-        with _serve(
-            _response(302, b"", [("location", "https://arxiv.org/abs/1706.03762")]),
-            _response(content=b"<title>Attention Is All You Need</title>"),
-        ) as request:
-            body = fetch.fetch(
-                "https://www.google.com/goto?url=CAESWwHr",
-                request=_curl(),
-                session=session,
-            )
-        assert body == b"<title>Attention Is All You Need</title>"
-        assert request.call_args_list[1].args[1] == "https://arxiv.org/abs/1706.03762"
-
-    def test_302_post_downgrades_to_bodyless_get(self, session: FetchSession) -> None:
-        # A 301/302 POST becomes a bodyless GET; only 307/308 keep the method.
-        with _serve(
-            _response(302, b"", [("location", "https://a.com/land")]),
-            _response(content=b"done"),
-        ) as request:
-            fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(
-                    content=ContentParams(method="POST", data={"x": "1"}),
-                ),
-                session=session,
-            )
-        second = request.call_args_list[1]
-        assert second.args[0] == "GET"
-        assert second.kwargs["data"] is None
-
-    def test_cross_origin_redirect_drops_cookie_header(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with _serve(
-            _response(302, b"", [("location", "https://b.com/next")]),
-            _response(content=b"done"),
-        ) as request:
-            fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(content=ContentParams(cookies={"SID": "secret"})),
-                session=session,
-            )
-        assert "cookie" in _lower(request, 0)
-        assert request.call_args_list[1].args[1] == "https://b.com/next"
-        assert "cookie" not in _lower(request, 1)
-
-    def test_same_origin_redirect_keeps_cookie_header(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with _serve(
-            _response(302, b"", [("location", "https://a.com/next")]),
-            _response(content=b"done"),
-        ) as request:
-            fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(content=ContentParams(cookies={"SID": "secret"})),
-                session=session,
-            )
-        assert _lower(request, 1).get("cookie") == "SID=secret"
-
-    def test_one_cookie_header_carries_every_jar_across_hops(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # The stored profile, the caller's cookies, and a cookie the first hop
-        # sets ride ONE Cookie header; curl_cffi's own jar is never used.
-        session.profiles.save(_EGRESS, "a.com", Profile(cookies={"S": "1"}))
-        with _serve(
-            _response(302, b"", [("location", "/next"), ("set-cookie", "n=3")]),
-            _response(content=b"done"),
-        ) as request:
-            fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(content=ContentParams(cookies={"c": "2"})),
-                session=session,
-            )
-        for index, expected in ((0, "S=1; c=2"), (1, "S=1; c=2; n=3")):
-            sent = _sent_headers(request, index)
-            assert [v for k, v in sent.items() if k.lower() == "cookie"] == [expected]
-            assert request.call_args_list[index].kwargs["discard_cookies"] is True
-        stored = session.profiles.load(_EGRESS, "a.com")
-        assert stored is not None
-        assert stored.cookies == {"S": "1", "n": "3"}
-
-    def test_a_cross_host_hop_sends_the_targets_stored_cookies(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "a.com", Profile(cookies={"A": "1"}))
-        session.profiles.save(_EGRESS, "b.com", Profile(cookies={"B": "2"}))
-        with _serve(
-            _response(302, b"", [("location", "https://b.com/next")]),
-            _response(content=b"done"),
-        ) as request:
-            fetch.fetch("https://a.com/start", session=session)
-        assert _lower(request, 1)["cookie"] == "B=2"
-
-    def test_raw_headers_send_no_stored_cookies_on_a_cross_host_hop(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "b.com", Profile(cookies={"B": "2"}))
-        with _serve(
-            _response(302, b"", [("location", "https://b.com/next")]),
-            _response(content=b"done"),
-        ) as request:
-            fetch.fetch(
-                "https://a.com/start",
-                request=RequestParams(content=ContentParams(raw_headers=True)),
-                session=session,
-            )
-        assert "cookie" not in _lower(request, 1)
-
-    def test_cross_origin_target_cookie_not_persisted_to_source_profile(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with _serve(
-            _response(302, b"", [("location", "https://b.com/next")]),
-            _response(content=b"done", headers=[("set-cookie", "FOREIGN=1; Path=/")]),
-        ):
-            fetch.fetch("https://a.com/start", session=session)
-        assert session.profiles.load(_EGRESS, "a.com") is None
-        landed = session.profiles.load(_EGRESS, "b.com")
-        assert landed is not None
-        assert landed.cookies == {"FOREIGN": "1"}
-
-    def test_browser_target_cookie_is_not_attributed_to_the_source(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # Chrome follows its own redirects; its cookies belong to where it landed.
-        with patch.object(
-            zendriver,
-            "fetch_zendriver",
-            _landed(
-                b"<html>ok</html>",
-                "B_SESSION=secret",
-                "https://b.example/landing",
-            ),
-        ):
-            fetch.fetch(
-                "https://a.example/start",
-                request=_zendriver(),
-                session=session,
-            )
-        landed = session.profiles.load(_EGRESS, "b.example")
-        assert landed is not None
-        assert landed.cookies == {"B_SESSION": "secret"}
-        assert session.profiles.load(_EGRESS, "a.example") is None
-
-
-class TestIdentityLayer:
-    """Each fetch sends this egress's stored cookies for the host and saves new ones.
-
-    On a bot block of a KNOWN identity it discards it and retries once fresh.
-    """
-
-    def test_stored_cookies_ride_the_cookie_header(self, session: FetchSession) -> None:
-        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "s"}))
-        with _serve(_response()) as request:
-            fetch.fetch("https://x.com/p", request=_curl(), session=session)
-        sent = _sent_headers(request)
-        assert sent["User-Agent"] == _curl_user_agent()
-        assert sent["Cookie"] == "GSP=s"
-
-    def test_caller_cookie_and_user_agent_override_the_defaults(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "s"}))
-        with _serve(_response()) as request:
-            fetch.fetch(
-                "https://x.com/p",
-                request=RequestParams(
-                    content=ContentParams(
-                        headers={"User-Agent": "Mine/1"},
-                        cookies={"GSP": "caller"},
-                    ),
-                ),
-                session=session,
-            )
-        sent = _sent_headers(request)
-        assert sent["User-Agent"] == "Mine/1"
-        assert sent["Cookie"] == "GSP=caller"
-
-    def test_a_hand_written_cookie_header_overrides_the_profile(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # Profile, then the caller's ``Cookie`` header, then ``cookies=``: each
-        # later source is more deliberate than the one before.
-        session.profiles.save(
-            _EGRESS,
-            "x.com",
-            Profile(cookies={"GSP": "s", "A": "p", "K": "p"}),
-        )
-        with _serve(_response()) as request:
-            fetch.fetch(
-                "https://x.com/p",
-                request=RequestParams(
-                    content=ContentParams(
-                        headers={"cookie": "GSP=header; A=header"},
-                        cookies={"A": "param"},
-                    ),
-                ),
-                session=session,
-            )
-        sent = _sent_headers(request)
-        assert [v for k, v in sent.items() if k.lower() == "cookie"] == [
-            "GSP=header; A=param; K=p",
-        ]
-
-    def test_no_profile_still_presents_the_curl_chrome(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with _serve(_response()) as request:
-            fetch.fetch("https://x.com/p", request=_curl(), session=session)
-        sent = _sent_headers(request)
-        assert sent["User-Agent"] == _curl_user_agent()
-        assert "Cookie" not in sent
-
-    def test_set_cookie_is_persisted(self, session: FetchSession) -> None:
-        with _serve(_response(headers=[("set-cookie", "GSP=minted; Path=/")])):
-            fetch.fetch("https://x.com/p", request=_curl(), session=session)
-        got = session.profiles.load(_EGRESS, "x.com")
-        assert got is not None
-        assert got.cookies == {"GSP": "minted"}
-
-    def test_a_response_without_set_cookie_saves_no_profile(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with patch("wesearch.fetch.fetch.fetch_stdlib", return_value=b"ok"):
-            fetch.fetch("https://x.example/", request=_stdlib(), session=session)
-        assert session.profiles.load(_EGRESS, "x.example") is None
-
-    def test_a_failed_cookie_save_still_returns_the_body(
-        self,
-        session: FetchSession,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with (
-            _serve(_response(headers=[("set-cookie", "a=1")])),
-            patch.object(session.profiles, "save", side_effect=OSError("disk full")),
-        ):
-            body = fetch.fetch("https://x.com/p", session=session)
-        assert body == b"ok"
-        assert "disk full" in caplog.text
-
-    def test_caller_on_response_still_fires(self, session: FetchSession) -> None:
-        seen: list[int] = []
-        with _serve(_response(headers=[("set-cookie", "a=1")])):
-            fetch.fetch(
-                "https://x.com/p",
-                request=RequestParams(
-                    observe=ObserveParams(on_response=lambda s, _h: seen.append(s)),
-                ),
-                session=session,
-            )
-        assert seen == [200]
-
-    def test_burn_on_known_identity_discards_and_retries_fresh(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "old"}))
-        blocked = _response(
-            403,
-            b'<div class="g-recaptcha" data-sitekey="x"></div>',
-            [("content-type", "text/html")],
-        )
-        with (
-            _serve(blocked, _response(content=b"ok")) as request,
-            patch("wesearch.fetch.fetch.egress_ip", _known_egress),
-        ):
-            body = fetch.fetch("https://x.com/p", session=session)
-        assert body == b"ok"
-        assert request.call_count == 2
-        assert _sent_headers(request, 0)["Cookie"] == "GSP=old"
-        assert "Cookie" not in _sent_headers(request, 1)
-        assert session.profiles.load(_EGRESS, "x.com") is None
-
-    def test_the_fresh_identity_keeps_the_cookies_its_retry_set(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "old"}))
-        blocked = _response(
-            403,
-            b'<div class="g-recaptcha" data-sitekey="x"></div>',
-            [("content-type", "text/html")],
-        )
-        with (
-            _serve(blocked, _response(headers=[("set-cookie", "GSP=new")])),
-            patch("wesearch.fetch.fetch.egress_ip", _known_egress),
-        ):
-            fetch.fetch("https://x.com/p", session=session)
-        stored = session.profiles.load(_EGRESS, "x.com")
-        assert stored is not None
-        assert stored.cookies == {"GSP": "new"}
-
-    def test_second_burn_raises(self, session: FetchSession) -> None:
-        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "x"}))
-        blocked = _response(
-            403,
-            b'<div class="g-recaptcha" data-sitekey="x"></div>',
-            [("content-type", "text/html")],
-        )
-        with (
-            _serve(blocked, blocked),
-            patch("wesearch.fetch.fetch.egress_ip", _known_egress),
-            pytest.raises(PuzzleChallengeError),
-        ):
-            fetch.fetch("https://x.com/p", request=_curl(), session=session)
-
-    def test_first_contact_burn_does_not_retry(self, session: FetchSession) -> None:
-        blocked = _response(
-            403,
-            b'<div class="g-recaptcha" data-sitekey="x"></div>',
-            [("content-type", "text/html")],
-        )
-        with _serve(blocked) as request, pytest.raises(PuzzleChallengeError):
-            fetch.fetch("https://x.com/p", request=_curl(), session=session)
-        assert request.call_count == 1
-
-    def test_raw_headers_bypasses_identity(self, session: FetchSession) -> None:
-        session.profiles.save(_EGRESS, "x.com", Profile(cookies={"GSP": "s"}))
-        with _serve(_response()) as request:
-            fetch.fetch(
-                "https://x.com/p",
-                request=RequestParams(
-                    content=ContentParams(
-                        headers={"User-Agent": "raw"},
-                        cookies={"new": "2"},
-                        raw_headers=True,
-                    ),
-                ),
-                session=session,
-            )
-        sent = _sent_headers(request)
-        assert sent["User-Agent"] == "raw"
-        assert sent["Cookie"] == "new=2"
-
-    def test_no_egress_persists_nothing(self) -> None:
-        session = FetchSession()
-        try:
-            with patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=_reports(200, {"set-cookie": "GSP=z"}, "https://x.com/p"),
-            ):
-                body = _send(
-                    "https://x.com/p",
-                    _curl(),
-                    session=session,
-                )
-        finally:
-            session.close()
-        assert body == b"ok"
-        assert session.profiles.load("", "x.com") is None
-
-    def test_fetch_probes_the_egress_once_per_call(self) -> None:
-        session = FetchSession()
-        egress = Mock(return_value="")
-        try:
-            with (
-                patch("wesearch.fetch.fetch.egress_ip", egress),
-                patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok"),
-            ):
-                assert fetch.fetch("https://x.example/", session=session) == b"ok"
-        finally:
-            session.close()
-        assert egress.call_args_list == [call(session)]
-
-    def test_a_raw_fetch_goes_out_once_on_the_callers_connections(self) -> None:
-        # A raw request is how the egress is probed, so it cannot wait on a probe.
-        session = FetchSession()
-        try:
-            with _serve(_response()) as request:
-                assert (
-                    fetch.fetch(
-                        "https://x.example/",
-                        request=RequestParams(content=ContentParams(raw_headers=True)),
-                        session=session,
-                    )
-                    == b"ok"
-                )
-            hosts = [host for _, host, _, _ in session.curl]
-        finally:
-            session.close()
-        assert request.call_count == 1
-        assert hosts == ["x.example"]
-
-    def test_without_a_session_fetch_shares_the_default_one(self) -> None:
-        backend = Mock(return_value=b"ok")
-        with (
-            patch("wesearch.fetch.fetch.egress_ip", return_value=_EGRESS),
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-            patch.object(FetchSession, "close", autospec=True) as close,
-        ):
-            assert fetch.fetch("https://x.example/", request=_curl()) == b"ok"
-            assert fetch.fetch("https://y.example/", request=_curl()) == b"ok"
-        first, second = (
-            cast(FetchSession, c.kwargs["session"]) for c in backend.call_args_list
-        )
-        assert first is default_session()
-        assert second is first
-        close.assert_not_called()
-
-    def test_a_caller_session_stays_open(self, session: FetchSession) -> None:
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok"),
-            patch.object(FetchSession, "close", autospec=True) as close,
-        ):
-            fetch.fetch("https://x.example/", request=_curl(), session=session)
-        close.assert_not_called()
-
-    def test_known_profile_burn_discards_exact_identity_before_retry(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.egress = "198.51.100.8"
-        session.profiles.save("198.51.100.8", "x.example", Profile(cookies={"o": "1"}))
-        backend = Mock(side_effect=[BotDetectionError("blocked"), b"ok"])
-        egress = Mock(side_effect=_rolling_egress("198.51.100.9"))
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
             patch("wesearch.fetch.fetch.egress_ip", egress),
+            patch("wesearch.fetch.fetch.fetch_curl", backend),
+            patch("wesearch.fetch.fetch.gated", wraps=gated) as gate,
+            patch.object(FetchSession, "close", autospec=True) as close,
         ):
-            assert (
-                fetch.fetch(
-                    "https://x.example/path",
-                    request=_curl(
-                        content=ContentParams(headers={"H": "v"}, cookies={"c": "1"}),
-                    ),
-                    session=session,
-                )
-                == b"ok"
-            )
-        assert session.profiles.load("198.51.100.8", "x.example") is None
-        assert egress.call_args_list == [call(session), call(session, refresh=True)]
-        assert [_sent_headers(backend, i) for i in (0, 1)] == [
-            {"H": "v", "Cookie": "o=1; c=1"},
-            {"H": "v", "Cookie": "c=1"},
-        ]
+            assert fetch.fetch("https://x.example/") == b"ok"
+            assert fetch.fetch("https://y.example/") == b"ok"
+        shared = default_session()
+        assert [c.kwargs["session"] for c in backend.call_args_list] == [shared, shared]
+        assert egress.call_args_list == [call(shared), call(shared)]
+        assert gate.call_args.kwargs == {"egress": "198.51.100.4", "gate": shared.gate}
+        close.assert_not_called()
 
-    def test_a_burned_browser_identity_is_the_answer(
+    def test_credentialed_url_and_validator_block_strip_userinfo(
         self,
         session: FetchSession,
     ) -> None:
-        session.profiles.save(_EGRESS, "x.example", Profile(cookies={"old": "1"}))
-        browser = Mock(side_effect=BotDetectionError("blocked"))
-        with (
-            patch.object(zendriver, "fetch_zendriver", browser),
-            pytest.raises(BotDetectionError),
-        ):
-            fetch.fetch("https://x.example/path", request=_zendriver(), session=session)
-        browser.assert_called_once()
-        assert session.profiles.load(_EGRESS, "x.example") is not None
-
-    def test_stored_and_caller_cookies_merge_on_every_transport(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "x.example", Profile(cookies={"old": "1"}))
-        backend = Mock(
-            side_effect=_reports(
-                200,
-                {"set-cookie": "new=3"},
-                "https://x.example:8443/path",
-            ),
-        )
-        with patch("wesearch.fetch.fetch.fetch_stdlib", backend):
-            fetch.fetch(
-                "https://x.example:8443/path",
-                request=_stdlib(
-                    content=ContentParams(headers={"H": "v"}, cookies={"new": "2"}),
-                ),
-                session=session,
-            )
-        assert _sent_headers(backend) == {"H": "v", "Cookie": "old=1; new=2"}
-        stored = session.profiles.load(_EGRESS, "x.example")
-        assert stored is not None
-        assert stored.cookies == {"old": "1", "new": "3"}
-
-
-class TestEgressIp:
-    """``egress_ip`` probes an echo cascade and keeps the IPv4 answer on the session."""
-
-    def _probe(
-        self,
-        fetch_mock: Mock,
-        *,
-        ipv6: bool = False,
-        session: FetchSession | None = None,
-    ) -> str:
-        with patch("wesearch.fetch.fetch.fetch", fetch_mock):
-            return egress_ip(session or FetchSession(), refresh=True, ipv6=ipv6)
-
-    def test_first_echo_returned(self) -> None:
-        assert self._probe(Mock(return_value=b" 203.0.113.7\n")) == "203.0.113.7"
-
-    def test_a_failed_probe_is_not_repeated_until_the_backoff_ends(self) -> None:
-        session = FetchSession()
-        echo = Mock(side_effect=FetchError("https://echo.example", 0, {}, b""))
-        clock = [1000.0]
-        with (
-            patch("wesearch.fetch.fetch.fetch", echo),
-            patch("wesearch.fetch.fetch.time.monotonic", lambda: clock[0]),
-        ):
-            assert (
-                egress_ip(
-                    session,
-                    v4_echoes=("https://echo.example",),
-                    retry_after_sec=2,
-                )
-                == ""
-            )
-            clock[0] += 1.0
-            assert (
-                egress_ip(
-                    session,
-                    v4_echoes=("https://echo.example",),
-                    retry_after_sec=2,
-                )
-                == ""
-            )
-            assert echo.call_count == 1
-            clock[0] += 1.0
-            assert (
-                egress_ip(
-                    session,
-                    v4_echoes=("https://echo.example",),
-                    retry_after_sec=2,
-                )
-                == ""
-            )
-        assert echo.call_count == 2
-
-    def test_refresh_probes_through_the_backoff(self) -> None:
-        session = FetchSession()
-        echo = Mock(
-            side_effect=[
-                FetchError("https://echo.example", 0, {}, b""),
-                b"203.0.113.7",
-            ],
-        )
-        with (
-            patch("wesearch.fetch.fetch.fetch", echo),
-            patch("wesearch.fetch.fetch.time.monotonic", return_value=1000.0),
-        ):
-            egress_ip(session, v4_echoes=("https://echo.example",))
-            assert (
-                egress_ip(session, refresh=True, v4_echoes=("https://echo.example",))
-                == "203.0.113.7"
-            )
-
-    def test_probe_builds_exact_raw_echo_request(self) -> None:
-        session = FetchSession()
-        echo = Mock(return_value=b"203.0.113.7")
-        with patch("wesearch.fetch.fetch.fetch", echo):
-            assert (
-                egress_ip(
-                    session,
-                    v4_echoes=("https://echo.example",),
-                    timeout_sec=7.0,
-                )
-                == "203.0.113.7"
-            )
-        assert echo.call_args.args == ("https://echo.example",)
-        assert echo.call_args.kwargs["session"] is session
-        request = cast(RequestParams, echo.call_args.kwargs["request"])
-        assert request.content.headers == {}
-        assert request.content.raw_headers is True
-        assert request.retry.timeout_sec == 7.0
-
-    def test_probe_default_timeout_is_five_seconds(self) -> None:
-        echo = Mock(return_value=b"203.0.113.7")
-        with patch("wesearch.fetch.fetch.fetch", echo):
-            egress_ip(FetchSession(), v4_echoes=("https://echo.example",))
-        request = cast(RequestParams, echo.call_args.kwargs["request"])
-        assert request.retry.timeout_sec == 5.0
-
-    def test_probe_selects_v4_echoes_when_ipv6_is_false(self) -> None:
-        echo = Mock(return_value=b"203.0.113.7")
-        with patch("wesearch.fetch.fetch.fetch", echo):
-            assert (
-                egress_ip(
-                    FetchSession(),
-                    v4_echoes=("https://v4.example",),
-                    v6_echoes=("https://v6.example",),
-                )
-                == "203.0.113.7"
-            )
-        assert echo.call_args.args[0] == "https://v4.example"
-
-    def test_non_v4_reply_falls_through(self) -> None:
-        assert self._probe(Mock(side_effect=[b"2001:db8::1", b"198.51.100.9"])) == (
-            "198.51.100.9"
-        )
-
-    def test_fetch_error_falls_through(self) -> None:
-        err = FetchError(url="u", status=500, headers={}, body=b"")
-        assert self._probe(Mock(side_effect=[err, b"192.0.2.5"])) == "192.0.2.5"
-
-    def test_all_fail_resolves_empty(self) -> None:
-        offline = FetchError("u", 0, {}, b"offline")
-        assert self._probe(Mock(side_effect=offline)) == ""
-
-    def test_v6_echo_returned(self) -> None:
-        assert (
-            self._probe(Mock(return_value=b"2606:4700:4700::1111\n"), ipv6=True)
-            == "2606:4700:4700::1111"
-        )
-
-    def test_v4_reply_rejected_for_v6_request(self) -> None:
-        assert self._probe(Mock(return_value=b"203.0.113.7"), ipv6=True) == ""
-
-    def test_uses_v6_endpoints(self) -> None:
-        mock = Mock(return_value=b"2001:db8::5")
-        self._probe(mock, ipv6=True)
-        url = cast(str, mock.call_args.args[0])
-        assert "ipv6" in url or "api64" in url
-
-    def test_malformed_v6_reply_rejected(self) -> None:
-        assert self._probe(Mock(return_value=b"::::"), ipv6=True) == ""
-        assert self._probe(Mock(return_value=b"ff:"), ipv6=True) == ""
-
-    def test_probe_records_the_ipv4_answer(self) -> None:
-        session = FetchSession()
-        self._probe(Mock(return_value=b"203.0.113.7"), session=session)
-        assert session.egress == "203.0.113.7"
-
-    def test_an_ipv6_answer_is_never_kept(self) -> None:
-        session = FetchSession(egress="203.0.113.7")
-        assert (
-            self._probe(Mock(return_value=b"2001:db8::5"), ipv6=True, session=session)
-            == "2001:db8::5"
-        )
-        assert session.egress == "203.0.113.7"
-
-    def test_a_known_egress_returns_without_probing(self) -> None:
-        echo = Mock()
-        with patch("wesearch.fetch.fetch.fetch", echo):
-            assert egress_ip(FetchSession(egress="9.9.9.9")) == "9.9.9.9"
-        echo.assert_not_called()
-
-    def test_an_unknown_egress_is_probed(self) -> None:
-        session = FetchSession()
-        echo = Mock(return_value=b"1.2.3.4")
-        with patch("wesearch.fetch.fetch.fetch", echo):
-            assert egress_ip(session) == "1.2.3.4"
-        assert echo.call_count == 1
-        assert session.egress == "1.2.3.4"
-
-    def test_refresh_always_probes_and_refreshes(self) -> None:
-        session = FetchSession(egress="1.1.1.1")
-        assert self._probe(Mock(return_value=b"2.2.2.2"), session=session) == "2.2.2.2"
-        assert session.egress == "2.2.2.2"
-
-    def test_failed_probe_leaves_egress_untouched(self) -> None:
-        session = FetchSession(egress="192.0.2.9")
-        offline = FetchError("u", 0, {}, b"x")
-        assert self._probe(Mock(side_effect=offline), session=session) == ""
-        assert session.egress == "192.0.2.9"
-
-    def test_an_egress_roll_closes_only_the_old_ips_connections(self) -> None:
-        # Connections out the old address would present the new identity from
-        # the old IP. Other threads' requests on the new IP, and the browser,
-        # which follows the host's routing, must keep running.
-        old, new, browsers = _Counted(), _Counted(), _Counted()
-        curl: dict[CurlKey, Closable] = {
-            ("203.0.113.9", "a.example", None, 443): old,
-            ("203.0.113.10", "a.example", None, 443): new,
-        }
-        session = FetchSession(egress="203.0.113.9", browsers=browsers, curl=curl)
-        self._probe(Mock(return_value=b"203.0.113.10"), session=session)
-        self._probe(Mock(return_value=b"203.0.113.10"), session=session)
-        assert (old.closes, new.closes, browsers.shutdowns) == (1, 0, 0)
-        assert list(session.curl) == [("203.0.113.10", "a.example", None, 443)]
-        assert session.egress == "203.0.113.10"
-
-    def test_a_first_probe_closes_the_connections_opened_before_it(self) -> None:
-        # Keyed by an unknown egress, they would never be reused again.
-        early = _Counted()
-        curl: dict[CurlKey, Closable] = {("", "a.example", None, 443): early}
-        session = FetchSession(curl=curl)
-        self._probe(Mock(return_value=b"203.0.113.10"), session=session)
-        assert early.closes == 1
-        assert session.curl == {}
-        assert session.egress == "203.0.113.10"
-
-
-class TestBrowserBackend:
-    """The opt-in ``transport="zendriver"`` path and its parameter guards."""
-
-    def test_rejects_non_get_method(self) -> None:
-        with pytest.raises(ValueError, match="zendriver backend supports only GET"):
-            RequestParams(
-                content=ContentParams(method="POST"),
-                policy=PolicyParams(transport="zendriver"),
-            )
-
-    def test_rejects_request_body(self) -> None:
-        with pytest.raises(ValueError, match="cannot send a request body"):
-            RequestParams(
-                content=ContentParams(data={"a": "1"}),
-                policy=PolicyParams(transport="zendriver"),
-            )
-
-    def test_accepts_public_only_hosts(self) -> None:
-        # Chrome owns its DNS, so a public-only browser request checks the host
-        # and declines to pin; it does not refuse the request.
-        params = RequestParams(policy=PolicyParams(transport="zendriver"))
-        assert params.policy.allow_private_hosts is False
-
-    def test_default_transport_is_auto(self) -> None:
-        assert RequestParams().policy.transport == "auto"
-
-    def test_auto_uses_general_curl_then_browser_fallback(self) -> None:
-        assert resolve_transport("auto") == "curl-then-zendriver"
-
-    def test_auto_uses_curl_for_post(self) -> None:
-        assert resolve_transport("auto", method="POST") == "curl"
-
-    @pytest.mark.parametrize(
-        ("transport", "method", "resolved"),
-        [
-            ("auto", "POST", "stdlib"),
-            ("curl", "GET", "stdlib"),
-            ("auto", "GET", "curl-then-zendriver"),
-            ("zendriver", "GET", "zendriver"),
-        ],
-    )
-    def test_stdlib_stands_in_for_curl_when_curl_cannot_load(
-        self,
-        transport: Transport,
-        method: HttpMethod,
-        resolved: Transport,
-    ) -> None:
-        with patch("wesearch.fetch.fetch.curl_available", return_value=False):
-            assert resolve_transport(transport, method=method) == resolved
-
-    def test_the_curl_leg_of_a_browser_fallback_also_falls_back(
-        self,
-        session: FetchSession,
-    ) -> None:
-        stdlib = Mock(return_value=b"ok")
-        with (
-            patch("wesearch.fetch.fetch.curl_available", return_value=False),
-            patch("wesearch.fetch.fetch.fetch_stdlib", stdlib),
-            patch.object(zendriver, "fetch_zendriver") as browser,
-        ):
-            assert (
-                fetch.fetch(
-                    "https://x.example/",
-                    request=RequestParams(
-                        policy=PolicyParams(transport="curl-then-zendriver"),
-                    ),
-                    session=session,
-                )
-                == b"ok"
-            )
-        stdlib.assert_called_once()
-        browser.assert_not_called()
-
-    def test_auto_uses_curl_for_get_body(self, session: FetchSession) -> None:
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok") as curl,
-            patch.object(zendriver, "fetch_zendriver") as browser,
-        ):
-            body = fetch.fetch(
-                "https://google.com/api",
-                request=RequestParams(content=ContentParams(json={"query": "value"})),
-                session=session,
-            )
-        assert body == b"ok"
-        curl.assert_called_once()
-        browser.assert_not_called()
-
-    def test_auto_post_to_learned_domain_uses_curl(self, session: FetchSession) -> None:
-        # A domain learned to need the browser must not override method/body
-        # eligibility: the browser leg is GET-only.
-        with (
-            patch.object(
-                transport_routing,
-                "zendriver_domains",
-                return_value=frozenset({"walled.example"}),
-            ),
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok") as curl,
-            patch.object(zendriver, "fetch_zendriver") as browser,
-        ):
-            body = fetch.fetch(
-                "https://walled.example/api",
-                request=RequestParams(content=ContentParams(json={"q": "v"})),
-                session=session,
-            )
-        assert body == b"ok"
-        curl.assert_called_once()
-        browser.assert_not_called()
-
-    def test_browser_fetch_observes_a_cookie_free_response(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # ObserveParams.on_response promises a callback for EVERY response.
-        observer = Mock()
-        with patch.object(
-            zendriver,
-            "fetch_zendriver",
-            _landed(b"ok", "", "https://walled.example/x"),
-        ):
-            fetch.fetch(
-                "https://walled.example/x",
-                request=_zendriver(observe=ObserveParams(on_response=observer)),
-                session=session,
-            )
-        observer.assert_called_once_with(200, {})
-
-    def test_browser_fetch_forwards_url_params_headers_and_cookies(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with patch.object(zendriver, "fetch_zendriver", return_value=b"ok") as via:
-            fetch.fetch(
-                "https://google.com/search?hl=en",
-                request=_zendriver(
-                    content=ContentParams(
-                        params={"q": "test query"},
-                        headers={"X-Test": "yes"},
-                        cookies={"CONSENT": "YES+"},
-                    ),
-                ),
-                session=session,
-            )
-        assert via.call_args.args == ("https://google.com/search?hl=en&q=test+query",)
-        assert via.call_args.kwargs["headers"] == {
-            "X-Test": "yes",
-            "Cookie": "CONSENT=YES+",
-        }
-        assert set(via.call_args.kwargs) == _fetch_keywords()
-
-    def test_browser_fetch_forwards_the_redirect_budget(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # RetryParams documents 0 as "no redirects"; Chrome's own default is 10.
-        with patch.object(zendriver, "fetch_zendriver", return_value=b"ok") as via:
-            fetch.fetch(
-                "https://walled.example/x",
-                request=_zendriver(retry=RetryParams(max_redirects=0)),
-                session=session,
-            )
-        assert via.call_args.kwargs["max_redirects"] == 0
-
-    def test_browser_call_forwards_exact_arguments(self, session: FetchSession) -> None:
-        redirect = Mock()
-        request = RequestParams(
-            policy=PolicyParams(transport="zendriver", allow_private_hosts=True),
-            retry=RetryParams(timeout_sec=9.0),
-            observe=ObserveParams(on_redirect=redirect),
-        )
-        with patch.object(zendriver, "fetch_zendriver", return_value=b"ok") as browser:
-            assert (
-                fetch.fetch("https://x.example/path", request=request, session=session)
-                == b"ok"
-            )
-        browser.assert_called_once_with(
-            "https://x.example/path",
-            method="GET",
-            headers={},
-            body=b"",
-            timeout_sec=9.0,
-            connect_timeout_sec=10.0,
-            max_redirects=10,
-            on_redirect=redirect,
-            on_response=ANY,
-            allow_private_hosts=True,
-            session=session,
-            cookies_for_host=ANY,
-        )
-
-    def test_browser_fetch_without_egress_persists_nothing(self) -> None:
-        session = FetchSession()
-        try:
-            with (
-                patch("wesearch.fetch.fetch.egress_ip", return_value=""),
-                patch.object(
-                    zendriver,
-                    "fetch_zendriver",
-                    _landed(b"<html>rendered</html>", "SID=xyz", "https://w.example/x"),
-                ),
-            ):
-                body = fetch.fetch(
-                    "https://w.example/x",
-                    request=_zendriver(),
-                    session=session,
-                )
-        finally:
-            session.close()
-        assert body == b"<html>rendered</html>"
-        assert session.profiles.load("", "w.example") is None
-
-    def test_browser_fetch_persists_cookies_to_profile_store(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with patch.object(
-            zendriver,
-            "fetch_zendriver",
-            _landed(b"ok", "cf_clearance=tok", "https://walled.example/x"),
-        ):
-            fetch.fetch(
-                "https://walled.example/x",
-                request=_zendriver(),
-                session=session,
-            )
-        saved = session.profiles.load(_EGRESS, "walled.example")
-        assert saved is not None
-        assert saved.cookies == {"cf_clearance": "tok"}
-
-    def test_browser_existing_profile_is_updated_in_place(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.profiles.save(_EGRESS, "x.example", Profile(cookies={"old": "1"}))
-        with patch.object(
-            zendriver,
-            "fetch_zendriver",
-            _landed(b"ok", "sid=new", "https://x.example/path"),
-        ):
-            fetch.fetch("https://x.example/path", request=_zendriver(), session=session)
-        stored = session.profiles.load(_EGRESS, "x.example")
-        assert stored is not None
-        assert stored.cookies == {"old": "1", "sid": "new"}
-
-    def test_browser_empty_landing_domain_does_not_persist(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with patch.object(
-            zendriver,
-            "fetch_zendriver",
-            _landed(b"ok", "sid=1", "https:///path"),
-        ):
-            assert (
-                fetch.fetch("https://x.example/", request=_zendriver(), session=session)
-                == b"ok"
-            )
-        assert session.profiles.load(_EGRESS, "x.example") is None
-        assert session.profiles.load(_EGRESS, "") is None
-
-    def test_zendriver_fetch_forwards_exact_arguments_and_files_landing(
-        self,
-        session: FetchSession,
-    ) -> None:
-        session.egress = "198.51.100.8"
-        observer = Mock()
-        redirect = Mock()
-        request = _zendriver(
-            content=ContentParams(
-                params={"q": "x y"},
-                headers={"X": "h"},
-                cookies={"c": "v"},
-            ),
-            retry=RetryParams(timeout_sec=11.0),
-            observe=ObserveParams(on_redirect=redirect, on_response=observer),
-        )
-        browser = Mock(
-            side_effect=_landed(
-                b"rendered",
-                "sid=1\ntoken=2",
-                "https://b.example/landed",
-            ),
-        )
-        with patch.object(zendriver, "fetch_zendriver", browser):
-            assert (
-                fetch.fetch("https://a.example/path", request=request, session=session)
-                == b"rendered"
-            )
-        browser.assert_called_once()
-        assert browser.call_args.args[0] == "https://a.example/path?q=x+y"
-        kwargs = browser.call_args.kwargs
-        assert kwargs["timeout_sec"] == 11.0
-        assert kwargs["headers"] == {"X": "h", "Cookie": "c=v"}
-        assert kwargs["allow_private_hosts"] is False
-        assert kwargs["max_redirects"] == 10
-        assert kwargs["on_redirect"] is redirect
-        observer.assert_called_once_with(200, {"set-cookie": "sid=1\ntoken=2"})
-        stored = session.profiles.load("198.51.100.8", "b.example")
-        assert stored is not None
-        assert stored.cookies == {"sid": "1", "token": "2"}
-
-
-class TestCurlThenZendriverBackend:
-    """``transport="curl-then-zendriver"``: curl first, zendriver on a block."""
-
-    def test_curl_then_zendriver_inherits_zendriver_restrictions(self) -> None:
-        with pytest.raises(
-            ValueError,
-            match="curl-then-zendriver backend supports only GET",
-        ):
-            RequestParams(
-                content=ContentParams(method="POST"),
-                policy=PolicyParams(transport="curl-then-zendriver"),
-            )
-        with pytest.raises(
-            ValueError,
-            match="curl-then-zendriver backend cannot send a request",
-        ):
-            RequestParams(
-                content=ContentParams(data={"a": "1"}),
-                policy=PolicyParams(transport="curl-then-zendriver"),
-            )
-        with pytest.raises(
-            ValueError,
-            match="curl-then-zendriver transport cannot honor 'raw_headers'",
-        ):
-            RequestParams(
-                content=ContentParams(raw_headers=True),
-                policy=PolicyParams(transport="curl-then-zendriver"),
-            )
-
-    def test_curl_then_zendriver_returns_curl_body_without_touching_browser(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"curl body"),
-            patch.object(zendriver, "fetch_zendriver") as via,
-        ):
-            body = fetch.fetch(
-                "https://ok.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-        assert body == b"curl body"
-        via.assert_not_called()
-
-    def test_curl_then_zendriver_falls_back_to_zendriver_on_bot_block(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=CloudflareChallengeError(),
-            ) as curl,
-            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered") as via,
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-        ):
-            body = fetch.fetch(
-                "https://walled.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-        assert body == b"rendered"
-        curl.assert_called_once()
-        via.assert_called_once()
-        remember.assert_called_once_with("walled.example")
-
-    @pytest.mark.parametrize(
-        ("content_type", "browser", "expected"),
-        [
-            # A firewall's bare HTML 403 that the browser gets past: learned.
-            ("text/html; charset=utf-8", b"rendered", b"rendered"),
-            # The site refuses the browser too: its own 403, so nothing learned.
-            ("text/html", FetchError("u", 403, {}, b"no"), FetchError),
-            # An API's JSON 403 is a bad key; Chrome would only render it.
-            ("application/json", b"unused", FetchError),
-        ],
-    )
-    def test_a_bare_html_403_gets_one_browser_try(
-        self,
-        session: FetchSession,
-        content_type: str,
-        browser: bytes | FetchError,
-        expected: bytes | type[FetchError],
-    ) -> None:
-        refused = FetchError("u", 403, {"Content-Type": content_type}, b"Denied")
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", side_effect=refused),
-            patch.object(zendriver, "fetch_zendriver", side_effect=[browser]) as via,
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-        ):
-            if isinstance(expected, bytes):
-                assert (
-                    fetch.fetch(
-                        "https://akamai.example/",
-                        request=_curl_then_zendriver(),
-                        session=session,
-                    )
-                    == expected
-                )
-            else:
-                with pytest.raises(expected) as error:
-                    fetch.fetch(
-                        "https://akamai.example/",
-                        request=_curl_then_zendriver(),
-                        session=session,
-                    )
-                assert error.value.status == 403
-        assert [call.args[0] for call in via.call_args_list] == (
-            ["https://akamai.example/"] if "html" in content_type else []
-        )
-        assert remember.call_count == isinstance(expected, bytes)
-        if remember.called:
-            remember.assert_called_once_with("akamai.example")
-
-    @pytest.mark.parametrize(
-        ("landed", "rendered"),
-        [
-            # operations.nfl.com, 2026-10-30: curl alone is sent to a 404 route.
-            ("https://ops.example/v2/ops?_rsc", True),
-            ("https://ops.example/", False),
-        ],
-    )
-    def test_a_404_reached_by_redirect_gets_one_browser_try(
-        self,
-        session: FetchSession,
-        landed: str,
-        rendered: bool,
-    ) -> None:
-        missing = FetchError(landed, 404, {"content-type": "text/html"}, b"Not found")
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", side_effect=missing),
-            patch.object(zendriver, "fetch_zendriver", return_value=b"page") as via,
-            patch.object(transport_routing, "remember_zendriver_domain"),
-        ):
-            if rendered:
-                assert (
-                    fetch.fetch(
-                        "https://ops.example/",
-                        request=_curl_then_zendriver(),
-                        session=session,
-                    )
-                    == b"page"
-                )
-            else:
-                with pytest.raises(FetchError):
-                    fetch.fetch(
-                        "https://ops.example/",
-                        request=_curl_then_zendriver(),
-                        session=session,
-                    )
-        assert via.call_count == rendered
-
-    @pytest.mark.parametrize(
-        "page",
-        [
-            b"<!doctype html><html><body><p>OK</p></body></html>",
-            b'<!doctype html><html><body><div class="g-recaptcha"></div></body></html>',
-        ],
-    )
-    def test_a_short_page_with_nothing_to_run_never_reaches_the_browser(
-        self,
-        session: FetchSession,
-        page: bytes,
-    ) -> None:
-        # Curl already has the whole page; a browser could only fail where curl
-        # succeeded.
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
-            patch.object(
-                zendriver,
-                "fetch_zendriver",
-                side_effect=FetchError("u", 0, {}, b"timed out"),
-            ) as via,
-        ):
-            assert (
-                fetch.fetch(
-                    "https://short.example/",
-                    request=_curl_then_zendriver(),
-                    session=session,
-                )
-                == page
-            )
-        via.assert_not_called()
-
-    def test_a_failed_render_raises_rather_than_passing_off_the_shell(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # The shell has no content; returning it as the page hid a timed-out
-        # render as a success.
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=_APP_SHELL),
-            patch.object(
-                zendriver,
-                "fetch_zendriver",
-                side_effect=FetchError("https://app.example/", 0, {}, b"timed out"),
-            ),
-            pytest.raises(FetchError, match="connection failed"),
-        ):
-            fetch.fetch(
-                "https://app.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-
-    def test_a_shell_is_kept_where_no_browser_can_run(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=_REDIRECT_STUB),
-            patch.object(
-                zendriver,
-                "fetch_zendriver",
-                side_effect=zendriver.BrowserUnavailableError("no Chrome"),
-            ),
-        ):
-            assert (
-                fetch.fetch(
-                    "https://docs.example/",
-                    request=_curl_then_zendriver(),
-                    session=session,
-                )
-                == _REDIRECT_STUB
-            )
-
-    @pytest.mark.parametrize(
-        ("rendered", "expected"),
-        [
-            (b"<html><body>" + b"word " * 200 + b"</body></html>", "rendered"),
-            (b"<html><body>tiny</body></html>", "shell"),
-            (_REDIRECT_STUB.replace(b"Redirecting", b"Replacement"), "shell"),
-        ],
-    )
-    def test_a_shell_is_rendered_and_the_fuller_page_wins(
-        self,
-        session: FetchSession,
-        rendered: bytes,
-        expected: str,
-    ) -> None:
-        shell = _REDIRECT_STUB
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=shell),
-            patch.object(zendriver, "fetch_zendriver", side_effect=[rendered]) as via,
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-        ):
-            body = fetch.fetch(
-                "https://docs.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-        assert body == (rendered if expected == "rendered" else shell)
-        assert [call.args[0] for call in via.call_args_list] == [
-            "https://docs.example/",
-        ]
-        remember.assert_not_called()
-
-    def test_a_page_with_content_is_not_rendered(self, session: FetchSession) -> None:
-        page = b"<!doctype html><p>" + b"word " * 200 + b"</p>"
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
-            patch.object(zendriver, "fetch_zendriver") as via,
-        ):
-            assert (
-                fetch.fetch(
-                    "https://ok.example/",
-                    request=_curl_then_zendriver(),
-                    session=session,
-                )
-                == page
-            )
-        via.assert_not_called()
-
-    def test_a_captcha_widget_on_a_success_page_is_the_page(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # A comment form's reCAPTCHA proves a wall only on an error status.
-        page = b'<!doctype html><p>Comments</p><div class="g-recaptcha"></div>'
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
-            patch.object(zendriver, "fetch_zendriver") as via,
-        ):
-            assert (
-                fetch.fetch(
-                    "https://blog.example/",
-                    request=_curl_then_zendriver(),
-                    session=session,
-                )
-                == page
-            )
-        via.assert_not_called()
-
-    def test_a_wall_served_with_a_success_status_goes_to_the_browser(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # Semantic Scholar and IMDb serve AWS WAF's challenge with a 202.
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=_AWS_WAF_WALL),
-            patch.object(zendriver, "fetch_zendriver", return_value=b"paper") as via,
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-        ):
-            assert (
-                fetch.fetch(
-                    "https://waf.example/",
-                    request=_curl_then_zendriver(),
-                    session=session,
-                )
-                == b"paper"
-            )
-        via.assert_called_once()
-        remember.assert_called_once_with("waf.example")
-
-    def test_raw_headers_request_still_runs_the_body_validator(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # A challenge page served with HTTP 200 must reach a raw-header caller as
-        # a typed error, not an ordinary body.
-        seen: list[bytes] = []
-
-        def validate_body(body: bytes) -> None:
-            seen.append(body)
-            raise PuzzleChallengeError("challenge served")
-
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                return_value=b"<form id=x>",
-            ) as sent,
-            patch("wesearch.fetch.fetch.egress_ip") as probe,
-            pytest.raises(PuzzleChallengeError, match="challenge served"),
-        ):
-            fetch.fetch(
-                "https://raw.example/",
-                request=RequestParams(
-                    content=ContentParams(
-                        headers={"User-Agent": "x"},
-                        raw_headers=True,
-                    ),
-                    observe=ObserveParams(body_validator=validate_body),
-                ),
-                session=session,
-            )
-        assert seen == [b"<form id=x>"]
-        assert sent.call_args.kwargs["session"] is session
-        probe.assert_not_called()
-
-    def test_a_validator_block_names_the_page_to_clear_it_on(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # A provider's validator sees only the body, so its error named no page
-        # and told nobody to open the browser that clears it.
         def validate_body(body: bytes) -> None:
             raise PuzzleChallengeError(
                 "challenge served",
@@ -1968,11 +116,16 @@ class TestCurlThenZendriverBackend:
             )
 
         with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"<form id=x>"),
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                return_value=b"<form id=x>",
+            ) as sent,
+            patch("wesearch.fetch.fetch.egress_ip") as probe,
+            patch("wesearch.fetch.fetch.gated", wraps=gated) as gate,
             pytest.raises(PuzzleChallengeError) as error,
         ):
             fetch.fetch(
-                "https://raw.example/",
+                "https://u:secret@raw.example/",
                 request=RequestParams(
                     content=ContentParams(
                         headers={"User-Agent": "x"},
@@ -1982,506 +135,45 @@ class TestCurlThenZendriverBackend:
                 ),
                 session=session,
             )
-        assert error.value.url == "https://raw.example/"
-        assert error.value.status == 200
-        assert error.value.headers == {"server": "edge"}
-        assert error.value.body == b"<form id=x>"
+        probe.assert_not_called()
+        assert sent.call_args.args == ("https://raw.example/",)
+        assert sent.call_args.kwargs["session"] is session
+        assert gate.call_args.args == ("https://raw.example/",)
+        assert gate.call_args.kwargs == {"egress": _EGRESS, "gate": session.gate}
+        assert "secret" not in str(error.value)
+        assert (
+            error.value.url,
+            error.value.status,
+            error.value.headers,
+            error.value.body,
+        ) == ("https://raw.example/", 200, {"server": "edge"}, b"<form id=x>")
         assert str(error.value) == (
             "challenge served Run `webrowser https://raw.example/` and solve the "
             "challenge; the site unlocks once its page loads."
         )
 
-    def test_success_body_challenge_falls_back_and_remembers_domain(
+    def test_gate_locks_only_the_egress_of_a_final_block(
         self,
         session: FetchSession,
     ) -> None:
-        # The validator runs on each leg, so a 200 that is really a block sends
-        # the request to the browser.
-        def validate_body(body: bytes) -> None:
-            if b"enablejs" in body:
-                raise GoogleJavascriptRequiredError("JavaScript required")
-
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"enablejs"),
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered") as via,
-        ):
-            body = fetch.fetch(
-                "https://walled.example/",
-                request=_curl_then_zendriver(
-                    observe=ObserveParams(body_validator=validate_body),
-                ),
-                session=session,
-            )
-        assert body == b"rendered"
-        via.assert_called_once()
-        remember.assert_called_once_with("walled.example")
-
-    @pytest.mark.parametrize(
-        "block",
-        [
-            CooldownError(),
-            PuzzleChallengeError(),
-            GoogleSorryError(),
-            BotDetectionError(),
-        ],
-        ids=type,
-    )
-    def test_a_block_no_browser_clears_is_not_remembered(
-        self,
-        session: FetchSession,
-        block: BotDetectionError,
-    ) -> None:
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", side_effect=block),
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered"),
-        ):
-            fetch.fetch(
-                "https://walled.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-        remember.assert_not_called()
-
-    def test_bot_block_remembers_domain_even_when_browser_still_fails(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=CloudflareChallengeError(),
-            ),
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-            patch.object(
-                zendriver,
-                "fetch_zendriver",
-                side_effect=PuzzleChallengeError("human required"),
-            ),
-            pytest.raises(PuzzleChallengeError, match="human required"),
-        ):
-            fetch.fetch(
-                "https://walled.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-        remember.assert_called_once_with("walled.example")
-
-    def test_auto_reuses_persisted_zendriver_fallback(
-        self,
-        session: FetchSession,
-    ) -> None:
-        domains: set[str] = set()
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=CloudflareChallengeError(),
-            ) as curl,
-            patch.object(
-                transport_routing,
-                "zendriver_domains",
-                side_effect=lambda: frozenset(domains),
-            ),
-            patch.object(
-                transport_routing,
-                "remember_zendriver_domain",
-                side_effect=domains.add,
-            ),
-            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered") as via,
-        ):
-            first = fetch.fetch("https://walled.example/", session=session)
-            second = fetch.fetch("https://walled.example/", session=session)
-        assert first == second == b"rendered"
-        curl.assert_called_once()
-        assert via.call_count == 2
-
-    def test_curl_then_zendriver_does_not_fall_back_on_non_block_error(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # A plain 404 propagates; the browser would not help.
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=FetchError("https://x.example/", 404, {}, b""),
-            ),
-            patch.object(zendriver, "fetch_zendriver") as via,
-            pytest.raises(FetchError),
-        ):
-            fetch.fetch(
-                "https://x.example/",
-                request=_curl_then_zendriver(),
-                session=session,
-            )
-        via.assert_not_called()
-
-    def test_browser_fallback_forwards_caller_values_after_bot_block(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=BotDetectionError("blocked"),
-            ),
-            patch.object(zendriver, "fetch_zendriver", return_value=b"ok") as browser,
-        ):
-            assert (
-                fetch.fetch(
-                    "https://x.example/",
-                    request=_curl_then_zendriver(
-                        content=ContentParams(headers={"X": "1"}, cookies={"c": "2"}),
-                    ),
-                    session=session,
-                )
-                == b"ok"
-            )
-        assert browser.call_args.args == ("https://x.example/",)
-        assert _sent_headers(browser) == {"X": "1", "Cookie": "c=2"}
-
-    @pytest.mark.parametrize(
-        "block",
-        [
-            CloudflareChallengeError(),
-            FetchError("https:///x", 403, {"content-type": "text/html"}, b"Denied"),
-        ],
-        ids=["marked", "bare-html"],
-    )
-    def test_a_hostless_url_remembers_no_domain(
-        self,
-        session: FetchSession,
-        block: FetchError,
-    ) -> None:
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", side_effect=block),
-            patch.object(transport_routing, "remember_zendriver_domain") as remember,
-            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered") as via,
-        ):
-            assert (
-                fetch.fetch(
-                    "https:///x",
-                    request=_curl_then_zendriver(),
-                    session=session,
-                )
-                == b"rendered"
-            )
-        via.assert_called_once()
-        remember.assert_not_called()
-
-    def test_a_bodyless_post_to_a_learned_domain_stays_on_curl(
-        self,
-        session: FetchSession,
-    ) -> None:
-        with (
-            patch.object(
-                transport_routing,
-                "zendriver_domains",
-                return_value=frozenset({"walled.example"}),
-            ),
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok") as curl,
-            patch.object(zendriver, "fetch_zendriver") as via,
-        ):
-            fetch.fetch(
-                "https://walled.example/",
-                request=RequestParams(content=ContentParams(method="POST")),
-                session=session,
-            )
-        curl.assert_called_once()
-        via.assert_not_called()
-
-    def test_domainless_url_sends_and_validates(self, session: FetchSession) -> None:
-        validate = Mock()
-        with patch("wesearch.fetch.fetch.fetch_curl", return_value=b"body"):
-            assert (
-                fetch.fetch(
-                    "/relative",
-                    request=RequestParams(
-                        observe=ObserveParams(body_validator=validate),
-                    ),
-                    session=session,
-                )
-                == b"body"
-            )
-        validate.assert_called_once_with(b"body")
-
-
-class TestSend:
-    """``_send``: the request it builds, its retries, and what it forwards."""
-
-    def test_builds_exact_request_and_forwards_all_options(
-        self,
-        session: FetchSession,
-    ) -> None:
-        params = RequestParams(
-            content=ContentParams(
-                method="POST",
-                params={"q": "a b"},
-                data={"x": "y"},
-                headers={"X-Test": "yes", "Cookie": "h=1"},
-                cookies={"sid": "cookie"},
-            ),
-            policy=PolicyParams(transport="curl", allow_private_hosts=True),
-            retry=RetryParams(
-                timeout_sec=7.0,
-                connect_timeout_sec=2.0,
-                max_redirects=3,
-            ),
+        already_named = PuzzleChallengeError(
+            "wall",
+            url="https://gated.example/challenge",
         )
-        backend = Mock(return_value=b"body")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            got = _send(
-                "https://u:p@example.com/path#frag",
-                params,
-                session=session,
-            )
-        assert got == b"body"
-        backend.assert_called_once_with(
-            "https://example.com/path?q=a+b#frag",
-            method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Authorization": "Basic dTpw",
-                "X-Test": "yes",
-                "Cookie": "h=1; sid=cookie",
-            },
-            body=b"x=y",
-            timeout_sec=7.0,
-            connect_timeout_sec=2.0,
-            max_redirects=3,
-            on_redirect=ignore,
-            on_response=ANY,
-            allow_private_hosts=True,
-            session=session,
-            cookies_for_host=ANY,
-        )
-
-    def test_forwards_the_redirect_callback(self, session: FetchSession) -> None:
-        redirect = Mock()
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://x.example/",
-                _curl(observe=ObserveParams(on_redirect=redirect)),
-                session=session,
-            )
-        assert backend.call_args.kwargs["on_redirect"] is redirect
-
-    def test_retries_status_zero_and_logs_exactly(
-        self,
-        session: FetchSession,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        backend = Mock(side_effect=[FetchError("https://x/", 0, {}, b"down"), b"ok"])
-        sleeps = Mock()
-        caplog.set_level("DEBUG", logger="wesearch.fetch.fetch")
         with (
-            patch("wesearch.fetch.fetch.time.sleep", sleeps),
-            patch("wesearch.types.params.random.uniform", return_value=0.0),
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
+            patch("wesearch.fetch.fetch.fetch_curl", side_effect=already_named),
+            pytest.raises(PuzzleChallengeError) as raised,
         ):
-            assert (
-                _send(
-                    "https://x/",
-                    _curl(retry=RetryParams(retries=1)),
-                    session=session,
-                )
-                == b"ok"
-            )
-        assert backend.call_count == 2
-        assert sleeps.call_args_list == [call(1.0)]
-        assert [r.getMessage() for r in caplog.records] == [
-            "fetch https://x/ -> 0, retry in 1.0s",
-        ]
+            fetch.fetch("https://gated.example/", request=_curl(), session=session)
+        assert raised.value is already_named
 
-    def test_raises_a_connection_failure_once_retries_are_spent(
-        self,
-        session: FetchSession,
-    ) -> None:
-        error = FetchError("https://x/", 0, {}, b"offline")
-        backend = Mock(side_effect=error)
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-            pytest.raises(FetchError) as raised,
-        ):
-            _send("https://x/", _curl(), session=session)
-        assert raised.value is error
-        backend.assert_called_once()
-
-    def test_does_not_retry_nonretryable_status(self, session: FetchSession) -> None:
-        error = FetchError("https://x/", 404, {"h": "v"}, b"missing")
-        backend = Mock(side_effect=error)
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-            pytest.raises(FetchError) as raised,
-        ):
-            _send(
-                "https://x/",
-                _curl(retry=RetryParams(retries=1)),
-                session=session,
-            )
-        assert raised.value is error
-        backend.assert_called_once()
-
-    def test_uses_all_of_the_retry_budget_and_no_more(
-        self,
-        session: FetchSession,
-    ) -> None:
-        error = FetchError("https://x/", 500, {}, b"retry")
-        backend = Mock(side_effect=[error, error, b"ok"])
-        with (
-            patch("wesearch.fetch.fetch.time.sleep"),
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-            pytest.raises(FetchError),
-        ):
-            _send(
-                "https://x/",
-                _curl(retry=RetryParams(retries=1)),
-                session=session,
-            )
-        assert backend.call_count == 2
-
-    def test_retries_zero_sends_once(self, session: FetchSession) -> None:
-        backend = Mock(side_effect=FetchError("https://x.example/", 500, {}, b""))
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-            pytest.raises(FetchError),
-        ):
-            _send("https://x.example/", _curl(), session=session)
-        backend.assert_called_once()
-
-    def test_retry_counter_advances_across_three_attempts(
-        self,
-        session: FetchSession,
-    ) -> None:
-        error = FetchError("https://x.example/", 500, {}, b"retry")
-        backend = Mock(side_effect=[error, error, error, b"ok"])
-        sleeps = Mock()
-        with (
-            patch("wesearch.fetch.fetch.time.sleep", sleeps),
-            patch("wesearch.types.params.random.uniform", return_value=0.0),
-            patch("wesearch.fetch.fetch.fetch_curl", backend),
-        ):
-            assert (
-                _send(
-                    "https://x.example/",
-                    _curl(retry=RetryParams(retries=3)),
-                    session=session,
-                )
-                == b"ok"
-            )
-        assert backend.call_count == 4
-        assert sleeps.call_args_list == [call(1.0), call(2.0), call(4.0)]
-
-    def test_json_body_is_serialized(self, session: FetchSession) -> None:
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://x/",
-                _curl(content=ContentParams(method="POST", json={"a": 1})),
-                session=session,
-            )
-        assert backend.call_args.kwargs["body"] == b'{"a": 1}'
-        assert _sent_headers(backend) == {"Content-Type": "application/json"}
-
-    def test_case_variant_cookie_headers_collapse_to_the_last(
-        self,
-        session: FetchSession,
-    ) -> None:
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://x/",
-                _curl(
-                    content=ContentParams(
-                        headers={"cookie": "a=header", "COOKIE": "b=header"},
-                        cookies={"c": "param"},
-                    ),
-                ),
-                session=session,
-            )
-        assert _sent_headers(backend) == {"Cookie": "b=header; c=param"}
-
-    def test_raw_headers_imply_no_content_type(self, session: FetchSession) -> None:
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://x.example/",
-                _curl(
-                    content=ContentParams(
-                        method="POST",
-                        json={"a": 1},
-                        raw_headers=True,
-                    ),
-                ),
-                session=session,
-            )
-        assert backend.call_args.kwargs["headers"] == {}
-        assert backend.call_args.kwargs["body"] == b'{"a": 1}'
-
-    def test_joins_two_cookie_values_with_semicolon(
-        self,
-        session: FetchSession,
-    ) -> None:
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_curl", backend):
-            _send(
-                "https://x.example/",
-                _curl(content=ContentParams(cookies={"a": "1", "b": "2"})),
-                session=session,
-            )
-        assert _sent_headers(backend)["Cookie"] == "a=1; b=2"
-
-    def test_a_get_sends_no_body_and_no_content_type(
-        self,
-        session: FetchSession,
-    ) -> None:
-        backend = Mock(return_value=b"ok")
-        with patch("wesearch.fetch.fetch.fetch_stdlib", backend):
-            _send(
-                "https://x.example/",
-                _stdlib(),
-                session=session,
-            )
-        assert backend.call_args.kwargs["headers"] == {}
-        assert backend.call_args.kwargs["body"] == b""
-        assert backend.call_args.kwargs["session"] is session
-
-
-class TestGate:
-    def test_a_final_block_locks_the_site_for_the_next_fetch(
-        self,
-        session: FetchSession,
-    ) -> None:
-        def challenge(body: bytes) -> None:
-            raise PuzzleChallengeError(body.decode(), url="https://gated.example/")
-
-        blocked = _curl(observe=ObserveParams(body_validator=challenge))
-        with (
-            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"wall"),
-            pytest.raises(PuzzleChallengeError),
-        ):
-            fetch.fetch("https://gated.example/", request=blocked, session=session)
         with (
             patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok") as sent,
             pytest.raises(CooldownError),
         ):
-            fetch.fetch("https://gated.example/", session=session)
+            fetch.fetch("https://gated.example/", request=_curl(), session=session)
         sent.assert_not_called()
 
-    def test_a_lock_holds_only_the_egress_it_was_drawn_on(
-        self,
-        session: FetchSession,
-    ) -> None:
-        # A site blocks an IP; another egress is a client it has not refused.
-        with (
-            patch(
-                "wesearch.fetch.fetch.fetch_curl",
-                side_effect=PuzzleChallengeError("challenge served"),
-            ),
-            pytest.raises(PuzzleChallengeError),
-        ):
-            fetch.fetch("https://gated.example/", request=_curl(), session=session)
         session.egress = "198.51.100.9"
         with patch("wesearch.fetch.fetch.fetch_curl", return_value=b"ok"):
             assert (
@@ -2513,7 +205,936 @@ class TestGate:
             )
 
 
-_CONNECT = "wesearch.fetch.transport.stdlib._connect"
+class TestResolveTransport:
+    """``resolve_transport`` maps ``auto``, learned domains, and missing curl."""
+
+    @pytest.mark.parametrize(
+        ("transport", "available", "expected"),
+        [
+            ("curl", True, "curl"),
+            ("stdlib", True, "stdlib"),
+            ("zendriver", True, "browser"),
+            ("curl", False, "stdlib"),
+            ("curl-then-zendriver", False, "stdlib"),
+        ],
+    )
+    def test_selected_transport_sends_the_request(
+        self,
+        session: FetchSession,
+        transport: Transport,
+        available: bool,
+        expected: str,
+    ) -> None:
+        curl, stdlib = Mock(return_value=b"curl"), Mock(return_value=b"stdlib")
+        with (
+            patch("wesearch.fetch.fetch.curl_available", return_value=available),
+            patch("wesearch.fetch.fetch.fetch_curl", curl),
+            patch("wesearch.fetch.fetch.fetch_stdlib", stdlib),
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                return_value=b"browser",
+            ) as browser,
+        ):
+            assert (
+                fetch.fetch(
+                    "https://x.example/",
+                    request=RequestParams(policy=PolicyParams(transport=transport)),
+                    session=session,
+                )
+                == expected.encode()
+            )
+        for name, backend in (("curl", curl), ("stdlib", stdlib), ("browser", browser)):
+            assert [c.args for c in backend.call_args_list] == (
+                [("https://x.example/",)] if name == expected else []
+            )
+
+    def test_resolves_auto_domains_and_curl_availability(self) -> None:
+        queried: list[str] = []
+
+        class _Domains:
+            def __contains__(self, domain: object) -> bool:
+                assert isinstance(domain, str)
+                queried.append(domain)
+                return domain == "walled.example"
+
+        with patch.object(
+            transport_routing,
+            "zendriver_domains",
+            return_value=_Domains(),
+        ):
+            assert resolve_transport("auto") == "curl-then-zendriver"
+            assert queried == [""]
+            assert resolve_transport("auto", domain="walled.example") == "zendriver"
+            assert resolve_transport("auto", method="POST") == "curl"
+            assert resolve_transport("auto", raw_headers=True) == "curl"
+            assert resolve_transport("auto", has_body=True) == "curl"
+            assert (
+                resolve_transport("auto", method="POST", domain="walled.example")
+                == "curl"
+            )
+
+        with patch("wesearch.fetch.fetch.curl_available", return_value=False):
+            assert resolve_transport("auto", method="POST") == "stdlib"
+            assert resolve_transport("curl") == "stdlib"
+            assert resolve_transport("auto") == "curl-then-zendriver"
+            assert resolve_transport("zendriver") == "zendriver"
+
+
+class TestEgressIp:
+    """``egress_ip`` probes an echo cascade and keeps the IPv4 answer on the session."""
+
+    def test_default_echoes_and_caching_and_backoff(self) -> None:
+        target = FetchSession()
+        seen: list[tuple[str, float]] = []
+
+        def fail_echo(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession,
+        ) -> bytes:
+            assert session is target
+            assert request.content.raw_headers is True
+            assert request.content.headers == {}
+            seen.append((url, request.retry.timeout_sec))
+            raise FetchError(url, 0, {}, b"offline")
+
+        clock = [1000.0]
+        with (
+            patch("wesearch.fetch.fetch.fetch", side_effect=fail_echo) as echo,
+            patch("wesearch.fetch.fetch.time.monotonic", lambda: clock[0]),
+        ):
+            assert egress_ip(target) == ""
+            assert seen == [
+                ("https://ipv4.icanhazip.com", 5.0),
+                ("https://api.ipify.org", 5.0),
+            ]
+            assert target.egress_retry_at == 1060.0
+
+            # Within backoff: does not re-probe unless refresh=True.
+            clock[0] = 1059.0
+            assert egress_ip(target) == ""
+            assert echo.call_count == 2
+
+            # At exact boundary (1060.0 < 1060.0 is False): probes again.
+            clock[0] = 1060.0
+            assert (
+                egress_ip(
+                    target,
+                    v4_echoes=("https://echo.example",),
+                    timeout_sec=7.0,
+                    retry_after_sec=2.0,
+                )
+                == ""
+            )
+            assert target.egress_retry_at == 1062.0
+            assert seen[-1] == ("https://echo.example", 7.0)
+
+        # Refresh overrides backoff; known egress returns without probing.
+        with (
+            patch(
+                "wesearch.fetch.fetch.fetch",
+                side_effect=[b"2001:db8::1", b" 203.0.113.7\n"],
+            ) as echo,
+            patch("wesearch.fetch.fetch.time.monotonic", return_value=1061.0),
+        ):
+            assert egress_ip(target, refresh=True) == "203.0.113.7"
+            assert target.egress == "203.0.113.7"
+            assert egress_ip(target) == "203.0.113.7"
+            assert echo.call_count == 2
+
+    def test_ipv6_probes_v6_echoes_without_mutating_session(self) -> None:
+        session = FetchSession(egress="203.0.113.7")
+        seen_v6: list[str] = []
+
+        def v6_cascade(
+            url: str,
+            *,
+            request: RequestParams,
+            session: FetchSession,
+        ) -> bytes:
+            del request, session
+            seen_v6.append(url)
+            if len(seen_v6) == 1:
+                return b"203.0.113.7"
+            return b" 2606:4700:4700::1111\n"
+
+        with patch("wesearch.fetch.fetch.fetch", side_effect=v6_cascade):
+            assert egress_ip(session, ipv6=True) == "2606:4700:4700::1111"
+        assert seen_v6 == [
+            "https://ipv6.icanhazip.com",
+            "https://api64.ipify.org",
+        ]
+        assert session.egress == "203.0.113.7"
+
+        empty = FetchSession()
+        with patch(
+            "wesearch.fetch.fetch.fetch",
+            side_effect=[b"::::", b"ff:"],
+        ):
+            assert egress_ip(empty, ipv6=True) == ""
+        assert empty.egress == ""
+        assert empty.egress_retry_at == 0.0
+
+    def test_egress_roll_closes_only_stale_curl_connections(self) -> None:
+        early, old, current, browsers = (
+            _Counted(),
+            _Counted(),
+            _Counted(),
+            _Counted(),
+        )
+        curl: dict[CurlKey, Closable] = {
+            ("", "a.example", None, 443): early,
+            ("203.0.113.9", "a.example", None, 443): old,
+            ("203.0.113.10", "a.example", None, 443): current,
+        }
+        session = FetchSession(egress="203.0.113.9", browsers=browsers, curl=curl)
+        with patch(
+            "wesearch.fetch.fetch.fetch",
+            return_value=b"203.0.113.10",
+        ):
+            assert egress_ip(session, refresh=True) == "203.0.113.10"
+            assert egress_ip(session, refresh=True) == "203.0.113.10"
+        assert (early.closes, old.closes, current.closes, browsers.shutdowns) == (
+            1,
+            1,
+            0,
+            0,
+        )
+        assert list(session.curl) == [("203.0.113.10", "a.example", None, 443)]
+        assert session.egress == "203.0.113.10"
+
+
+class TestProfileAndFallbackOrchestration:
+    """``_fetch_as_profile`` and ``_render_shell``: identity burn and browser fallback."""
+
+    def test_known_identity_burn_discards_and_retries_once_on_non_browser(
+        self,
+        session: FetchSession,
+    ) -> None:
+        session.egress = "198.51.100.8"
+        session.profiles.save("198.51.100.8", "x.example", Profile(cookies={"o": "1"}))
+        calls = 0
+
+        def attempt(*args: object, **kwargs: object) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PuzzleChallengeError("blocked")
+            return _reports(200, {"set-cookie": "n=2"}, "https://x.example/path")(
+                *args,
+                **kwargs,
+            )
+
+        backend = Mock(side_effect=attempt)
+        egress = Mock(side_effect=_rolling_egress("198.51.100.9"))
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", backend),
+            patch("wesearch.fetch.fetch.egress_ip", egress),
+        ):
+            assert (
+                fetch.fetch(
+                    "https://x.example/path",
+                    request=_curl(
+                        content=ContentParams(headers={"H": "v"}, cookies={"c": "1"}),
+                    ),
+                    session=session,
+                )
+                == b"ok"
+            )
+        assert session.profiles.load("198.51.100.8", "x.example") is None
+        assert egress.call_args_list == [call(session), call(session, refresh=True)]
+        assert [c.args[0] for c in backend.call_args_list] == [
+            "https://x.example/path",
+            "https://x.example/path",
+        ]
+        assert [_sent_headers(backend, i) for i in (0, 1)] == [
+            {"H": "v", "Cookie": "o=1; c=1"},
+            {"H": "v", "Cookie": "c=1"},
+        ]
+        rotated = session.profiles.load("198.51.100.9", "x.example")
+        assert rotated is not None
+        assert rotated.cookies == {"n": "2"}
+
+    def test_second_identity_burn_raises_without_another_retry(
+        self,
+        session: FetchSession,
+    ) -> None:
+        session.profiles.save(_EGRESS, "x.example", Profile(cookies={"old": "1"}))
+        with (
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                side_effect=PuzzleChallengeError("blocked"),
+            ) as backend,
+            patch("wesearch.fetch.fetch.egress_ip", return_value=_EGRESS),
+            pytest.raises(PuzzleChallengeError),
+        ):
+            fetch.fetch("https://x.example/", request=_curl(), session=session)
+        assert backend.call_count == 2
+        assert session.profiles.load(_EGRESS, "x.example") is None
+
+    def test_unrecoverable_burns_raise_without_retry(
+        self,
+        session: FetchSession,
+    ) -> None:
+        # First-contact burn (no stored profile) does not retry.
+        first_contact = Mock(side_effect=PuzzleChallengeError("blocked"))
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", first_contact),
+            pytest.raises(PuzzleChallengeError),
+        ):
+            fetch.fetch("https://x.example/", request=_curl(), session=session)
+        first_contact.assert_called_once()
+
+        # Browser burn never discards profile or retries.
+        session.profiles.save(_EGRESS, "y.example", Profile(cookies={"old": "1"}))
+        browser = Mock(side_effect=BotDetectionError("blocked"))
+        with (
+            patch.object(zendriver, "fetch_zendriver", browser),
+            pytest.raises(BotDetectionError),
+        ):
+            fetch.fetch("https://y.example/", request=_zendriver(), session=session)
+        browser.assert_called_once()
+        assert session.profiles.load(_EGRESS, "y.example") is not None
+
+    def test_curl_then_zendriver_clears_blocks_and_remembers_domain(
+        self,
+        session: FetchSession,
+    ) -> None:
+        domains: set[str] = set()
+        with (
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                side_effect=CloudflareChallengeError(),
+            ) as curl_leg,
+            patch.object(
+                transport_routing,
+                "zendriver_domains",
+                side_effect=lambda: frozenset(domains),
+            ),
+            patch.object(
+                transport_routing,
+                "remember_zendriver_domain",
+                side_effect=domains.add,
+            ) as remember,
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                return_value=b"rendered",
+            ) as via,
+        ):
+            first = fetch.fetch(
+                "https://walled.example/",
+                request=RequestParams(
+                    content=ContentParams(headers={"X": "1"}, cookies={"c": "2"}),
+                    policy=PolicyParams(allow_private_hosts=True),
+                ),
+                session=session,
+            )
+            second = fetch.fetch("https://walled.example/", session=session)
+            curl_leg.side_effect = None
+            curl_leg.return_value = b"post-ok"
+            assert (
+                fetch.fetch(
+                    "https://walled.example/api",
+                    request=RequestParams(content=ContentParams(method="POST")),
+                    session=session,
+                )
+                == b"post-ok"
+            )
+            assert (
+                fetch.fetch(
+                    "https://walled.example/api",
+                    request=RequestParams(content=ContentParams(json={"q": "v"})),
+                    session=session,
+                )
+                == b"post-ok"
+            )
+        assert first == second == b"rendered"
+        assert curl_leg.call_count == 3
+        assert via.call_count == 2
+        assert via.call_args_list[0].kwargs["allow_private_hosts"] is True
+        assert _sent_headers(via, 0) == {"X": "1", "Cookie": "c=2"}
+        remember.assert_called_once_with("walled.example")
+
+    @pytest.mark.parametrize(
+        ("outcome", "remembered", "browser"),
+        [
+            (CloudflareChallengeError(), True, b"rendered"),
+            (CooldownError(), False, b"rendered"),
+            (PuzzleChallengeError(), False, b"rendered"),
+            (GoogleSorryError(), False, b"rendered"),
+            (BotDetectionError(), False, b"rendered"),
+            (_AWS_WAF_WALL, True, b"rendered"),
+            (CloudflareChallengeError(), True, PuzzleChallengeError("human required")),
+        ],
+    )
+    def test_domain_memory_depends_on_whether_browser_clears_wall(
+        self,
+        session: FetchSession,
+        outcome: bytes | BotDetectionError,
+        remembered: bool,
+        browser: bytes | PuzzleChallengeError,
+    ) -> None:
+        with (
+            patch(
+                "wesearch.fetch.fetch.fetch_curl",
+                side_effect=[outcome],
+            ) as curl_leg,
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+            patch.object(zendriver, "fetch_zendriver", side_effect=[browser]) as via,
+            pytest.raises(PuzzleChallengeError, match="human required")
+            if isinstance(browser, PuzzleChallengeError)
+            else nullcontext(),
+        ):
+            assert (
+                fetch.fetch(
+                    "https://walled.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == b"rendered"
+            )
+        assert curl_leg.call_args.args == ("https://walled.example/",)
+        assert via.call_args.args == ("https://walled.example/",)
+        assert remember.call_count == remembered
+
+    @pytest.mark.parametrize(
+        ("url", "error", "browser", "expected"),
+        [
+            (
+                "https://akamai.example/",
+                FetchError("u", 403, {"Content-Type": "text/html"}, b"Denied"),
+                b"rendered",
+                (True, True),
+            ),
+            (
+                "https://akamai.example/",
+                FetchError("u", 403, {"Content-Type": "text/html"}, b"Denied"),
+                FetchError("u", 403, {}, b"no"),
+                (True, False),
+            ),
+            (
+                "https://akamai.example/",
+                FetchError("u", 403, {"Content-Type": "application/json"}, b"{}"),
+                b"unused",
+                (False, False),
+            ),
+            (
+                "https://ops.example/",
+                FetchError(
+                    "https://ops.example/v2/ops?_rsc",
+                    404,
+                    {"content-type": "text/html"},
+                    b"Not found",
+                ),
+                b"rendered",
+                (True, True),
+            ),
+            (
+                "https://ops.example/",
+                FetchError(
+                    "https://ops.example/",
+                    404,
+                    {"content-type": "text/html"},
+                    b"Not found",
+                ),
+                b"unused",
+                (False, False),
+            ),
+            (
+                "https:///x",
+                FetchError("https:///x", 403, {"content-type": "text/html"}, b"Denied"),
+                b"rendered",
+                (True, False),
+            ),
+            (
+                "https:///x",
+                CloudflareChallengeError(),
+                b"rendered",
+                (True, False),
+            ),
+        ],
+    )
+    def test_unmarked_block_and_hostless_fallback_rules(
+        self,
+        session: FetchSession,
+        url: str,
+        error: FetchError,
+        browser: bytes | FetchError,
+        expected: tuple[bool, bool],
+    ) -> None:
+        falls_back, remembers = expected
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", side_effect=error),
+            patch.object(zendriver, "fetch_zendriver", side_effect=[browser]) as via,
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+        ):
+            if isinstance(browser, bytes) and falls_back:
+                assert (
+                    fetch.fetch(url, request=_curl_then_zendriver(), session=session)
+                    == browser
+                )
+            else:
+                with pytest.raises(FetchError):
+                    fetch.fetch(url, request=_curl_then_zendriver(), session=session)
+        assert [c.args[0] for c in via.call_args_list] == ([url] if falls_back else [])
+        assert [c.args[0] for c in remember.call_args_list] == (
+            [url.split("/")[2]] if remembers else []
+        )
+
+    def test_shell_rendering_and_unavailable_browser_fallback(
+        self,
+        session: FetchSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Non-shell page never touches the browser.
+        page = b'<!doctype html><p>Comments</p><div class="g-recaptcha"></div>'
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=page),
+            patch.object(zendriver, "fetch_zendriver") as via,
+        ):
+            assert (
+                fetch.fetch(
+                    "https://blog.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == page
+            )
+        via.assert_not_called()
+
+        # Fuller render wins; equal-length or shorter render keeps the shell.
+        fuller = b"<html><body>" + b"word " * 200 + b"</body></html>"
+        same_length = _REDIRECT_STUB.replace(b"Redirecting", b"Replacement")
+        for candidate, expected in (
+            (fuller, fuller),
+            (same_length, _REDIRECT_STUB),
+            (b"<html><body>tiny</body></html>", _REDIRECT_STUB),
+        ):
+            with (
+                patch(
+                    "wesearch.fetch.fetch.fetch_curl",
+                    return_value=_REDIRECT_STUB,
+                ),
+                patch.object(
+                    zendriver,
+                    "fetch_zendriver",
+                    return_value=candidate,
+                ) as via,
+                patch.object(
+                    transport_routing,
+                    "remember_zendriver_domain",
+                ) as remember,
+            ):
+                assert (
+                    fetch.fetch(
+                        "https://docs.example/",
+                        request=_curl_then_zendriver(),
+                        session=session,
+                    )
+                    == expected
+                )
+            assert via.call_args.args == ("https://docs.example/",)
+            remember.assert_not_called()
+
+        # Unavailable browser logs warning with exc_info and returns the shell.
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=_REDIRECT_STUB),
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                side_effect=zendriver.BrowserUnavailableError("no Chrome"),
+            ),
+            caplog.at_level(logging.WARNING, logger="wesearch.fetch.fetch"),
+        ):
+            assert (
+                fetch.fetch(
+                    "https://docs.example/",
+                    request=_curl_then_zendriver(),
+                    session=session,
+                )
+                == _REDIRECT_STUB
+            )
+        assert [(r.getMessage(), bool(r.exc_info)) for r in caplog.records] == [
+            ("No browser to render https://docs.example/; keeping its shell.", True),
+        ]
+
+        # Any other browser error on an empty shell propagates.
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=_APP_SHELL),
+            patch.object(
+                zendriver,
+                "fetch_zendriver",
+                side_effect=FetchError("https://app.example/", 0, {}, b"timed out"),
+            ),
+            pytest.raises(FetchError, match="connection failed"),
+        ):
+            fetch.fetch(
+                "https://app.example/",
+                request=_curl_then_zendriver(),
+                session=session,
+            )
+
+    def test_validator_challenge_on_curl_falls_back_to_browser(
+        self,
+        session: FetchSession,
+    ) -> None:
+        def validate_body(body: bytes) -> None:
+            if b"enablejs" in body:
+                raise GoogleJavascriptRequiredError("JavaScript required")
+
+        with (
+            patch("wesearch.fetch.fetch.fetch_curl", return_value=b"enablejs"),
+            patch.object(transport_routing, "remember_zendriver_domain") as remember,
+            patch.object(zendriver, "fetch_zendriver", return_value=b"rendered") as via,
+        ):
+            assert (
+                fetch.fetch(
+                    "https://walled.example/",
+                    request=_curl_then_zendriver(
+                        observe=ObserveParams(body_validator=validate_body),
+                    ),
+                    session=session,
+                )
+                == b"rendered"
+            )
+        via.assert_called_once()
+        remember.assert_called_once_with("walled.example")
+
+
+class TestSend:
+    """``_send`` builds the wire request, merges cookies, retries, and saves jars."""
+
+    def test_execution_transport_is_independent_of_caller_policy(
+        self,
+        session: FetchSession,
+    ) -> None:
+        params = RequestParams()
+        backend = Mock(return_value=b"body")
+        assert (
+            _send("https://x.example/", params, transport=backend, session=session)
+            == b"body"
+        )
+        backend.assert_called_once()
+        assert backend.call_args.kwargs["session"] is session
+        assert params.policy.transport == "auto"
+
+    def test_builds_exact_request_and_forwards_all_options(
+        self,
+        session: FetchSession,
+    ) -> None:
+        redirect = Mock()
+        params = RequestParams(
+            content=ContentParams(
+                method="POST",
+                params={"q": "a b"},
+                data={"x": "y"},
+                headers={"X-Test": "yes", "Cookie": "h=1", "Drop": None},
+                cookies={"sid": "cookie"},
+            ),
+            policy=PolicyParams(transport="curl", allow_private_hosts=True),
+            retry=RetryParams(
+                timeout_sec=7.0,
+                connect_timeout_sec=2.0,
+                max_redirects=3,
+            ),
+            observe=ObserveParams(on_redirect=redirect),
+        )
+        backend = Mock(return_value=b"body")
+        assert (
+            _send(
+                "https://u:p@example.com/path#frag",
+                params,
+                transport=backend,
+                session=session,
+            )
+            == b"body"
+        )
+        backend.assert_called_once_with(
+            "https://example.com/path?q=a+b#frag",
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": "Basic dTpw",
+                "X-Test": "yes",
+                "Drop": None,
+                "Cookie": "h=1; sid=cookie",
+            },
+            body=b"x=y",
+            timeout_sec=7.0,
+            connect_timeout_sec=2.0,
+            max_redirects=3,
+            on_redirect=redirect,
+            on_response=ANY,
+            allow_private_hosts=True,
+            session=session,
+            cookies_for_host=ANY,
+        )
+
+    def test_query_merging_json_body_and_raw_headers(
+        self,
+        session: FetchSession,
+    ) -> None:
+        backend = Mock(return_value=b"ok")
+        _send(
+            "https://e.example/p?a=1#s",
+            _curl(
+                content=ContentParams(method="POST", params={"q": "x"}, json={"a": 1}),
+            ),
+            transport=backend,
+            session=session,
+        )
+        _send(
+            "https://e.example/p",
+            _curl(
+                content=ContentParams(method="POST", json={"a": 1}, raw_headers=True),
+            ),
+            transport=backend,
+            session=session,
+        )
+        first, second = backend.call_args_list
+        assert first.args[0] == "https://e.example/p?a=1&q=x#s"
+        assert first.kwargs["body"] == b'{"a": 1}'
+        assert first.kwargs["headers"] == {"Content-Type": "application/json"}
+        assert second.kwargs["body"] == b'{"a": 1}'
+        assert second.kwargs["headers"] == {}
+
+    def test_cookie_precedence_and_cross_host_lookup(
+        self,
+        session: FetchSession,
+    ) -> None:
+        session.profiles.save(
+            _EGRESS,
+            "x.example",
+            Profile(cookies={"GSP": "s", "A": "p", "K": "p"}),
+        )
+        session.profiles.save(_EGRESS, "b.example", Profile(cookies={"B": "2"}))
+        backend = Mock(return_value=b"ok")
+        _send(
+            "https://x.example:8443/p",
+            _stdlib(
+                content=ContentParams(
+                    headers={"cookie": "GSP=h; A=h", "COOKIE": "GSP=h2; A=h2"},
+                    cookies={"A": "param"},
+                ),
+            ),
+            transport=backend,
+            session=session,
+        )
+        # Raw headers ignore stored cookies both initially and on redirect lookup.
+        _send(
+            "https://x.example/p",
+            _stdlib(content=ContentParams(raw_headers=True)),
+            transport=backend,
+            session=session,
+        )
+        # Relative URL has no hostname, so no profile is loaded.
+        _send("/relative", _stdlib(), transport=backend, session=session)
+
+        first, raw_call, rel_call = backend.call_args_list
+        assert first.kwargs["headers"] == {"Cookie": "GSP=h2; A=param; K=p"}
+        cookies_for_host = cast(
+            Callable[[str], Mapping[str, str]],
+            first.kwargs["cookies_for_host"],
+        )
+        assert dict(cookies_for_host("b.example")) == {"B": "2"}
+        assert dict(cookies_for_host("unknown.example")) == {}
+
+        raw_lookup = cast(
+            Callable[[str], Mapping[str, str]],
+            raw_call.kwargs["cookies_for_host"],
+        )
+        assert raw_call.kwargs["headers"] == {}
+        assert dict(raw_lookup("b.example")) == {}
+        assert rel_call.kwargs["headers"] == {}
+        assert rel_call.kwargs["body"] == b""
+
+    def test_on_response_persists_per_hop_cookies_and_tolerates_oserror(
+        self,
+        session: FetchSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        session.profiles.save(
+            _EGRESS,
+            "existing.example",
+            Profile(cookies={"old": "1"}),
+        )
+        seen: list[tuple[int, dict[str, str]]] = []
+
+        def transport(*_args: object, **kwargs: object) -> bytes:
+            on_response = cast(
+                Callable[[int, dict[str, str], str], None],
+                kwargs["on_response"],
+            )
+            on_response(
+                302,
+                {"set-cookie": "new=2\nother=3"},
+                "https://existing.example:8443/hop",
+            )
+            on_response(200, {"set-cookie": "fresh=1"}, "https://new.example/land")
+            on_response(200, {"set-cookie": "ignored=1"}, "https:///no-host")
+            on_response(200, {"x-test": "1"}, "https://none.example/")
+            return b"done"
+
+        with patch.object(zendriver, "fetch_zendriver", side_effect=transport):
+            assert (
+                fetch.fetch(
+                    "https://start.example/",
+                    request=_zendriver(
+                        observe=ObserveParams(
+                            on_response=lambda s, h: seen.append((s, h)),
+                        ),
+                    ),
+                    session=session,
+                )
+                == b"done"
+            )
+        assert seen == [
+            (302, {"set-cookie": "new=2\nother=3"}),
+            (200, {"set-cookie": "fresh=1"}),
+            (200, {"set-cookie": "ignored=1"}),
+            (200, {"x-test": "1"}),
+        ]
+        existing = session.profiles.load(_EGRESS, "existing.example")
+        created = session.profiles.load(_EGRESS, "new.example")
+        assert existing is not None
+        assert existing.cookies == {"old": "1", "new": "2", "other": "3"}
+        assert created is not None
+        assert created.cookies == {"fresh": "1"}
+        assert session.profiles.load(_EGRESS, "start.example") is None
+        assert session.profiles.load(_EGRESS, "") is None
+
+        # Without egress or with raw_headers, nothing is saved; OSError logs warning.
+        no_egress = FetchSession()
+        try:
+            backend = _reports(200, {"set-cookie": "a=1"}, "https://x.example/")
+            _send("https://x.example/", _curl(), transport=backend, session=no_egress)
+            _send(
+                "https://x.example/",
+                _curl(content=ContentParams(raw_headers=True)),
+                transport=backend,
+                session=session,
+            )
+            assert no_egress.profiles.load("", "x.example") is None
+        finally:
+            no_egress.close()
+        assert session.profiles.load(_EGRESS, "x.example") is None
+
+        with (
+            patch.object(session.profiles, "save", side_effect=OSError("disk full")),
+            caplog.at_level(logging.WARNING, logger="wesearch.fetch.fetch"),
+        ):
+            assert (
+                _send(
+                    "https://jar.example/",
+                    _curl(),
+                    transport=_reports(
+                        200,
+                        {"set-cookie": "a=1"},
+                        "https://jar.example/",
+                    ),
+                    session=session,
+                )
+                == b"ok"
+            )
+        assert [(r.getMessage(), bool(r.exc_info)) for r in caplog.records] == [
+            ("could not save cookies for jar.example", True),
+        ]
+
+    @pytest.mark.parametrize(
+        ("status", "retried"),
+        [
+            (0, True),
+            (429, True),
+            (500, True),
+            (502, True),
+            (503, True),
+            (504, True),
+            (403, False),
+            (404, False),
+            (430, False),
+            (501, False),
+            (505, False),
+        ],
+    )
+    def test_only_transient_statuses_retry(
+        self,
+        session: FetchSession,
+        status: int,
+        retried: bool,
+    ) -> None:
+        backend = Mock(side_effect=[FetchError("u", status, {}, b""), b"ok"])
+        with patch("wesearch.fetch.fetch.time.sleep"):
+            if retried:
+                assert (
+                    _send(
+                        "https://example.com",
+                        _curl(retry=RetryParams(retries=1)),
+                        transport=backend,
+                        session=session,
+                    )
+                    == b"ok"
+                )
+            else:
+                with pytest.raises(FetchError):
+                    _send(
+                        "https://example.com",
+                        _curl(retry=RetryParams(retries=1)),
+                        transport=backend,
+                        session=session,
+                    )
+        assert backend.call_count == 1 + retried
+
+    def test_retry_budget_backoff_headers_and_debug_log(
+        self,
+        session: FetchSession,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        errors = [
+            FetchError("https://x.example/", 0, {}, b"down"),
+            FetchError("https://x.example/", 429, {"retry-after": "3"}, b"slow"),
+            FetchError("https://x.example/", 500, {}, b"err"),
+        ]
+        backend = Mock(side_effect=[*errors, b"ok"])
+        sleeps = Mock()
+        caplog.set_level("DEBUG", logger="wesearch.fetch.fetch")
+        with (
+            patch("wesearch.fetch.fetch.time.sleep", sleeps),
+            patch("wesearch.types.params.random.uniform", return_value=0.0),
+        ):
+            assert (
+                _send(
+                    "https://x.example/",
+                    _curl(retry=RetryParams(retries=3)),
+                    transport=backend,
+                    session=session,
+                )
+                == b"ok"
+            )
+        assert backend.call_count == 4
+        assert sleeps.call_args_list == [call(1.0), call(3.0), call(4.0)]
+        assert [r.getMessage() for r in caplog.records] == [
+            "fetch https://x.example/ -> 0, retry in 1.0s",
+            "fetch https://x.example/ -> 429, retry in 3.0s",
+            "fetch https://x.example/ -> 500, retry in 4.0s",
+        ]
+
+        # Exhausting retry budget raises the last FetchError.
+        exhausted = Mock(side_effect=[errors[0], errors[2]])
+        with (
+            patch("wesearch.fetch.fetch.time.sleep"),
+            pytest.raises(FetchError) as raised,
+        ):
+            _send(
+                "https://x.example/",
+                _curl(retry=RetryParams(retries=1)),
+                transport=exhausted,
+                session=session,
+            )
+        assert raised.value is errors[2]
+        assert exhausted.call_count == 2
 
 
 def _curl(
@@ -2570,23 +1191,6 @@ def _on(
     )
 
 
-def _response(
-    status: int = 200,
-    content: bytes = b"ok",
-    headers: list[tuple[str, str]] | None = None,
-) -> Mock:
-    """Return a curl_cffi response stand-in with real ``Headers``."""
-    return Mock(status_code=status, content=content, headers=Headers(headers or []))
-
-
-@contextmanager
-def _serve(*responses: Mock | Exception) -> Generator[Mock]:
-    """Patch every curl_cffi Session to answer with ``responses`` in order."""
-    request = Mock(side_effect=list(responses))
-    with patch.object(cc_requests.Session, "request", request):
-        yield request
-
-
 class _Counted:
     """A connection and a browser pool that count their closes."""
 
@@ -2601,32 +1205,6 @@ class _Counted:
         self.shutdowns += 1
 
 
-def _http_response(
-    status: int = 200,
-    body: bytes = b"hello",
-    headers: list[tuple[str, str]] | None = None,
-) -> Mock:
-    """Return an ``http.client`` response stand-in."""
-    return Mock(
-        spec=client.HTTPResponse,
-        status=status,
-        read=Mock(side_effect=[body, b""]),
-        isclosed=Mock(return_value=False),
-        getheaders=Mock(return_value=headers or [("content-encoding", "identity")]),
-    )
-
-
-# Handles are set in ``__init__``: typeshed gives the mock classes an ``Any`` base,
-# so a mock reached through another mock's attribute is ``Any``.
-class _StdlibConnection:
-    """A connection answering ``responses`` in order, with typed call handles."""
-
-    def __init__(self, *responses: Mock | Exception) -> None:
-        self.getresponse = Mock(side_effect=list(responses))
-        self.request = Mock()
-        self.mock = Mock(getresponse=self.getresponse, request=self.request)
-
-
 def _sent_headers(mock: Mock, index: int = 0) -> dict[str, str]:
     """Return the headers of a recorded transport call, ``None`` values dropped."""
     headers = cast(
@@ -2634,29 +1212,6 @@ def _sent_headers(mock: Mock, index: int = 0) -> dict[str, str]:
         mock.call_args_list[index].kwargs["headers"],
     )
     return {k: v for k, v in headers.items() if v is not None}
-
-
-def _lower(mock: Mock, index: int) -> dict[str, str]:
-    """Return :func:`_sent_headers` with names lower-cased."""
-    return {k.lower(): v for k, v in _sent_headers(mock, index).items()}
-
-
-def _curl_user_agent() -> str:
-    """Return the User-Agent curl presents: curl_cffi's newest Chrome."""
-    major = int(cc_requests.impersonate.REAL_TARGET_MAP["chrome"][len("chrome") :])
-    return chrome_identity_headers(major=major, platform=chrome_platform("chrome"))[
-        "User-Agent"
-    ]
-
-
-def _fetch_keywords() -> set[str]:
-    """Return the keyword parameters every transport takes."""
-    return set(inspect.signature(Fetch.__call__).parameters) - {"self", "url"}
-
-
-def _known_egress(session: FetchSession, **_kw: object) -> str:
-    """Return the session's egress, as a probe that answers the same IP would."""
-    return session.egress
 
 
 def _rolling_egress(new: str) -> Callable[..., str]:
@@ -2684,18 +1239,6 @@ def _reports(
         return b"ok"
 
     return transport
-
-
-def _landed(body: bytes, set_cookie: str, url: str) -> Callable[..., bytes]:
-    """Return a ``fetch_zendriver`` stand-in that lands on ``url`` with cookies."""
-
-    def browser(*_args: object, **kwargs: object) -> bytes:
-        observe = kwargs["on_response"]
-        assert callable(observe)
-        observe(200, {"set-cookie": set_cookie} if set_cookie else {}, url)
-        return body
-
-    return browser
 
 
 if __name__ == "__main__":

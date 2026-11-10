@@ -9,7 +9,6 @@ Usage::
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 
@@ -101,9 +100,12 @@ def fetch(
     bare, _ = without_userinfo(url)
     with gated(bare, egress=egress, gate=session.gate):
         try:
-            if not params.content.raw_headers:
-                return _fetch_as_profile(url, params, session=session)
-            return _send(url, params, session=session)
+            return _fetch_as_profile(
+                url,
+                params,
+                transport=params.policy.transport,
+                session=session,
+            )
         except BotDetectionError as block:
             if block.url:
                 raise
@@ -225,20 +227,23 @@ def _fetch_as_profile(
     url: str,
     params: RequestParams,
     *,
+    transport: Transport,
     session: FetchSession,
 ) -> bytes:
-    """Fetch with this egress's stored cookies for the host, saving what it sets."""
+    """Fetch on ``transport``, recovering stored identities unless the request is raw."""
     domain = urlparse(url).hostname or ""
     transport = resolve_transport(
-        params.policy.transport,
+        transport,
         method=params.content.method,
+        raw_headers=params.content.raw_headers,
         has_body=params.content.has_body,
         domain=domain,
     )
+    browser = zendriver.fetch_zendriver
     if transport == "curl-then-zendriver":
         # The browser clears blocks curl cannot; anything else it would not help.
         try:
-            body = _fetch_as_profile(url, _on(params, "curl"), session=session)
+            body = _fetch_as_profile(url, params, transport="curl", session=session)
         except BotDetectionError as block:
             browser_clears = block.browser_clears
         except FetchError as error:
@@ -246,7 +251,7 @@ def _fetch_as_profile(
             # refusal may be the site's own.
             if not is_unmarked_block(error, requested=url):
                 raise
-            body = _fetch_as_profile(url, _on(params, "zendriver"), session=session)
+            body = _send(url, params, transport=browser, session=session)
             if domain:
                 transport_routing.remember_zendriver_domain(domain)
             return body
@@ -262,21 +267,23 @@ def _fetch_as_profile(
             browser_clears = wall.browser_clears
         if domain and browser_clears:
             transport_routing.remember_zendriver_domain(domain)
-        return _fetch_as_profile(url, _on(params, "zendriver"), session=session)
-    params = _on(params, transport)
+        return _send(url, params, transport=browser, session=session)
+    if transport == "zendriver":
+        return _send(url, params, transport=browser, session=session)
+    send = fetch_stdlib if transport == "stdlib" else fetch_curl
     try:
-        return _send(url, params, session=session)
+        return _send(url, params, transport=send, session=session)
     except BotDetectionError:
         # A stored identity may be what got blocked: forget it and retry once
         # from a freshly probed egress. The browser's wall is final.
         if (
-            transport == "zendriver"
+            params.content.raw_headers
             or session.profiles.load(session.egress, domain) is None
         ):
             raise
         session.profiles.discard(session.egress, domain)
         egress_ip(session, refresh=True)
-        return _send(url, params, session=session)
+        return _send(url, params, transport=send, session=session)
 
 
 # A render that fails raises: the shell has no content, so returning it would pass the
@@ -291,7 +298,12 @@ def _render_shell(
 ) -> bytes:
     """Return the browser's render of ``url`` when it has more text than ``shell``."""
     try:
-        rendered = _fetch_as_profile(url, _on(params, "zendriver"), session=session)
+        rendered = _send(
+            url,
+            params,
+            transport=zendriver.fetch_zendriver,
+            session=session,
+        )
     except zendriver.BrowserUnavailableError:
         logger.warning(
             "No browser to render %s; keeping its shell.",
@@ -302,15 +314,11 @@ def _render_shell(
     return rendered if visible_chars(rendered) > visible_chars(shell) else shell
 
 
-def _on(params: RequestParams, transport: Transport) -> RequestParams:
-    """Return ``params`` with ``transport``."""
-    return replace(params, policy=replace(params.policy, transport=transport))
-
-
 def _send(
     url: str,
     params: RequestParams,
     *,
+    transport: Fetch,
     session: FetchSession,
 ) -> bytes:
     """Send ``params`` once, with retries; a raw request sends and files no profile."""
@@ -360,17 +368,6 @@ def _send(
         headers = merge_headers({}, {**headers, "Cookie": cookie}) | {
             k: v for k, v in headers.items() if v is None
         }
-    transports: dict[Transport, Fetch] = {
-        "curl": fetch_curl,
-        "stdlib": fetch_stdlib,
-        "zendriver": zendriver.fetch_zendriver,
-    }
-    # The caller resolved ``auto`` already, except for a raw request, which only
-    # curl sends whatever its method; so only curl's availability is left.
-    transport = resolve_transport(
-        params.policy.transport,
-        raw_headers=content.raw_headers,
-    )
     landed: dict[str, dict[str, str]] = {}
 
     def on_response(status: int, received: dict[str, str], hop: str) -> None:
@@ -383,7 +380,7 @@ def _send(
     attempt = 0
     while True:
         try:
-            body_out = transports[transport](
+            body_out = transport(
                 url,
                 method=content.method,
                 headers=headers,
