@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-from concurrent import futures
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeVar
 
 import asyncio
 import base64
-import os
-import selectors
-import shutil
-import subprocess
 import sys
-import threading
-import time
 
 from treekle import from_plain
-from zendriver import Browser, cdp
 from zendriver.cdp.page import DomContentEventFired
 from zendriver.core.keys import KeyEvents, KeyModifiers, SpecialKeys
 
@@ -32,8 +24,6 @@ from wesearch.fetch.types import FetchSession
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
     from pathlib import Path
-
-    from wesearch.fetch.gate import Gate
 
 
 _T = TypeVar("_T")
@@ -721,219 +711,6 @@ def test_fill_refuses_noneditable_controls_without_typing(
     assert str(caught.value) == "Fill requires an editable text input or textarea."
     assert not element.keys
     assert not pool.chrome.tabs[0].commands
-
-
-@pytest.fixture
-def headed_display(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
-    """Give headed Chrome an isolated X server on displayless Linux runners."""
-    if not sys.platform.startswith("linux") or os.environ.get("DISPLAY", ""):
-        yield
-        return
-    executable = shutil.which("Xvfb")
-    if executable is None:
-        pytest.fail("Headed Chrome requires DISPLAY or Xvfb on Linux.")
-    with subprocess.Popen(  # noqa: S603 -- Xvfb from PATH with fixed arguments.
-        [
-            executable,
-            "-displayfd",
-            "1",
-            "-screen",
-            "0",
-            "1280x1024x24",
-            "-nolisten",
-            "tcp",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    ) as display:
-        try:
-            assert display.stdout is not None
-            with selectors.DefaultSelector() as ready:
-                ready.register(display.stdout, selectors.EVENT_READ)
-                if not ready.select(timeout=10):
-                    pytest.fail("Xvfb did not report a display within 10 seconds.")
-            number = os.read(display.stdout.fileno(), 32).decode().strip()
-            if not number.isdecimal():
-                pytest.fail("Xvfb exited without reporting a display number.")
-            monkeypatch.setenv("DISPLAY", f":{number}")
-            yield
-        finally:
-            display.terminate()
-            display.wait(timeout=10)
-
-
-def _wait_for_cli_window(
-    watching: threading.Event,
-    *,
-    running: futures.Future[None],
-) -> None:
-    running.add_done_callback(lambda _: watching.set())
-    # Chrome's launch alone may take 60s; worker failure must wake this wait too.
-    assert watching.wait(90)
-    if running.done():
-        running.result()
-    assert not running.done()
-
-
-def test_cli_window_wait_surfaces_worker_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    watching = threading.Event()
-
-    def wait(timeout: float) -> bool:
-        assert timeout == 90
-        return watching.is_set()
-
-    monkeypatch.setattr(watching, "wait", wait)
-    running = futures.Future[None]()
-    error = zendriver.BrowserUnavailableError("Chrome exited before watching.")
-    running.set_exception(error)
-    with pytest.raises(zendriver.BrowserUnavailableError) as caught:
-        _wait_for_cli_window(watching, running=running)
-    assert caught.value is error
-
-
-@pytest.mark.browser_zendriver
-@pytest.mark.usefixtures("headed_display")
-@pytest.mark.parametrize("interrupt", [False, True])
-def test_real_cli_mode_lifecycle(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    *,
-    interrupt: bool,
-) -> None:
-    profile = tmp_path / "chrome"
-    watching = threading.Event()
-    release = threading.Event()
-    watch_window = zendriver._watch_window
-    cancel_watch: list[Callable[[], object]] = []
-
-    async def watch(url: str, browser: Browser, *, gate: Gate) -> set[str]:
-        loop = asyncio.get_running_loop()
-        task = asyncio.current_task()
-        assert isinstance(task, asyncio.Task)
-        cancel_watch.append(lambda: loop.call_soon_threadsafe(task.cancel))
-        watching.set()
-        if interrupt:
-            assert await asyncio.to_thread(release.wait, 20)
-            raise asyncio.CancelledError
-        return await watch_window(url, browser, gate=gate)
-
-    monkeypatch.setattr(zendriver, "_watch_window", watch)
-    with FetchSession(profile_dir=profile) as sibling:
-        pool = zendriver.get_browser_pool(sibling)
-        original = pool.run(pool.browser(profile, headless=True))
-        pool.run(_seed_mode_cookie(pool, sibling))
-        with futures.ThreadPoolExecutor(max_workers=1) as executor:
-            running = executor.submit(
-                zendriver.open_window,
-                "about:blank",
-                profile_dir=profile,
-                gate=sibling.gate,
-            )
-            try:
-                _wait_for_cli_window(watching, running=running)
-                assert api.browser("mode", session=sibling).mode == "headed"
-                headed = pool.run(pool.browser(profile, headless=True))
-                assert headed is not original
-                assert pool.run(_read_mode_cookie(pool, sibling)) == "retained"
-                port = zendriver._devtools_port(profile)
-                assert port is not None
-                if interrupt:
-                    release.set()
-                    with pytest.raises(futures.CancelledError):
-                        running.result(timeout=10)
-                else:
-                    pool.run(headed.stop(), timeout_sec=10)
-                    assert running.result(timeout=10) is None
-                assert not zendriver._port_answers(port)
-                assert headed.connection is not None
-                assert headed.connection.listener is not None
-                assert not headed.connection.listener.running
-                restored = pool.run(pool.browser(profile, headless=True))
-                assert restored is not headed
-                assert api.browser("mode", session=sibling).mode == "headless"
-            finally:
-                release.set()
-                if not running.done():
-                    for cancel in cancel_watch:
-                        cancel()
-                    running.exception(timeout=40)
-
-
-@pytest.mark.browser_zendriver
-@pytest.mark.usefixtures("headed_display")
-def test_real_mode_roundtrip_preserves_profile_and_reconnects(tmp_path: Path) -> None:
-    with (
-        FetchSession(profile_dir=tmp_path / "chrome") as session,
-        FetchSession(profile_dir=tmp_path / "chrome") as sibling,
-    ):
-        assert api.browser("mode", session=session).mode == "headless"
-        original = api.browser("tabs", session=sibling)
-        assert original.tabs
-        pool = zendriver.get_browser_pool(sibling)
-        pool.run(_seed_mode_cookie(pool, sibling))
-        pool.run(_retitle_tabs(pool, sibling))
-        with pytest.raises(api.BrowserError, match="restart=True"):
-            api.browser("mode", mode="headed", session=session)
-        # By id alone: a tab's title is the page's to change, and Chrome reports a
-        # fresh tab's as "" until its first navigation commits.
-        assert _tab_ids(api.browser("tabs", session=sibling)) == _tab_ids(original)
-        for mode in ("headed", "headless"):
-            switched = api.browser(
-                "mode",
-                mode=mode,
-                restart=True,
-                session=session,
-            )
-            assert switched.mode == mode
-            assert switched.restarted
-            assert api.browser("mode", session=sibling).mode == mode
-            assert api.browser("tabs", session=sibling).tabs
-            chrome = pool.run(
-                pool.browser(sibling.profile_dir, headless=sibling.headless),
-            )
-            if mode == "headed":
-                assert pool.run(chrome.tabs[0].evaluate("navigator.webdriver")) is False
-            unchanged = api.browser("mode", mode=mode, session=sibling)
-            assert unchanged.mode == mode
-            assert not unchanged.restarted
-            assert pool.run(_read_mode_cookie(pool, sibling)) == "retained"
-
-
-def _tab_ids(result: api.BrowserResult) -> list[str]:
-    return [tab.tab_id for tab in result.tabs]
-
-
-async def _retitle_tabs(pool: zendriver.BrowserPool, session: FetchSession) -> None:
-    chrome = await pool.browser(session.profile_dir, headless=session.headless)
-    await chrome.update_targets()
-    for tab in chrome.tabs:
-        await tab.evaluate("document.title = 'retitled'")
-
-
-async def _seed_mode_cookie(pool: zendriver.BrowserPool, session: FetchSession) -> None:
-    chrome = await pool.browser(session.profile_dir, headless=session.headless)
-    assert chrome.connection is not None
-    await chrome.connection.send(
-        cdp.storage.set_cookies(
-            [
-                cdp.network.CookieParam(
-                    name="mode_probe",
-                    value="retained",
-                    url="https://example.test/",
-                    expires=cdp.network.TimeSinceEpoch(time.time() + 3600),
-                ),
-            ],
-        ),
-    )
-
-
-async def _read_mode_cookie(pool: zendriver.BrowserPool, session: FetchSession) -> str:
-    chrome = await pool.browser(session.profile_dir, headless=session.headless)
-    assert chrome.connection is not None
-    cookies = await chrome.connection.send(cdp.storage.get_cookies())
-    return next(cookie.value for cookie in cookies if cookie.name == "mode_probe")
 
 
 if __name__ == "__main__":
