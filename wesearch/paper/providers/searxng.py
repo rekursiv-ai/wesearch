@@ -19,11 +19,11 @@ from wesearch.paper.errors import BackendError
 from wesearch.paper.ids import ARXIV_URL_RE, looks_like_paper_id
 from wesearch.paper.types import PaperRecord
 from wesearch.search.searxng import searxng
-from wesearch.search.types import PaperResult, SearchError
 
 
 if TYPE_CHECKING:
     from wesearch.fetch import FetchSession, Transport
+    from wesearch.search.types import PaperResult
 
 
 __all__ = ["search"]
@@ -68,16 +68,14 @@ def search(
 
     """
     try:
-        hits = list(
-            searxng(
-                query,
-                num_results=limit if limit is not None else default_fetch,
-                categories="science",
-                transport=transport,
-                session=session,
-            ),
+        hits = searxng(
+            query,
+            num_results=limit if limit is not None else default_fetch,
+            categories="science",
+            transport=transport,
+            session=session,
         )
-    except (SearchError, RuntimeError) as e:
+    except RuntimeError as e:
         raise BackendError(f"SearXNG science search failed: {e}") from e
     records = [_to_record(hit) for hit in hits]
     if year_from is not None or year_to is not None:

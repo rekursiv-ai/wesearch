@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Literal
+from unittest.mock import Mock, patch
 
 import base64
 import hashlib
@@ -60,14 +61,6 @@ class TestChromeClientHints:
             ),
         }
 
-    def test_does_not_include_the_basic_hints(self) -> None:
-        # sec-ch-ua / -mobile / -platform are curl_cffi's job (its impersonate
-        # emits them); this helper adds ONLY the extended set curl omits.
-        h = chrome_client_hints(major=146, platform="macOS")
-        assert "sec-ch-ua" not in h
-        assert "sec-ch-ua-mobile" not in h
-        assert "sec-ch-ua-platform" not in h
-
     def test_full_version_flows_into_full_version_list(self) -> None:
         h = chrome_client_hints(
             major=146,
@@ -85,7 +78,10 @@ class TestGoogleChromeHeaders:
     def test_has_google_only_headers_not_client_hints(self) -> None:
         # chrome_headers_for_google is the Google-ONLY set; the extended client
         # hints are a separate set, so they must NOT appear here.
-        h = chrome_headers_for_google(major=146, platform="macOS")
+        now = Mock(return_value=datetime(2000, 1, 1, tzinfo=UTC))
+        with patch("wesearch.chrome.headers.datetime", Mock(now=now)):
+            h = chrome_headers_for_google(major=146, platform="macOS")
+        now.assert_called_once_with(UTC)
         assert list(h) == [
             "x-browser-channel",
             "x-browser-year",
@@ -93,7 +89,7 @@ class TestGoogleChromeHeaders:
             "x-client-data",
         ]
         assert h["x-browser-channel"] == "stable"
-        assert h["x-browser-year"] == str(datetime.now(UTC).year)
+        assert h["x-browser-year"] == "2000"
         assert h["x-client-data"] == "CInbygE="
         assert "sec-ch-ua-arch" not in h
         assert "sec-ch-ua-full-version-list" not in h
@@ -151,11 +147,6 @@ class TestGoogleChromeHeaders:
         )
         want = base64.b64encode(hashlib.sha1((key + ua).encode()).digest()).decode()  # noqa: S324 -- The fixture uses the protocol's legacy digest representation.
         assert h["x-browser-validation"] == want
-
-    def test_validation_differs_by_platform(self) -> None:
-        mac = chrome_headers_for_google(major=146, platform="macOS")
-        lin = chrome_headers_for_google(major=146, platform="Linux")
-        assert mac["x-browser-validation"] != lin["x-browser-validation"]
 
     def test_android_validation_uses_mobile_ua(self) -> None:
         # Android's UA ends "Mobile Safari"; its validation token must reflect
@@ -221,6 +212,8 @@ class TestImpersonateVersionPlatform:
             (131, '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"'),
             (146, '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"'),
             (150, '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"'),
+            (151, '"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"'),
+            (153, '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"'),
             (154, '"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"'),
         ],
     )

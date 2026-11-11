@@ -112,8 +112,7 @@ def test_format_omits_empty_fields_rather_than_separators() -> None:
     out = format_result(
         PaperResult(url="https://p", title="P", snippet="", doi="10.1/y"),
     )
-    assert "·  ·" not in out
-    assert out.endswith("doi:10.1/y")
+    assert out == "[P](https://p)\n  doi:10.1/y"
 
 
 def test_lean_result_keeps_category_fields() -> None:
@@ -137,16 +136,14 @@ def test_lean_result_keeps_category_fields() -> None:
     # otherwise have to strip "doi:" to recover the identifier, and parse
     # "cites:42" to recover a number. ``paper/render.lean_record`` emits raw
     # for the same reason.
-    assert lean["doi"] == "10.1/x"
-    assert lean["citations"] == 42
-    assert lean["authors"] == "A"
-
-
-def test_text_labels_live_only_in_the_text_rendering() -> None:
-    """The label belongs to presentation; the value belongs to both."""
-    paper = PaperResult(url="https://p", title="P", snippet="", doi="10.1/x")
-    assert "doi:10.1/x" in format_result(paper)
-    assert lean_result(paper)["doi"] == "10.1/x"
+    assert lean == {
+        "url": "https://p",
+        "title": "P",
+        "snippet": "s",
+        "authors": "A",
+        "doi": "10.1/x",
+        "citations": 42,
+    }
 
 
 def test_a_reported_zero_survives_both_renderings() -> None:

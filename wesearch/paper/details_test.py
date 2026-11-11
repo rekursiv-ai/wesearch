@@ -27,15 +27,72 @@ from wesearch.paper.types import PaperRecord
 
 
 class TestCitations:
-    def test_year_filter_keeps_recent(self) -> None:
-        entries: list[dict[str, MutablePlainTree]] = [
-            {"isInfluential": True, "citingPaper": {"title": "new", "year": 2024}},
-            {"isInfluential": False, "citingPaper": {"title": "old", "year": 2010}},
-            {"citingPaper": None},
-            {"citingPaper": "malformed"},
-            {"citingPaper": ["malformed"]},
-        ]
-
+    @pytest.mark.parametrize(
+        ("entries", "year_from", "expected", "complete"),
+        [
+            (
+                [
+                    {
+                        "isInfluential": True,
+                        "citingPaper": {"title": "new", "year": 2024},
+                    },
+                    {
+                        "isInfluential": False,
+                        "citingPaper": {"title": "old", "year": 2010},
+                    },
+                    {"citingPaper": None},
+                    {"citingPaper": "malformed"},
+                    {"citingPaper": ["malformed"]},
+                ],
+                2020,
+                ["new"],
+                True,
+            ),
+            (
+                [
+                    {
+                        "isInfluential": True,
+                        "citingPaper": {"title": "boundary", "year": 2020},
+                    },
+                ],
+                2020,
+                ["boundary"],
+                True,
+            ),
+            (
+                [
+                    {
+                        "isInfluential": True,
+                        "citingPaper": {"title": "real", "year": 2024},
+                    },
+                    {
+                        "isInfluential": True,
+                        "citingPaper": {"title": "bogus", "year": True},
+                    },
+                ],
+                1,
+                ["real"],
+                True,
+            ),
+            (
+                [
+                    {"isInfluential": True, "citingPaper": {"title": "keep"}},
+                    {"isInfluential": False, "citingPaper": {"title": "drop"}},
+                ],
+                None,
+                ["keep"],
+                False,
+            ),
+        ],
+        ids=["recent", "boundary", "boolean-year", "influential"],
+    )
+    def test_citation_filters(
+        self,
+        entries: list[dict[str, MutablePlainTree]],
+        year_from: int | None,
+        expected: list[str],
+        complete: bool,
+    ) -> None:
         def fake(
             path: str,
             params: dict[str, str | int],
@@ -45,78 +102,15 @@ class TestCitations:
             session: FetchSession | None = None,
         ) -> Page:
             del path, params, limit, session
-            return Page(entries=[e for e in entries if keep(e)], complete=True)
+            return Page(entries=[e for e in entries if keep(e)], complete=complete)
 
         with patch.object(s2, "paginate", side_effect=fake):
-            listing = citations("doi", "10.1/x", limit=None, year_from=2020)
-        assert [r.title for r in listing.records] == ["new"]
-
-    def test_year_filter_includes_the_boundary_year(self) -> None:
-        entry: dict[str, MutablePlainTree] = {
-            "isInfluential": True,
-            "citingPaper": {"title": "boundary", "year": 2020},
-        }
-
-        def fake(
-            path: str,
-            params: dict[str, str | int],
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del path, params, limit, session
-            return Page(entries=[entry] if keep(entry) else [], complete=True)
-
-        with patch.object(s2, "paginate", side_effect=fake):
-            listing = citations("doi", "10.1/x", limit=None, year_from=2020)
-
-        assert [r.title for r in listing.records] == ["boundary"]
-
-    def test_year_filter_excludes_a_bool_year(self) -> None:
-        # ``isinstance(True, int)`` is true, so a JSON ``true`` year passed the
-        # filter and was compared as the value 1.
-        entries: list[dict[str, MutablePlainTree]] = [
-            {"isInfluential": True, "citingPaper": {"title": "real", "year": 2024}},
-            {"isInfluential": True, "citingPaper": {"title": "bogus", "year": True}},
-        ]
-
-        def fake(
-            path: str,
-            params: dict[str, str | int],
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del path, params, limit, session
-            return Page(entries=[e for e in entries if keep(e)], complete=True)
-
-        with patch.object(s2, "paginate", side_effect=fake):
-            listing = citations("doi", "10.1/x", limit=None, year_from=1)
-        assert [r.title for r in listing.records] == ["real"]
-
-    def test_influential_only_filters(self) -> None:
-        entries: list[dict[str, MutablePlainTree]] = [
-            {"isInfluential": True, "citingPaper": {"title": "keep"}},
-            {"isInfluential": False, "citingPaper": {"title": "drop"}},
-        ]
-
-        def fake(
-            path: str,
-            params: dict[str, str | int],
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del path, params, limit, session
-            return Page(entries=[e for e in entries if keep(e)], complete=False)
-
-        with patch.object(s2, "paginate", side_effect=fake):
-            listing = citations("doi", "10.1/x", limit=5, influential_only=True)
-        assert [r.title for r in listing.records] == ["keep"]
-        assert not listing.complete  # Cursor not exhausted -> more may exist.
+            if year_from is None:
+                listing = citations("doi", "10.1/x", limit=5, influential_only=True)
+            else:
+                listing = citations("doi", "10.1/x", limit=None, year_from=year_from)
+        assert [r.title for r in listing.records] == expected
+        assert listing.complete is complete
 
     def test_s2_requests_exact_citation_path_params_and_options(self) -> None:
         page = Page(entries=[], complete=True)

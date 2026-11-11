@@ -239,15 +239,25 @@ def paginate(
       PaperError: From any request other than the depth-ceiling 400.
 
     """
-    return _paginate(
-        path,
-        params,
-        limit=limit,
-        keep=keep,
-        page_size=page_rows,
-        transport=transport,
-        session=session,
+    cursor = Cursor(
+        fetch=functools.partial(
+            _fetch_offset_page,
+            path,
+            params,
+            transport=transport,
+            session=session,
+        ),
+        rows=lambda body: cast(
+            list[dict[str, MutablePlainTree]],
+            body.get("data") or [],
+        ),
+        advance=_next_offset_advance,
+        page_size_max=page_rows,
+        # S2 answers a too-deep page with 400 ``offset + limit < 10000`` -- the
+        # only 400 a cursor walk can provoke -- so treat it as the depth ceiling.
+        is_depth_ceiling=lambda e: e.status == 400,
     )
+    return paper_paginate.paginate(cursor, limit=limit, keep=keep)
 
 
 def search_paginate(
@@ -452,7 +462,7 @@ def _send(
                 "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
             ),
         ) from e
-    except (TimeoutError, OSError) as e:
+    except OSError as e:
         raise BackendError(
             f"Semantic Scholar request failed (timeout or connection error): {e}",
         ) from e
@@ -475,38 +485,6 @@ def _loads(raw: bytes, what: str) -> dict[str, MutablePlainTree] | list[object]:
         raise BackendError(
             f"Semantic Scholar returned invalid JSON for {what}: {e}",
         ) from e
-
-
-def _paginate(
-    path: str,
-    params: dict[str, str | int],
-    *,
-    limit: int | None,
-    keep: Callable[[dict[str, MutablePlainTree]], bool],
-    page_size: int,
-    transport: Transport,
-    session: FetchSession | None = None,
-) -> Page:
-    """Build an S2 offset/next :class:`Cursor` and delegate to the walker."""
-    cursor = Cursor(
-        fetch=functools.partial(
-            _fetch_offset_page,
-            path,
-            params,
-            transport=transport,
-            session=session,
-        ),
-        rows=lambda body: cast(
-            list[dict[str, MutablePlainTree]],
-            body.get("data") or [],
-        ),
-        advance=_next_offset_advance,
-        page_size_max=page_size,
-        # S2 answers a too-deep page with 400 ``offset + limit < 10000`` -- the
-        # only 400 a cursor walk can provoke -- so treat it as the depth ceiling.
-        is_depth_ceiling=lambda e: e.status == 400,
-    )
-    return paper_paginate.paginate(cursor, limit=limit, keep=keep)
 
 
 def _fetch_offset_page(

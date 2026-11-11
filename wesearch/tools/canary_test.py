@@ -46,12 +46,18 @@ def test_probe_reports_results_and_bypasses_the_cache(
     assert seen["query"] == "q"
     assert seen["backend"] == "duckduckgo"
     assert seen["cache_ttl_sec"] == 0
+    assert isinstance(seen["num_results"], int)
+    assert seen["num_results"] > 0
     assert elapsed == 0.25
 
 
 @pytest.mark.parametrize(
     ("outcome", "expected"),
-    [([], "no results"), (SearchError("blocked"), "SearchError: blocked")],
+    [
+        ([], "no results"),
+        (SearchError("blocked"), "SearchError: blocked"),
+        (SearchError("x" * 148), "SearchError: " + "x" * 147),
+    ],
 )
 def test_probe_reports_a_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -71,6 +77,7 @@ def test_probe_reports_a_failure(
 
     assert not ok
     assert expected in detail
+    assert len(detail) <= 160
     assert elapsed == 0.25
 
 
@@ -232,6 +239,8 @@ def test_browser_action_probe_checks_form_values_and_native_screenshot(
     monkeypatch.setattr(canary, "browser", act)
     ok, detail, elapsed = canary._probe_browser_actions()
     assert ok is bool(image), detail
+    if not image:
+        assert "png" in detail.casefold()
     expected: list[tuple[BrowserAction, dict[str, object]]] = [
         ("tabs", {}),
         ("open", {"url": probe_tab.url}),
@@ -295,10 +304,20 @@ def test_main_reports_browser_action_probe(
     )
 
 
-@pytest.mark.parametrize("failure", ["open", "echo", "lost-user-tab", "unclosed-tab"])
+@pytest.mark.parametrize(
+    ("failure", "cause"),
+    [
+        ("open", "open"),
+        ("echo", "echo"),
+        ("lost-user-tab", "unrelated"),
+        ("unclosed-tab", "close"),
+        ("long-error", "x" * 148),
+    ],
+)
 def test_browser_action_probe_reports_incomplete_or_destructive_results(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
+    cause: str,
 ) -> None:
     user_tab = BrowserTab(tab_id="user", url="https://example.com/", title="User")
     probe_tab = BrowserTab(
@@ -325,6 +344,8 @@ def test_browser_action_probe_reports_incomplete_or_destructive_results(
                 return BrowserResult()
         if action == "close":
             closed = True
+        if action == "inspect" and failure == "long-error":
+            raise ValueError("x" * 149)
         return BrowserResult(
             tab=probe_tab,
             text="no echo" if failure == "echo" else "wesearch-canary",
@@ -335,6 +356,8 @@ def test_browser_action_probe_reports_incomplete_or_destructive_results(
     ok, detail, _ = canary._probe_browser_actions()
     assert not ok
     assert "ValueError" in detail
+    assert cause in detail.casefold()
+    assert len(detail) <= 160
     assert closed is (failure != "open")
 
 

@@ -69,10 +69,10 @@ def search_authors(
     total = s2.search_total(data)
     entries = cast(list[dict[str, MutablePlainTree]], data.get("data") or [])
     records = [s2.author_record_from(e) for e in entries]
-    known = [record for record in records if record.h_index is not None]
-    unknown = [record for record in records if record.h_index is None]
-    known.sort(key=lambda record: record.h_index or 0, reverse=True)
-    records = known + unknown
+    records.sort(
+        key=lambda record: (record.h_index is not None, record.h_index or 0),
+        reverse=True,
+    )
     if limit is not None:
         records = records[:limit]
     return AuthorSearchResult(records=records, total=total)

@@ -59,11 +59,8 @@ def format_result(result: SearchResult) -> str:
         for k, v in detail_fields(result).items()
         if v is not None and v != ""
     ]
-    detail = "  " + " · ".join(p for p in kept if p) if any(kept) else ""
-    body = "\n".join(part for part in (result.snippet, detail) if part)
-    if body:
-        return f"{head}\n{body}"
-    return head
+    detail = "  " + " · ".join(kept) if kept else ""
+    return "\n".join(part for part in (head, result.snippet, detail) if part)
 
 
 def lean_result(result: SearchResult) -> dict[str, object]:

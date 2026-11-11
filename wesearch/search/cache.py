@@ -17,7 +17,7 @@ import logging
 import os
 import time
 
-from treekle import ReadError, from_plain, json_dumps, json_loads
+from treekle import json_dumps, json_loads
 
 from wesearch.lib.userdirs import cache_dir
 from wesearch.search.types import SearchResult
@@ -87,15 +87,14 @@ def _read(path: Path, *, ttl_sec: float) -> list[SearchResult] | None:
     try:
         if time.time() - path.stat().st_mtime > ttl_sec:
             return None
-        return from_plain(
-            json_loads(path.read_bytes()),
-            list[SearchResult],
-            allow_imports=True,
-        )
+        return json_loads(path.read_bytes(), list[SearchResult], allow_imports=True)
     except FileNotFoundError:
         return None
-    except (OSError, ReadError, ValueError):
-        logger.warning("Ignoring unreadable search cache entry %s.", path)
+    except (OSError, ValueError):
+        logger.warning(
+            "Ignoring unreadable search cache entry %s.",  # mutmut: accept[diagnostic-text] -- Case and decoration vary.
+            path,
+        )
         return None
 
 

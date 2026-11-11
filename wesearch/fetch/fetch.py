@@ -365,9 +365,14 @@ def _send(
         under_caller = {"Cookie": f"{cookie_header({}, stored)}; {written}"}
         # pragma: no mutate end
         cookie = cookie_header(under_caller, content.cookies)
-        headers = merge_headers({}, {**headers, "Cookie": cookie}) | {
-            k: v for k, v in headers.items() if v is None
-        }
+        headers = (
+            merge_headers(
+                {},
+                {k: v for k, v in headers.items() if k.lower() != "cookie"},
+            )
+            | {"Cookie": cookie}
+            | {k: v for k, v in headers.items() if v is None}
+        )
     landed: dict[str, dict[str, str]] = {}
 
     def on_response(status: int, received: dict[str, str], hop: str) -> None:

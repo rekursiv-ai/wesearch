@@ -48,7 +48,7 @@ def _identity(value: str) -> str:
     return value
 
 
-def _reference_five(value: str) -> str:
+def _five_words(value: str) -> str:
     del value
     return "one two three four five"
 
@@ -56,11 +56,6 @@ def _reference_five(value: str) -> str:
 def _reference_six(value: str) -> str:
     del value
     return "one two three four five six"
-
-
-def _converter_five(value: str) -> str:
-    del value
-    return "one two three four five"
 
 
 def _one_converter() -> dict[str, Callable[[str], str]]:
@@ -342,9 +337,12 @@ def test_parse_args_defaults_are_exact(capsys: pytest.CaptureFixture[str]) -> No
     assert "Compare HTML-to-text converters on real pages" in output
 
 
+@pytest.mark.parametrize("doc", [compare_extractors.__doc__, None])
 def test_parse_args_description_is_docstring_after_shebang(
     monkeypatch: pytest.MonkeyPatch,
+    doc: str | None,
 ) -> None:
+    monkeypatch.setattr(compare_extractors, "__doc__", doc)
     seen: list[str | None] = []
     real_init = argparse.ArgumentParser.__init__
 
@@ -358,13 +356,14 @@ def test_parse_args_description_is_docstring_after_shebang(
 
     monkeypatch.setattr(argparse.ArgumentParser, "__init__", init)
     compare_extractors._parse_args([])
-    doc = compare_extractors.__doc__
-    assert doc is not None
-    first, second, rest = doc.split("\n", 2)
-    assert first == "' 2>/dev/null #"
-    assert second.startswith("exec uv")
-    assert seen == [rest]
-    assert "\n\n" in rest
+    if doc is None:
+        assert seen == [None]
+    else:
+        first, second, rest = doc.split("\n", 2)
+        assert first == "' 2>/dev/null #"
+        assert second.startswith("exec uv")
+        assert seen == [rest]
+        assert "\n\n" in rest
 
 
 def test_print_table_includes_separator_and_empty_probe_cell(
@@ -408,7 +407,7 @@ def test_cached_html_forwards_url_and_request_and_replaces_invalid_bytes(
 
 
 def test_score_page_records_exact_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(compare_extractors, "reference_text", _reference_five)
+    monkeypatch.setattr(compare_extractors, "reference_text", _five_words)
     monkeypatch.setattr(compare_extractors, "converters", _one_converter)
     clocks = iter((1.0, 1.25))
     monkeypatch.setattr(time, "perf_counter", clocks.__next__)
@@ -596,7 +595,7 @@ def test_score_page_preserves_distortion_value(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(compare_extractors, "reference_text", _reference_six)
 
     def one_converter() -> dict[str, Callable[[str], str]]:
-        return {"x": _converter_five}
+        return {"x": _five_words}
 
     monkeypatch.setattr(compare_extractors, "converters", one_converter)
     _, scores = compare_extractors.score_page(

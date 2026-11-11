@@ -12,7 +12,7 @@ from functools import partial
 from pathlib import Path
 from types import GeneratorType, MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast, override
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import asyncio
 import contextlib
@@ -663,8 +663,15 @@ def test_fetch_zendriver_adopts_the_session_pool_and_bounds_its_wait(
     assert pool.shutdowns == 0, "a caller's session must stay open"
 
 
+@pytest.mark.parametrize(
+    ("defaults", "timeout_sec", "max_redirects"),
+    [(False, 7.0, 2), (True, 30.0, 10)],
+)
 def test_fetch_zendriver_forwards_navigation_policy_and_seeded_cookies(
     monkeypatch: pytest.MonkeyPatch,
+    defaults: bool,
+    timeout_sec: float,
+    max_redirects: int,
 ) -> None:
     seen: list[tuple[BrowserPool, str, dict[str, object]]] = []
 
@@ -683,13 +690,20 @@ def test_fetch_zendriver_forwards_navigation_policy_and_seeded_cookies(
     def observe(status: int, headers: dict[str, str], url: str) -> None:
         responses.append((status, headers, url))
 
+    transport = (
+        zendriver.fetch_zendriver
+        if defaults
+        else partial(
+            zendriver.fetch_zendriver,
+            timeout_sec=timeout_sec,
+            max_redirects=max_redirects,
+        )
+    )
     url = "http://127.0.0.1:8888/search"
     assert (
-        zendriver.fetch_zendriver(
+        transport(
             url,
             headers={"COOKIE": "a=YQ==; b=2", "X-Key": "k", "X-Gone": None},
-            timeout_sec=7.0,
-            max_redirects=2,
             on_redirect=redirects.append,
             on_response=observe,
             allow_private_hosts=True,
@@ -706,14 +720,15 @@ def test_fetch_zendriver_forwards_navigation_policy_and_seeded_cookies(
                 "headless": False,
                 "headers": {"X-Key": "k"},
                 "cookies": {"a": "YQ==", "b": "2"},
-                "timeout_sec": 7.0,
-                "max_redirects": 2,
+                "timeout_sec": timeout_sec,
+                "max_redirects": max_redirects,
                 "on_redirect": redirects.append,
                 "on_response": observe,
                 "allow_private_hosts": True,
             },
         ),
     ]
+    assert pool.waits == [timeout_sec + 30]
 
 
 class _OwnedPool(_RunningPool):
@@ -1252,10 +1267,14 @@ def test_load_timeout_includes_browser_acquisition() -> None:
 class _RaisingCloseTab(_FakeTab):
     """A tab whose ``close`` fails outright rather than hanging."""
 
+    def __init__(self, *, content: str, href: str) -> None:
+        super().__init__(content=content, href=href)
+        self.error = RuntimeError("close blew up")
+
     @override
     async def close(self) -> None:
         self.closed = True
-        raise RuntimeError("close blew up")
+        raise self.error
 
 
 class _RaisingCloseBrowser(_FakeBrowser):
@@ -2287,9 +2306,11 @@ async def test_request_guard_bounds_unresponsive_disable(
 
     timeout_at = asyncio.timeout_at
     loop = asyncio.get_running_loop()
+    budgets: list[float] = []
 
     def short_timeout(deadline: float | None) -> asyncio.Timeout:
         assert deadline is not None
+        budgets.append(deadline - loop.time())
         return timeout_at(loop.time() + 0.01)
 
     monkeypatch.setattr(asyncio, "timeout_at", short_timeout)
@@ -2297,11 +2318,12 @@ async def test_request_guard_bounds_unresponsive_disable(
     before = asyncio.all_tasks()
 
     async def go() -> None:
-        async with zendriver.guard_requests(cast(Tab, tab), deadline=loop.time() + 1):
+        async with zendriver.guard_requests(cast(Tab, tab), deadline=loop.time() + 10):
             pass
 
     with pytest.raises(TimeoutError):
         await go()
+    assert 0.0 < budgets[-1] <= 1.0
     assert asyncio.all_tasks() == before
     assert not tab.paused_handlers
     assert not tab.closed
@@ -2641,13 +2663,21 @@ def test_tab_close_logs_timeout_and_failure_exactly(
         _browser_with(HangingTab(content="<html>ok</html>", href="")),
         timeout_sec=2.0,
     )
-    _load_page(_RaisingCloseBrowser(), timeout_sec=2.0)
+    browser = _RaisingCloseBrowser()
+    assert (
+        _load_page(browser, timeout_sec=2.0) == b"<html><title>Plain</title>ok</html>"
+    )
     assert [record.getMessage() for record in caplog.records] == [
         "tab close timed out; abandoning the tab",
         "tab close failed; abandoning the tab",
     ]
     assert caplog.records[0].exc_info is None
-    assert caplog.records[1].exc_info is not None
+    assert isinstance(browser.last_tab, _RaisingCloseTab)
+    assert browser.last_tab.closed
+    error_info = caplog.records[1].exc_info
+    assert isinstance(error_info, tuple)
+    assert error_info[1] is browser.last_tab.error
+    assert error_info[2] is not None
 
 
 # -- BrowserPool --------------------------------------------------------------
@@ -3985,7 +4015,8 @@ def test_shared_chrome_reuses_profile_in_owners_mount_namespace(
         )
 
     monkeypatch.setattr(subprocess, "Popen", popen)
-    assert zendriver._shared_chrome(profile, headless=True) == 4242
+    with patch.object(Path, "glob", return_value=iter([unrelated, process])):
+        assert zendriver._shared_chrome(profile, headless=True) == 4242
     assert not (profile / "SingletonLock").is_symlink()
 
 
@@ -4613,8 +4644,13 @@ def test_close_chrome_starts_and_stops_browser(monkeypatch: pytest.MonkeyPatch) 
         created.append(browser)
         return browser
 
+    def answers(port: int) -> bool:
+        assert port == 9222
+        assert created[0].stop_calls == 1
+        return False
+
     monkeypatch.setattr("zendriver.start", start)
-    monkeypatch.setattr(zendriver, "_port_answers", _answers_nowhere)
+    monkeypatch.setattr(zendriver, "_port_answers", answers)
     asyncio.run(zendriver._close_chrome(9222))
     assert len(created) == 1
     assert created[0].stop_calls == 1

@@ -418,144 +418,82 @@ class TestWorkToRecord:
 
 
 class TestReferences:
-    def test_resolves_then_batches(self) -> None:
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [
-                {
-                    "id": "https://openalex.org/W1",
-                    "referenced_works": [
-                        "https://openalex.org/W10",
-                        "https://openalex.org/W11",
-                    ],
-                },
-            ],
-        }
-        batch: dict[str, MutablePlainTree] = {
-            "meta": {"count": 2},
-            "results": [{"title": "ref-a"}, {"title": "ref-b"}],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(batch).encode(),
+    @pytest.mark.parametrize(
+        ("reference_urls", "titles", "limit", "expected_complete", "expected_filter"),
+        [
+            (
+                ["https://openalex.org/W10", "https://openalex.org/W11"],
+                ["ref-a", "ref-b"],
+                None,
+                True,
+                "openalex:W10|W11",
+            ),
+            (
+                ["https://openalex.org/W10", "https://openalex.org/W11"],
+                ["ref-a"],
+                None,
+                False,
+                "openalex:W10|W11",
+            ),
+            (
+                [123, "https://openalex.org/W10"],
+                ["ref"],
+                None,
+                True,
+                "openalex:W10",
+            ),
+            (
+                [
+                    "https://openalex.org/W10",
+                    "https://openalex.org/W11",
+                    "https://openalex.org/W10",
+                ],
+                ["ref-a", "ref-b"],
+                None,
+                True,
+                "openalex:W10|W11|W10",
+            ),
+            (
+                [
+                    "https://openalex.org/W10",
+                    "https://openalex.org/W11",
+                    "https://openalex.org/W12",
+                ],
+                ["ref-a"],
+                1,
+                False,
+                "openalex:W10",
+            ),
+        ],
+        ids=["resolved", "unresolved", "non-string-id", "duplicate-id", "limited"],
+    )
+    def test_resolves_then_batches(
+        self,
+        reference_urls: list[MutablePlainTree],
+        titles: list[str],
+        limit: int | None,
+        expected_complete: bool,
+        expected_filter: str,
+    ) -> None:
+        fetch = _bodies(
+            {
+                "results": [
+                    {
+                        "id": "https://openalex.org/W1",
+                        "referenced_works": reference_urls,
+                    },
+                ],
+            },
+            {
+                "meta": {"count": len(titles)},
+                "results": [{"title": title} for title in titles],
+            },
         )
         with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            records, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert [r.title for r in records] == ["ref-a", "ref-b"]
-        assert complete
-        # Second call resolves the referenced ids via the ``openalex:`` filter.
-        flt = _params(fetch)["filter"]
-        assert isinstance(flt, str)
-        assert "openalex:W10|W11" in flt
-
-    def test_unresolved_ref_ids_mark_incomplete(self) -> None:
-        # B1: the seed cites 2 works, but the batch resolve returns only 1 (the
-        # ``openalex:`` OR-filter silently drops an id it cannot resolve). With
-        # limit=None the old code reported complete=True from the REQUESTED count,
-        # hiding a short reference set -- the lying-`complete` paginate.py exists
-        # to prevent. `complete` must reflect the RESOLVED records, not intent.
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [
-                {
-                    "id": "https://openalex.org/W1",
-                    "referenced_works": [
-                        "https://openalex.org/W10",
-                        "https://openalex.org/W11",
-                    ],
-                },
-            ],
-        }
-        # count=1: OpenAlex resolved only W10, dropped W11.
-        batch: dict[str, MutablePlainTree] = {
-            "meta": {"count": 1},
-            "results": [{"title": "ref-a"}],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(batch).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            records, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert len(records) == 1  # Only 1 of 2 refs resolved.
-        assert not complete  # Must NOT claim complete when refs went missing.
-
-    def test_non_string_reference_ids_are_ignored(self) -> None:
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [
-                {
-                    "id": "https://openalex.org/W1",
-                    "referenced_works": [123, "https://openalex.org/W10"],
-                },
-            ],
-        }
-        batch: dict[str, MutablePlainTree] = {
-            "meta": {"count": 1},
-            "results": [{"title": "ref"}],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(batch).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            records, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert [record.title for record in records] == ["ref"]
-        assert complete
-        assert _params(fetch)["filter"] == "openalex:W10"
-
-    def test_duplicate_ref_id_still_complete(self) -> None:
-        # SPEC-A: referenced_works may repeat an id. The ``openalex:`` OR-filter
-        # de-dups, so the batch returns fewer records than the (dup-bearing)
-        # requested list -- but every DISTINCT id resolved, so this is COMPLETE.
-        # A naive ``len(records) == len(capped)`` mis-reports incomplete here.
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [
-                {
-                    "id": "https://openalex.org/W1",
-                    "referenced_works": [
-                        "https://openalex.org/W10",
-                        "https://openalex.org/W11",
-                        "https://openalex.org/W10",  # Duplicate of the first.
-                    ],
-                },
-            ],
-        }
-        # Both DISTINCT ids resolved (W10, W11); OpenAlex returns 2, not 3.
-        batch: dict[str, MutablePlainTree] = {
-            "meta": {"count": 2},
-            "results": [{"title": "ref-a"}, {"title": "ref-b"}],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(batch).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            _, complete = openalex.references("doi", "10.1/x", limit=None)
-        assert complete  # All distinct refs resolved -> complete despite dup.
-
-    def test_limit_truncates_and_marks_incomplete(self) -> None:
-        resolve: dict[str, MutablePlainTree] = {
-            "results": [
-                {
-                    "id": "https://openalex.org/W1",
-                    "referenced_works": [
-                        "https://openalex.org/W10",
-                        "https://openalex.org/W11",
-                        "https://openalex.org/W12",
-                    ],
-                },
-            ],
-        }
-        batch: dict[str, MutablePlainTree] = {
-            "meta": {"count": 1},
-            "results": [{"title": "ref-a"}],
-        }
-        fetch = _RecordingFetch(
-            json.dumps(resolve).encode(),
-            json.dumps(batch).encode(),
-        )
-        with patch("wesearch.paper.providers.openalex.fetch", fetch):
-            _, complete = openalex.references("doi", "10.1/x", limit=1)
-        assert not complete  # 3 referenced, only 1 requested.
-        assert _params(fetch)["filter"] == "openalex:W10"
+            records, complete = openalex.references("doi", "10.1/x", limit=limit)
+        assert [r.title for r in records] == titles
+        assert complete is expected_complete
+        assert _params(fetch)["filter"] == expected_filter
 
     def test_arxiv_seed_rejected(self) -> None:
         with pytest.raises(BackendError, match="DOIs only"):

@@ -304,7 +304,7 @@ def _get(
             rate_limit_message=rate_limit_message,
             treat_404_as_missing=False,
         ) from e
-    except (TimeoutError, OSError) as e:
+    except OSError as e:
         raise BackendError(
             f"OpenAlex request failed (timeout or connection error): {e}",
         ) from e
@@ -369,9 +369,9 @@ def _work_to_record(work: dict[str, MutablePlainTree]) -> PaperRecord:
     """Convert an OpenAlex work dict into a :class:`PaperRecord`."""
     authorships = _objects(work.get("authorships"))
     authors = tuple(
-        str(_object(a.get("author")).get("display_name"))
+        str(name)
         for a in authorships
-        if _object(a.get("author")).get("display_name")
+        if (name := _object(a.get("author")).get("display_name"))
     )
     title = str(work.get("title") or work.get("display_name") or "")
 

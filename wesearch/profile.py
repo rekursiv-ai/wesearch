@@ -298,7 +298,7 @@ def _try_decode(raw: bytes) -> Profile | None:
             cookies=from_plain(cookies, dict[str, str]),
             created=float(created),
         )
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return None
 
 

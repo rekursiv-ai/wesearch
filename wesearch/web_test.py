@@ -157,6 +157,7 @@ def test_fetch_web_reddit_rss_renders_feed() -> None:
 def test_a_failed_provider_route_falls_back_to_fetching_the_page(
     provider: str,
     url: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A provider is a better route, not the only one: Reddit's RSS, Google
     # News's feed, and the reader proxy each fail in ways the page does not.
@@ -167,10 +168,20 @@ def test_a_failed_provider_route_falls_back_to_fetching_the_page(
             "wesearch.web.fetch_with_reader_fallback",
             return_value=(b"<html><body>page</body></html>", False),
         ) as generic,
+        caplog.at_level("INFO", logger="wesearch.web"),
     ):
         result = fetch_web(url)
     assert result.text.strip() == "page"
     assert generic.call_args.args == (url,)
+    (record,) = caplog.records
+    assert record.levelname == "INFO"
+    message = record.getMessage()
+    assert url in message
+    assert "provider" in message.casefold()
+    assert "fetch" in message.casefold()
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[1] is err
+    assert record.exc_info[2] is not None
 
 
 def test_an_x_page_curl_gets_as_a_shell_is_rendered_by_the_shared_ladder() -> None:

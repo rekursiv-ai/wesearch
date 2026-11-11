@@ -30,7 +30,7 @@ def _empty_mag(query: str) -> dict[str, str]:
 
 def test_identity_of_doi_and_arxiv_doi() -> None:
     assert measure_fusion_identity._doi_identity("10.1/X") == {"doi:10.1/x"}
-    assert measure_fusion_identity._doi_identity("10.48550/arxiv.AbC123v2") == {
+    assert measure_fusion_identity._doi_identity("10.48550/ArXiV.AbC123V2") == {
         "doi:10.48550/arxiv.abc123v2",
         "arxiv:abc123",
     }
@@ -43,7 +43,7 @@ def test_doi_and_arxiv_keys() -> None:
         "arxiv:abc123",
     ]
     assert measure_fusion_identity._arxiv_keys(
-        _record(doi="10.48550/arxiv.AbC123v2"),
+        _record(doi="10.48550/ArXiV.AbC123V2"),
     ) == [
         "doi:10.48550/arxiv.abc123v2",
         "arxiv:abc123",

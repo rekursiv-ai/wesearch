@@ -15,7 +15,7 @@ back to its normalized title.
 
 from __future__ import annotations
 
-from itertools import count
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import re
@@ -59,25 +59,25 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
     # so an S2 rank counts for more; an OpenAlex-only paper still scores.
     # Not kwargs: both metrics measure_fusion_quality reports are invariant to
     # these -- weights only reorder a set the identity rule already fixed.
-    weights = ((s2_hits, "s2", 1.0), (oa_hits, "openalex", 0.7))
+    ranked = [
+        (rank, rec, backend, weight)
+        for backend, (hits, weight) in enumerate(((s2_hits, 1.0), (oa_hits, 0.7)))
+        for rank, rec in enumerate(hits, 1)
+    ]
 
-    groups = _group_by_identity([rec for hits, _label, _w in weights for rec in hits])
+    groups = _group_by_identity([rec for _, rec, _, _ in ranked])
     merged: dict[int, PaperRecord] = {}
-    score: dict[int, float] = {}
+    score: defaultdict[int, float] = defaultdict(float)
     # A backend that returns one paper twice (OpenAlex indexes a preprint and
     # its published version as separate works) must contribute ONE reciprocal
     # rank, not the sum of both rows -- otherwise a self-collision at ranks
     # 11-12 outranks that backend's own #1. Keep each backend's best rank only.
-    best_rank: dict[tuple[int, str], int] = {}
-    ranked = [
-        (rank, rec, label, weight)
-        for hits, label, weight in weights
-        for rank, rec in zip(count(1), hits)
-    ]
-    for root, (rank, rec, label, weight) in zip(groups, ranked, strict=True):
+    scored: set[tuple[int, int]] = set()
+    for index, root in enumerate(groups):
+        rank, rec, backend, weight = ranked[index]
         merged[root] = merged[root].merge(rec) if root in merged else rec
-        if best_rank.setdefault((root, label), rank) == rank:
-            score.setdefault(root, 0.0)
+        if (root, backend) not in scored:
+            scored.add((root, backend))
             score[root] += weight / (offset + rank)
     # Stable sort by descending score over insertion-ordered roots; the S2 loop
     # runs first so a coincidental score tie keeps S2's paper first.
