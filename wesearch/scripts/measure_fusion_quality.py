@@ -76,7 +76,8 @@ def main(
             f"limit={limit} overrun={over:2d} "
             f"duplicate-identities={residual:2d} total={result.total}",
         )
-        time.sleep(1.0)
+        # Paces queries under the search APIs' rate limits.
+        time.sleep(1.0)  # house-ignore[sleep] -- See above.
     print(
         f"\nTOTAL queries={sampled}/{len(queries)} records={total} "
         f"residual-duplicates={duplicates} limit-overruns={overruns}",

@@ -89,7 +89,8 @@ def main(
             f"doi+arxiv={len(by_arxiv):3d} mag_pairs={len(mag_pairs):3d} "
             f"mag_beyond_doi={len(extra):2d}",
         )
-        time.sleep(1.0)
+        # Paces queries under the search APIs' rate limits.
+        time.sleep(1.0)  # house-ignore[sleep] -- See above.
     print(
         f"\nTOTAL queries={sampled}/{len(queries)} doi={totals['doi']} "
         f"doi+arxiv={totals['arxiv']} "

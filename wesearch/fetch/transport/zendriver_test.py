@@ -3871,7 +3871,8 @@ def test_the_launch_lock_serializes_processes(tmp_path: Path) -> None:
     try:
         deadline = time.monotonic() + 20
         while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
+            # The holder is another process; only its marker file says it locked.
+            time.sleep(0.02)  # house-ignore[sleep] -- See above.
         assert marker.exists(), "the holder never took the lock"
         started = time.monotonic()
         with zendriver._launch_lock(profile):
