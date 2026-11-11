@@ -659,7 +659,10 @@ async def _load(
                 if remaining <= 0 or not (walled or filling):
                     break
                 if filling:
-                    await asyncio.sleep(shell_poll_sec)
+                    # The page fills in a remote renderer that signals no end.
+                    await asyncio.sleep(
+                        shell_poll_sec,
+                    )  # house-ignore[sleep] -- See above.
                     continue
                 try:
                     await asyncio.wait_for(navigated.wait(), timeout=remaining)
@@ -840,7 +843,8 @@ async def _close_chrome(port: int) -> None:
     while time.monotonic() < deadline:
         if not await asyncio.to_thread(_port_answers, port):
             return
-        await asyncio.sleep(0.05)
+        # Only the DevTools port says when Chrome has closed.
+        await asyncio.sleep(0.05)  # house-ignore[sleep] -- See above.
     raise BrowserUnavailableError(f"Chrome on DevTools port {port} did not close.")
 
 
@@ -1093,7 +1097,8 @@ def _start_shared_chrome(
             )
         if _port_answers(port):
             return port
-        time.sleep(0.05)
+        # Only the DevTools port says when Chrome is up.
+        time.sleep(0.05)  # house-ignore[sleep] -- See above.
     process.kill()
     process.wait()
     raise BrowserUnavailableError(
