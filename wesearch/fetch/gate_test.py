@@ -240,6 +240,11 @@ def test_challenges_list_oldest_first(clock: _Clock, gate: FileGate) -> None:
         gated("https://other.example/b", egress="", gate=gate),
     ):
         raise PuzzleChallengeError("challenge")
+    with (
+        pytest.raises(CooldownError, match=r"^other\.example\b"),
+        gated("https://other.example/b", egress="", gate=gate),
+    ):
+        pass
     clock.now += 1.0
     _block("https://probe.example/a")
     assert challenged_urls(gate=gate) == [
@@ -353,7 +358,7 @@ def test_cooldown_jitter_extends_the_lock_wait(gate: FileGate) -> None:
         return_value=0.5,
     ):
         refusal = gate.admit("k", policy)
-    assert not refusal.admitted
+    assert refusal.admitted is False
     assert refusal.wait_sec == pytest.approx(2.5)
 
 

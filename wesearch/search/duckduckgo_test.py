@@ -10,6 +10,7 @@ import logging
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams, resolve_transport
+from wesearch.fetch.common import merge_headers
 from wesearch.search.duckduckgo import (
     _duckduckgo_check_captcha,
     _duckduckgo_extract_url,
@@ -50,6 +51,7 @@ _HTML = """
 
 def test_quote_bangs_only_quotes_bang_tokens() -> None:
     assert _duckduckgo_quote_bangs("!w python !gh") == "'!w' python '!gh'"
+    assert _duckduckgo_quote_bangs("python !gh repo") == "python '!gh' repo"
     assert _duckduckgo_quote_bangs("plain query") == "plain query"
 
 
@@ -248,6 +250,19 @@ def test_duckduckgo_request_forwards_override_headers() -> None:
     assert request.retry.retries == 1
     assert request.retry.timeout_sec == 10.0
     assert request.retry.connect_timeout_sec == 3.0
+
+
+def test_duckduckgo_mixed_case_referer_keeps_last_callers_value() -> None:
+    with patch(
+        "wesearch.search.duckduckgo.fetch",
+        return_value=b'<div id="links"></div>',
+    ) as fetch_mock:
+        duckduckgo("q", headers={"referer": "first", "Referer": "last"})
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
+    normalized = merge_headers({}, request.content.headers)
+    assert {name.lower(): value for name, value in normalized.items()}[
+        "referer"
+    ] == "last"
 
 
 def test_duckduckgo_session_reaches_fetch() -> None:

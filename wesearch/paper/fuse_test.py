@@ -50,14 +50,7 @@ class TestFuse:
         s2 = [_rec("solo", doi="10.1/solo"), _rec("shared", doi="10.1/shared")]
         oa = [_rec("shared", doi="10.1/shared", source="openalex")]
         out = fuse(s2, oa)
-        assert out[0].doi == "10.1/shared"
-        assert set(out[0].sources) == {"s2", "openalex"}
-
-    def test_dedup_by_doi_merges_sources(self) -> None:
-        s2 = [_rec("t", doi="10.1/x")]
-        oa = [_rec("t", doi="10.1/x", source="openalex")]
-        out = fuse(s2, oa)
-        assert len(out) == 1
+        assert [record.doi for record in out] == ["10.1/shared", "10.1/solo"]
         assert set(out[0].sources) == {"s2", "openalex"}
 
     def test_identifiers_match_case_insensitively(self) -> None:
@@ -168,6 +161,13 @@ class TestFuse:
         oa_hits = [_rec("o1", doi="10.1/o1", source="openalex")]
         out = fuse(s2_hits, oa_hits)
         assert [record.title for record in out[-2:]] == ["o1", "s6"]
+
+    def test_rank_starts_at_one(self) -> None:
+        out = fuse(
+            [_rec(f"s{i}") for i in range(1, 8)],
+            [_rec(f"o{i}", source="openalex") for i in range(1, 3)],
+        )
+        assert [record.title for record in out[-2:]] == ["s7", "o2"]
 
 
 class TestAMissingTitleIsNotIdentity:

@@ -14,14 +14,14 @@ hides which one a change traded away -- so every converter is scored twice:
     page is the denominator because that is what a caller pays to send, and
     because it is independent of every candidate -- scoring against the visible
     text made the text dump its own contestant, unbeatable by construction.
-  recall: share of the page's visible word 5-grams the output still contains.
-    Lower means content was dropped. This is the honest cost of compression.
+  distortion: ``1 - F1`` of word 5-grams against the page's visible text.
+    Lower means less content loss and less unrelated output.
 
-The reference for both is every text node in the document, uncleaned. That is
+The reference for distortion is every text node in the document, uncleaned. That is
 the ceiling of "the textual elements of a page" -- the thing the tool promises.
 
 Article extractors (trafilatura's default, readability) score well on
-compression and badly on recall for any page that is not article-shaped: a
+compression and badly on distortion for any page that is not article-shaped: a
 dictionary entry, a Q&A thread, a profile timeline. Rule-based converters
 (html2text, markdownify) invert that. Which trade is right is a judgement about
 the corpus, so this script reports both and writes each output to disk for
@@ -32,9 +32,9 @@ includes bot-walled sites whose response varies by IP, hour, and challenge
 state, and a benchmark whose input moves cannot compare two runs. The cache
 lives under /opt/scratch/caches (never the checkout) and is safe to delete.
 
-``--probe`` additionally asserts per-page strings that must survive: the check
-that catches a converter silently truncating a page into plausible-looking
-output, which no aggregate score reveals.
+Every run reports missing per-page content probes in the ``p`` columns; these
+reveal lost strings that aggregate scores can hide. Missing probes do not
+change the exit status.
 '''
 # fmt: on
 
@@ -386,11 +386,10 @@ def _readability_markdown(page_html: str) -> str:
 # containing the whole page.
 def _word_grams(text: str, size: int = 5) -> frozenset[tuple[str, ...]]:
     """Return the text's word n-grams, ignoring case, markup, and whitespace."""
-    values = cast(
+    words = cast(
         list[str],
         re.findall(r"[\w']+", re.sub(r"\]\([^)]*\)", "]", text).lower()),
     )
-    words = list(values)
     return frozenset(
         tuple(words[i : i + size]) for i in range(max(0, len(words) - size + 1))
     )

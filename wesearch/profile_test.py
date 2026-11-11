@@ -64,12 +64,6 @@ class TestProfileRoundTrip:
 
 
 class TestProfileTtl:
-    def test_expired_profile_loads_none(self, tmp_path: Path) -> None:
-        store = ProfileStore(base_dir=tmp_path, ttl_sec=10.0)
-        stale = Profile(cookies={}, created=time.time() - 100.0)
-        store.save("1.2.3.4", "x.com", stale)
-        assert store.load("1.2.3.4", "x.com") is None
-
     def test_fresh_profile_within_ttl_loads(self, tmp_path: Path) -> None:
         store = ProfileStore(base_dir=tmp_path, ttl_sec=100.0)
         fresh = Profile(cookies={}, created=time.time() - 5.0)

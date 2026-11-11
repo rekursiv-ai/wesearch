@@ -21,6 +21,7 @@ from wesearch.fetch import (
     RequestParams,
     RetryParams,
 )
+from wesearch.fetch.common import merge_headers
 from wesearch.fetch.fetch import (
     _send,
     egress_ip,
@@ -950,6 +951,24 @@ class TestSend:
         assert dict(raw_lookup("b.example")) == {}
         assert rel_call.kwargs["headers"] == {}
         assert rel_call.kwargs["body"] == b""
+
+    def test_cookie_aliases_keep_explicit_cookies(self, session: FetchSession) -> None:
+        backend = Mock(return_value=b"ok")
+        _send(
+            "https://x.example/",
+            _stdlib(
+                content=ContentParams(
+                    headers={"Cookie": "early=1", "cookie": "late=2"},
+                    cookies={"extra": "3"},
+                ),
+            ),
+            transport=backend,
+            session=session,
+        )
+        normalized = merge_headers({}, _sent_headers(backend))
+        assert {name.lower(): value for name, value in normalized.items()}[
+            "cookie"
+        ] == ("late=2; extra=3")
 
     def test_on_response_persists_per_hop_cookies_and_tolerates_oserror(
         self,

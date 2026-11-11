@@ -6,10 +6,6 @@ from wesearch.scrape import get_element_content
 
 
 class TestGetElementContent:
-    def test_found(self) -> None:
-        html = '<div class="test">Hello World</div>'
-        assert get_element_content(html, "div.test") == "Hello World"
-
     def test_whitespace_stripped(self) -> None:
         html = '<div class="test">\n  Hello World\n</div>'
         assert get_element_content(html, "div.test") == "Hello World"

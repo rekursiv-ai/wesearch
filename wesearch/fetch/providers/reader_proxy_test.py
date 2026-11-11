@@ -119,7 +119,7 @@ class TestFetch:
         body = (
             b"Title: " + title + b"\n\nURL Source: https://quora.com/\n\n"
             b"Markdown Content:\nVerify you are human."
-        )
+        ).ljust(2001, b"x")
 
         def fake_fetch(
             url: str,
@@ -147,7 +147,7 @@ class TestFetch:
                 )
         assert raised.value.url == "https://quora.com/"
         assert raised.value.status == 200
-        assert raised.value.body == body
+        assert raised.value.body == body[:2000]
 
     @pytest.mark.parametrize("warning", [b"Warning:", b"warning:"])
     def test_soft_fail_sentinel_raises(self, warning: bytes) -> None:

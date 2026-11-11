@@ -91,15 +91,14 @@ def chrome_brands(major: int, *, full_version: str = "") -> str:
     grease_version = ("8", "99", "24")[major % 3] + (".0.0.0" if full_version else "")
     version = full_version or str(major)
     named = (
-        (grease, grease_version),
-        ("Chromium", version),
-        ("Google Chrome", version),
+        f'"{grease}";v="{grease_version}"',
+        f'"Chromium";v="{version}"',
+        f'"Google Chrome";v="{version}"',
     )
-    order = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))[
+    order = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (2, 0, 1), (1, 2, 0), (2, 1, 0))[
         major % 6
     ]
-    placed = sorted(zip(order, named, strict=True))
-    return ", ".join(f'"{brand}";v="{v}"' for _, (brand, v) in placed)
+    return ", ".join(named[index] for index in order)
 
 
 def chrome_identity_headers(*, major: int, platform: ChromePlatform) -> dict[str, str]:
@@ -220,36 +219,35 @@ def chrome_navigation_headers(
       headers: The ordered Chrome header map.
 
     """
-    identity = chrome_identity_headers(major=major, platform=platform)
-    user_agent = identity.pop("User-Agent")
-    h = identity
+    headers = chrome_identity_headers(major=major, platform=platform)
+    user_agent = headers.pop("User-Agent")
     if method in ("GET", "HEAD"):
-        h["Upgrade-Insecure-Requests"] = "1"
-        h["User-Agent"] = user_agent
-        h["Accept"] = (
+        headers["Upgrade-Insecure-Requests"] = "1"
+        headers["User-Agent"] = user_agent
+        headers["Accept"] = (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,image/apng,*/*;q=0.8,"
             "application/signed-exchange;v=b3;q=0.7"
         )
-        h["Sec-Fetch-Site"] = "none"
-        h["Sec-Fetch-Mode"] = "navigate"
-        h["Sec-Fetch-User"] = "?1"
-        h["Sec-Fetch-Dest"] = "document"
+        headers["Sec-Fetch-Site"] = "none"
+        headers["Sec-Fetch-Mode"] = "navigate"
+        headers["Sec-Fetch-User"] = "?1"
+        headers["Sec-Fetch-Dest"] = "document"
     else:
-        h["User-Agent"] = user_agent
-        h["Accept"] = "*/*"
+        headers["User-Agent"] = user_agent
+        headers["Accept"] = "*/*"
         if content_type:
-            h["Content-Type"] = content_type
+            headers["Content-Type"] = content_type
         if origin:
-            h["Origin"] = origin
-        h["Sec-Fetch-Site"] = "cross-site"
-        h["Sec-Fetch-Mode"] = "cors"
-        h["Sec-Fetch-Dest"] = "empty"
-    h["Accept-Encoding"] = "gzip, deflate, br, zstd"
-    h["Accept-Language"] = "en-US,en;q=0.9"
+            headers["Origin"] = origin
+        headers["Sec-Fetch-Site"] = "cross-site"
+        headers["Sec-Fetch-Mode"] = "cors"
+        headers["Sec-Fetch-Dest"] = "empty"
+    headers["Accept-Encoding"] = "gzip, deflate, br, zstd"
+    headers["Accept-Language"] = "en-US,en;q=0.9"
     if http2:
-        h["Priority"] = "u=0, i"
-    return h
+        headers["Priority"] = "u=0, i"
+    return headers
 
 
 def chrome_client_hints(
@@ -304,9 +302,7 @@ def is_google_property(host: str) -> bool:
       is_google: True when ``host`` is a Google-owned property.
 
     """
-    host = host.casefold()
-    while host.endswith("."):
-        host = host[:-1]
+    host = host.rstrip(".").casefold()
     return any(
         host == suffix or host.endswith(f".{suffix}")
         # Not exhaustive: only the Google properties this library fetches.

@@ -795,7 +795,7 @@ def _devtools_port(
             if ps.returncode:
                 return None
             command = ps.stdout
-    except (IndexError, OSError, UnicodeError, ValueError):
+    except (IndexError, OSError, ValueError):
         return None
 
     def flag(marker: str) -> str:

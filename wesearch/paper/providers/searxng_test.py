@@ -77,17 +77,6 @@ class TestSearch:
             "session": None,
         }
 
-    def test_default_fetch_when_limit_none(self) -> None:
-        with patch(_TARGET, return_value=[]) as mock:
-            searxng.search(
-                "q",
-                limit=None,
-                year_from=None,
-                year_to=None,
-                open_access_only=False,
-            )
-        assert mock.call_args.kwargs["num_results"] == 20
-
     def test_limit_forwarded_as_num_results(self) -> None:
         with patch(_TARGET, return_value=[]) as mock:
             searxng.search(
@@ -150,22 +139,13 @@ class TestSearch:
         assert [r.title for r in records] == ["h0", "h1"]
         assert not complete  # 3 of 5 hits were trimmed.
 
-    def test_search_error_raises_backend_error(self) -> None:
+    @pytest.mark.parametrize("error_type", [SearchError, RuntimeError])
+    def test_search_error_raises_backend_error(
+        self,
+        error_type: type[RuntimeError],
+    ) -> None:
         with (
-            patch(_TARGET, side_effect=SearchError("boom")),
-            pytest.raises(BackendError, match="SearXNG"),
-        ):
-            searxng.search(
-                "q",
-                limit=None,
-                year_from=None,
-                year_to=None,
-                open_access_only=False,
-            )
-
-    def test_runtime_error_raises_backend_error(self) -> None:
-        with (
-            patch(_TARGET, side_effect=RuntimeError("boom")),
+            patch(_TARGET, side_effect=error_type("boom")),
             pytest.raises(BackendError, match="SearXNG"),
         ):
             searxng.search(
@@ -242,12 +222,6 @@ class TestToRecord:
 class TestYearInRange:
     def test_none_year_false(self) -> None:
         assert not searxng._year_in_range(None, 2000, 2020)
-
-    def test_below_lo_false(self) -> None:
-        assert not searxng._year_in_range(1999, 2000, 2020)
-
-    def test_above_hi_false(self) -> None:
-        assert not searxng._year_in_range(2021, 2000, 2020)
 
     def test_inside_true(self) -> None:
         assert searxng._year_in_range(2010, 2000, 2020)

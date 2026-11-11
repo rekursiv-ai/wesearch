@@ -16,6 +16,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
+from wesearch.fetch.common import merge_headers
 from wesearch.search.types import (
     SearchError,
     SearchResult,
@@ -93,10 +94,10 @@ def duckduckgo(
         f"https://html.duckduckgo.com/html/?{params}",
         request=RequestParams(
             content=ContentParams(
-                headers={
-                    "Referer": "https://html.duckduckgo.com/html/",
-                    **(headers or {}),
-                },
+                headers=merge_headers(
+                    {"Referer": "https://html.duckduckgo.com/html/"},
+                    headers or {},
+                ),
             ),
             retry=RetryParams(
                 retries=retries,

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
+
 from wesearch.fetch import FetchSession
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.paginate import Page
@@ -74,91 +76,27 @@ class TestAuthors:
             result = search_authors("x", limit=None)
         assert [record.name for record in result.records] == ["One", "Zero", "Unknown"]
 
-    def test_author_papers_year_filter(self) -> None:
+    @pytest.mark.parametrize(
+        ("limit", "year_from", "year_to", "expected"),
+        [
+            (7, 2020, None, ["new", "boundary"]),
+            (None, 1, 9999, ["new", "boundary", "old"]),
+            (None, None, None, ["new", "boundary", "old", "bogus", "undated"]),
+            (None, None, 2020, ["boundary", "old"]),
+        ],
+    )
+    def test_author_papers_year_filter(
+        self,
+        limit: int | None,
+        year_from: int | None,
+        year_to: int | None,
+        expected: list[str],
+    ) -> None:
         entries: list[dict[str, MutablePlainTree]] = [
             {"title": "new", "year": 2024},
             {"title": "boundary", "year": 2020},
             {"title": "old", "year": 2000},
-        ]
-
-        def fake(
-            author_id: str,
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del author_id, limit, session
-            return Page(entries=[e for e in entries if keep(e)], complete=True)
-
-        with patch.object(s2, "author_papers", side_effect=fake) as papers:
-            listing = author_papers("1", limit=7, year_from=2020)
-        assert [r.title for r in listing.records] == ["new", "boundary"]
-        assert papers.call_args.args == ("1",)
-        assert papers.call_args.kwargs["limit"] == 7
-        assert papers.call_args.kwargs["keep"] is not None
-
-    def test_author_papers_preserves_completeness(self) -> None:
-        def fake(
-            author_id: str,
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del author_id, limit, session, keep
-            return Page(entries=[], complete=False)
-
-        with patch.object(s2, "author_papers", side_effect=fake):
-            listing = author_papers("1", limit=2)
-        assert listing.complete is False
-
-    def test_author_papers_excludes_a_bool_year(self) -> None:
-        # ``bool`` subclasses ``int``, so ``isinstance(True, int)`` admitted a
-        # JSON ``true`` as a publication year and then compared it as 1.
-        entries: list[dict[str, MutablePlainTree]] = [
-            {"title": "real", "year": 2024},
             {"title": "bogus", "year": True},
-        ]
-
-        def fake(
-            author_id: str,
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del author_id, limit, session
-            return Page(entries=[e for e in entries if keep(e)], complete=True)
-
-        with patch.object(s2, "author_papers", side_effect=fake):
-            listing = author_papers("1", limit=None, year_from=1, year_to=9999)
-        assert [r.title for r in listing.records] == ["real"]
-
-    def test_author_papers_no_filter_keeps_all(self) -> None:
-        entries: list[dict[str, MutablePlainTree]] = [{"title": "a"}, {"title": "b"}]
-
-        def fake(
-            author_id: str,
-            *,
-            limit: int | None,
-            keep: Callable[[dict[str, MutablePlainTree]], bool],
-            session: FetchSession | None = None,
-        ) -> Page:
-            del author_id, limit, session
-            # No bounds -> keep predicate returns True for every entry.
-            return Page(entries=[e for e in entries if keep(e)], complete=True)
-
-        with patch.object(s2, "author_papers", side_effect=fake):
-            listing = author_papers("1", limit=None)
-        assert len(listing.records) == 2
-
-    def test_author_papers_year_to_and_undated(self) -> None:
-        # year_to upper bound + an undated (non-int year) work excluded.
-        entries: list[dict[str, MutablePlainTree]] = [
-            {"title": "in", "year": 2018},
-            {"title": "boundary", "year": 2020},
-            {"title": "toolate", "year": 2024},
             {"title": "undated"},
         ]
 
@@ -172,9 +110,26 @@ class TestAuthors:
             del author_id, limit, session
             return Page(entries=[e for e in entries if keep(e)], complete=True)
 
-        with patch.object(s2, "author_papers", side_effect=fake):
-            listing = author_papers("1", limit=None, year_to=2020)
-        assert [r.title for r in listing.records] == ["in", "boundary"]
+        with patch.object(s2, "author_papers", side_effect=fake) as papers:
+            listing = author_papers(
+                "1",
+                limit=limit,
+                year_from=year_from,
+                year_to=year_to,
+            )
+        assert [r.title for r in listing.records] == expected
+        assert papers.call_args.args == ("1",)
+        assert papers.call_args.kwargs["limit"] == limit
+        assert papers.call_args.kwargs["keep"] is not None
+
+    def test_author_papers_preserves_completeness(self) -> None:
+        with patch.object(
+            s2,
+            "author_papers",
+            return_value=Page(entries=[], complete=False),
+        ):
+            listing = author_papers("1", limit=2)
+        assert listing.complete is False
 
 
 class _SessionFetch:

@@ -3,9 +3,8 @@
 
 Runs one live query per backend, bypassing the result cache and the fallback
 chain, so a block shows up here before agents hit it. With ``--processes N``
-it also fans N processes out over the shared Chrome and reports whether every
-fetch landed and how many Chromes the profile ended up with -- the
-36-agent contention that used to evict browsers mid-fetch.
+it also fans N processes out over the shared Chrome and reports how many
+fetches landed.
 
 Exit status is the number of failed probes, so a scheduler can alert on it.
 

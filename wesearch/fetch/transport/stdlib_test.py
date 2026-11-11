@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from http import client
 from typing import cast
 from unittest.mock import Mock, call, patch
@@ -71,11 +72,25 @@ def _response(
     )
 
 
-def test_a_public_only_request_dials_the_pin_and_names_the_host_first() -> None:
+@pytest.mark.parametrize(
+    ("scheme", "port", "host", "defaults"),
+    [
+        ("https", 8443, "example.com:8443", False),
+        ("http", 80, "example.com", True),
+        ("https", 443, "example.com", True),
+    ],
+)
+def test_a_public_only_request_dials_the_pin_and_names_the_host_first(
+    scheme: str,
+    port: int,
+    host: str,
+    defaults: bool,
+) -> None:
     response = _response()
     response.read = Mock(side_effect=[b"o", b"k", b""])
     conn = _Conn(response)
     pin = ValidatedHost(host="example.com", ip="93.184.216.34")
+    fetch = fetch_stdlib if defaults else partial(fetch_stdlib, connect_timeout_sec=2.5)
     with (
         patch("wesearch.fetch.transport.stdlib.pinned_host", return_value=pin),
         patch(
@@ -84,24 +99,23 @@ def test_a_public_only_request_dials_the_pin_and_names_the_host_first() -> None:
         ) as opened,
     ):
         assert (
-            fetch_stdlib(
-                "https://example.com:8443/p?q=1",
+            fetch(
+                f"{scheme}://example.com:{port}/p?q=1",
                 headers={"Accept": "*/*"},
-                connect_timeout_sec=2.5,
             )
             == b"ok"
         )
     opened.assert_called_once_with(
-        "https",
+        scheme,
         "example.com",
-        port=8443,
+        port=port,
         ip="93.184.216.34",
-        connect_timeout_sec=2.5,
+        connect_timeout_sec=10.0 if defaults else 2.5,
     )
     [(method, path, headers)] = conn.requests
     assert (method, path) == ("GET", "/p?q=1")
     assert next(iter(headers)) == "Host"
-    assert headers["Host"] == "example.com:8443"
+    assert headers["Host"] == host
     assert headers["Accept"] == "*/*"
     assert conn.bodies == [None]
     assert conn.closed
@@ -276,30 +290,42 @@ def test_a_cross_host_redirect_reopens_and_re_pins() -> None:
     assert not any(name.lower() == "authorization" for name in headers)
 
 
-def test_a_zero_redirect_budget_returns_the_body_without_another_connection() -> None:
-    conn = _Conn(_response(302, b"hop", [("Location", "/next")]))
+@pytest.mark.parametrize(("defaults", "redirects"), [(False, 0), (True, 10)])
+def test_a_redirect_budget_returns_the_body_without_another_connection(
+    defaults: bool,
+    redirects: int,
+) -> None:
+    conn = _Conn(
+        *(
+            _response(302, b"hop", [("Location", "/next")])
+            for _ in range(redirects + 1)
+        ),
+    )
     redirect, response = Mock(), Mock()
+    fetch = fetch_stdlib if defaults else partial(fetch_stdlib, max_redirects=0)
     with patch(
         "wesearch.fetch.transport.stdlib._connect",
-        side_effect=[conn, AssertionError("followed beyond zero redirect budget")],
+        side_effect=[conn] * (redirects + 1)
+        + [AssertionError("followed beyond redirect budget")],
     ) as opened:
         assert (
-            fetch_stdlib(
+            fetch(
                 "https://example.com/start",
-                max_redirects=0,
                 on_redirect=redirect,
                 on_response=response,
                 allow_private_hosts=True,
             )
             == b"hop"
         )
-    opened.assert_called_once()
-    response.assert_called_once_with(
-        302,
-        {"location": "/next"},
-        "https://example.com/start",
+    assert opened.call_count == redirects + 1
+    assert (
+        response.call_args_list
+        == [
+            call(302, {"location": "/next"}, "https://example.com/start"),
+        ]
+        + [call(302, {"location": "/next"}, "https://example.com/next")] * redirects
     )
-    redirect.assert_not_called()
+    assert redirect.call_args_list == [call("https://example.com/next")] * redirects
     assert conn.closed
 
 
@@ -338,7 +364,6 @@ def test_the_read_budget_widens_only_once_connected() -> None:
     ):
         fetch_stdlib(
             "http://127.0.0.1/",
-            timeout_sec=30.0,
             connect_timeout_sec=1.0,
             allow_private_hosts=True,
         )
@@ -349,8 +374,9 @@ def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
     # Each read is under the budget, but together they pass it.
     clock = [0.0]
 
-    def trickle(amt: int) -> bytes:
-        del amt
+    def trickle(amt: int | None) -> bytes:
+        assert isinstance(amt, int)
+        assert amt > 0
         clock[0] += 4.0
         return b"x"
 
@@ -369,6 +395,11 @@ def test_a_slow_body_fails_at_the_deadline_not_per_read() -> None:
     ):
         fetch_stdlib("http://127.0.0.1/", timeout_sec=10.0, allow_private_hosts=True)
     assert error.value.status == 0
+    cause = error.value.__cause__
+    assert isinstance(cause, TimeoutError)
+    assert "10" in str(cause)
+    assert "response" in str(cause).casefold()
+    assert error.value.body == str(cause).encode()
     assert read.call_count == 3
     assert settimeout.call_args_list == [call(10.0), call(10.0), call(6.0), call(2.0)]
     assert conn.closed

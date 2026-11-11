@@ -19,6 +19,7 @@ from wesearch.fetch import (
     Transport,
     fetch,
 )
+from wesearch.fetch.common import merge_headers
 from wesearch.search.types import SearchError, SearchResult, clean_text
 
 
@@ -76,11 +77,10 @@ def brave(
         f"https://api.search.brave.com/res/v1/web/search?{params}",
         request=RequestParams(
             content=ContentParams(
-                headers={
-                    "Accept": "application/json",
-                    "X-Subscription-Token": key,
-                    **(headers or {}),
-                },
+                headers=merge_headers(
+                    {"Accept": "application/json", "X-Subscription-Token": key},
+                    headers or {},
+                ),
             ),
             retry=RetryParams(
                 retries=retries,

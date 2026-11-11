@@ -35,9 +35,12 @@ def test_main_help_uses_the_process_probe_description(
     assert "Stand-in for Chrome in the process-reaping tests" in output
 
 
+@pytest.mark.parametrize("doc", [orphan_probe.__doc__, None])
 def test_main_passes_the_exact_process_probe_description(
     monkeypatch: pytest.MonkeyPatch,
+    doc: str | None,
 ) -> None:
+    monkeypatch.setattr(orphan_probe, "__doc__", doc)
     descriptions: list[str | None] = []
     real_parser = argparse.ArgumentParser()
 
@@ -53,9 +56,10 @@ def test_main_passes_the_exact_process_probe_description(
     )
     with patch("wesearch.chrome.orphan_probe.time.sleep"):
         assert orphan_probe.main() == 0
-    description = orphan_probe.__doc__
-    assert description is not None
-    assert descriptions == [description.split("\n", 2)[2]]
+    if doc is None:
+        assert descriptions == [None]
+    else:
+        assert descriptions == [doc.split("\n", 2)[2]]
 
 
 def test_add_arguments_sets_exact_defaults_and_flags() -> None:
@@ -121,31 +125,21 @@ def test_spawn_child_proofed_uses_exact_subprocess_command() -> None:
     assert popen.call_args.kwargs["preexec_fn"] is die_with_parent
 
 
-def test_main_normal_mode_prints_child_and_sleeps(
+@pytest.mark.parametrize(
+    ("arguments", "proofed", "hang_seconds"),
+    [([], False, 3.5), (["--proofed"], True, 2.5)],
+)
+def test_main_prints_child_and_sleeps(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    proofed: bool,
+    hang_seconds: float,
 ) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["orphan_probe.py", "--hang-seconds", "3.5"],
-    )
-    with (
-        patch("wesearch.chrome.orphan_probe._spawn_child", return_value=4567),
-        patch("wesearch.chrome.orphan_probe.time.sleep") as sleep,
-    ):
-        assert orphan_probe.main() == 0
-    assert capsys.readouterr().out == "4567\n"
-    sleep.assert_called_once_with(3.5)
-
-
-def test_main_forwards_proofed_flag_and_flushes_pid(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["orphan_probe.py", "--proofed", "--hang-seconds", "2.5"],
+        ["orphan_probe.py", *arguments, "--hang-seconds", str(hang_seconds)],
     )
     with (
         patch(
@@ -153,12 +147,13 @@ def test_main_forwards_proofed_flag_and_flushes_pid(
             return_value=4567,
         ) as spawn,
         patch("wesearch.chrome.orphan_probe.time.sleep") as sleep,
-        patch("wesearch.chrome.orphan_probe.print") as print_pid,
+        patch("wesearch.chrome.orphan_probe.print", wraps=print) as print_pid,
     ):
         assert orphan_probe.main() == 0
-    spawn.assert_called_once_with(proofed=True, hang_seconds=2.5)
+    assert capsys.readouterr().out == "4567\n"
+    spawn.assert_called_once_with(proofed=proofed, hang_seconds=hang_seconds)
     print_pid.assert_called_once_with(4567, flush=True)
-    sleep.assert_called_once_with(2.5)
+    sleep.assert_called_once_with(hang_seconds)
 
 
 if __name__ == "__main__":

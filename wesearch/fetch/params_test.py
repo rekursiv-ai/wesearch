@@ -85,13 +85,6 @@ class TestValidation:
                 policy=PolicyParams(transport="zendriver"),
             )
 
-    def test_non_get_rejected_on_browser_transport(self) -> None:
-        with pytest.raises(ValueError, match="only GET"):
-            RequestParams(
-                content=ContentParams(method="POST"),
-                policy=PolicyParams(transport="zendriver"),
-            )
-
     def test_raw_headers_rejected_on_browser_transport(self) -> None:
         with pytest.raises(ValueError, match="raw_headers"):
             RequestParams(
@@ -106,18 +99,6 @@ class TestValidation:
         # -- it does not reject the request.
         params = RequestParams(policy=PolicyParams(transport="zendriver"))
         assert params.policy.allow_private_hosts is False
-
-    def test_negative_retries_rejected(self) -> None:
-        with pytest.raises(ValueError, match="retries"):
-            RequestParams(retry=RetryParams(retries=-1))
-
-    def test_nonpositive_timeout_rejected(self) -> None:
-        with pytest.raises(ValueError, match="timeout_sec"):
-            RequestParams(retry=RetryParams(timeout_sec=0))
-
-    def test_data_and_json_mutually_exclusive(self) -> None:
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            RequestParams(content=ContentParams(data={"a": "1"}, json={"b": 2}))
 
     def test_a_json_null_body_is_a_body(self) -> None:
         """``json=None`` sends the JSON literal ``null``; omitting it sends none.

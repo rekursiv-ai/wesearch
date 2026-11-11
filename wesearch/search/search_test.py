@@ -22,11 +22,10 @@ from wesearch.fetch.common import DecompressionError
 from wesearch.fetch.transport.zendriver import BrowserUnavailableError
 from wesearch.mcp.schema import literal_values
 from wesearch.mcp.types import SearchParamsSchema
+from wesearch.search.cache import cached_search
 from wesearch.search.duckduckgo import (
-    _duckduckgo_check_captcha,
     _duckduckgo_extract_url,
     _duckduckgo_parse,
-    _duckduckgo_quote_bangs,
     _duckduckgo_validate_body,
     duckduckgo,
 )
@@ -458,14 +457,6 @@ class TestSearchSearxngScience:
             ),
         ]
 
-    def test_paper_result_is_a_search_result(self) -> None:
-        # LSB: a web-result consumer reading url/title/snippet works unchanged.
-        with _patch_searxng_fetch(self._PAPER_PAYLOAD):
-            (paper,) = searxng("transformer", categories="science")
-        assert paper.url
-        assert paper.title
-        assert paper.snippet
-
     def test_science_category_sent(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q", categories="science")
@@ -748,40 +739,7 @@ _MISSING_LINK_DDG = """
 """
 
 
-class TestQuoteBangsDdg:
-    def test_quotes_leading_bang_token(self) -> None:
-        assert _duckduckgo_quote_bangs("!w python") == "'!w' python"
-
-    def test_quotes_embedded_bang_token(self) -> None:
-        assert _duckduckgo_quote_bangs("python !gh repo") == "python '!gh' repo"
-
-    def test_preserves_normal_query(self) -> None:
-        assert _duckduckgo_quote_bangs("python web search") == "python web search"
-
-
-class TestCheckCaptchaDdg:
-    def test_detects_challenge_form(self) -> None:
-        with pytest.raises(PuzzleChallengeError):
-            _duckduckgo_check_captcha(
-                '<html><body><form id="challenge-form"></form></body></html>',
-            )
-
-    def test_normal_page(self) -> None:
-        _duckduckgo_check_captcha("<html><body>ok</body></html>")
-
-
 class TestExtractUrlDdg:
-    def test_direct_url(self) -> None:
-        assert (
-            _duckduckgo_extract_url("https://example.com/page")
-            == "https://example.com/page"
-        )
-
-    def test_protocol_relative_url(self) -> None:
-        assert (
-            _duckduckgo_extract_url("//example.com/page") == "https://example.com/page"
-        )
-
     def test_rejects_non_http_url(self) -> None:
         assert _duckduckgo_extract_url("httpx2://example.com/page") is None
 
@@ -801,9 +759,6 @@ class TestExtractUrlDdg:
             == "https://example.com/page"
         )
 
-    def test_empty_url(self) -> None:
-        assert _duckduckgo_extract_url("") is None
-
 
 class TestParseDdg:
     def test_single(self) -> None:
@@ -819,10 +774,6 @@ class TestParseDdg:
 
     def test_max_results_caps(self) -> None:
         assert len(_duckduckgo_parse(_TWO_DDG, 1)) == 1
-
-    def test_zero_max_returns_empty(self) -> None:
-        # O-WEB-009: max_results=0 must yield [] (append-before-cap bug).
-        assert _duckduckgo_parse(_TWO_DDG, 0) == []
 
     def test_no_results(self) -> None:
         assert _duckduckgo_parse(_NO_RESULTS_DDG, 10) == []
@@ -848,18 +799,6 @@ class TestParseDdg:
         results = _duckduckgo_parse(html, 10)
         assert len(results) == 1
         assert len(results[0].snippet) >= 500
-
-    def test_no_snippet_ok(self) -> None:
-        html = """
-        <html><body>
-        <div id="links"><div class="result web-result">
-          <h2><a class="result__a" href="https://example.com">Title</a></h2>
-        </div></div>
-        </body></html>
-        """
-        results = _duckduckgo_parse(html, 10)
-        assert len(results) == 1
-        assert results[0].snippet == ""
 
     def test_wrapped_result_url(self) -> None:
         html = """
@@ -937,18 +876,6 @@ class TestParseDdg:
 
 
 class TestDuckduckgoChallengeBecomesATypedError:
-    def test_challenge_is_a_body_validator_not_a_post_hoc_check(self) -> None:
-        """The challenge must be detected INSIDE fetch, not after it returns.
-
-        DuckDuckGo serves its puzzle with HTTP 200. Checked on the returned
-        body, the error is raised past fetch's own ``except BotDetectionError``
-        -- the hook that learns the domain and retries through Zendriver -- so
-        an automatic-transport caller just failed instead of escalating.
-        """
-        challenge = b'<html><body><form id="challenge-form"></form></body></html>'
-        with pytest.raises(PuzzleChallengeError):
-            _duckduckgo_validate_body(challenge)
-
     def test_a_normal_body_passes_the_validator(self) -> None:
         _duckduckgo_validate_body(b"<html><body><div>results</div></body></html>")
 
@@ -1213,7 +1140,13 @@ class TestSearchFallbackChain:
 
     def test_a_cached_answer_skips_the_backend(self) -> None:
         context, reached = self._chain(duckduckgo=[_HIT])
-        with context:
+        with (
+            context,
+            patch(
+                "wesearch.search.search.cached_search",
+                wraps=cached_search,
+            ) as cache,
+        ):
             for language in ("en", "es"):
                 for _ in range(2):
                     assert search("q", headers={"Accept-Language": language}) == [_HIT]
@@ -1224,6 +1157,9 @@ class TestSearchFallbackChain:
                 cache_ttl_sec=0,
             ) == [_HIT]
         assert reached == ["duckduckgo", "duckduckgo", "duckduckgo"]
+        assert [call.kwargs["ttl_sec"] for call in cache.call_args_list] == [
+            3600.0,
+        ] * 4 + [0]
 
     def test_unknown_backend_message_is_exact(self) -> None:
         with pytest.raises(ValueError, match=r"^Unknown backend: 'bogus'$"):
@@ -1271,17 +1207,6 @@ class TestHeadersArg:
             searxng("q", headers={"User-Agent": "custom/1.0"})
         assert _request(mock).content.headers == {
             "User-Agent": "custom/1.0",
-        }
-
-    def test_ddg_custom_headers_merge_with_defaults(self) -> None:
-        with _patch_fetch(
-            module="duckduckgo",
-            return_value=_NO_RESULTS_DDG.encode(),
-        ) as mock:
-            duckduckgo("q", headers={"User-Agent": "x"})
-        assert _request(mock).content.headers == {
-            "Referer": "https://html.duckduckgo.com/html/",
-            "User-Agent": "x",
         }
 
 

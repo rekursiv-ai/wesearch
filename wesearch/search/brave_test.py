@@ -13,6 +13,7 @@ from treekle import ReadError
 import pytest
 
 from wesearch.fetch import FetchSession, RequestParams
+from wesearch.fetch.common import merge_headers
 from wesearch.search.brave import brave
 from wesearch.search.types import SearchError, SearchResult
 
@@ -51,9 +52,11 @@ def _fetching(payload: object) -> AbstractContextManager[MagicMock | AsyncMock]:
 
 
 def test_parses_and_cleans_results() -> None:
-    with _fetching(_PAYLOAD):
-        results = brave("python", 10)
+    with _fetching(_PAYLOAD) as fetch_mock:
+        results = brave("python")
 
+    url = urlparse(cast(str, fetch_mock.call_args.args[0]))
+    assert parse_qs(url.query)["count"] == ["10"]
     assert results == [
         SearchResult(
             url="https://a.example/",
@@ -65,24 +68,31 @@ def test_parses_and_cleans_results() -> None:
     ]
 
 
-@pytest.mark.parametrize(("num_results", "want_count"), [(2, "2"), (50, "3")])
+@pytest.mark.parametrize(
+    ("num_results", "want_count", "defaults"),
+    [(2, "2", False), (50, "3", False), (50, "20", True)],
+)
 def test_sends_the_key_and_caps_count(
     num_results: int,
     want_count: str,
+    defaults: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("BRAVE_API_KEY", "  test-key  ")
     with _fetching({"web": {"results": []}}) as fetch_mock:
-        brave(
-            "q&lang=es",
-            num_results,
-            headers={"X-Probe": "yes"},
-            max_count=3,
-            timeout_sec=2.5,
-            connect_timeout_sec=1.25,
-            retries=2,
-            transport="stdlib",
-        )
+        if defaults:
+            brave("q&lang=es", num_results, headers={"X-Probe": "yes"})
+        else:
+            brave(
+                "q&lang=es",
+                num_results,
+                headers={"X-Probe": "yes"},
+                max_count=3,
+                timeout_sec=2.5,
+                connect_timeout_sec=1.25,
+                retries=2,
+                transport="stdlib",
+            )
 
     url = urlparse(cast(str, fetch_mock.call_args.args[0]))
     request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
@@ -95,10 +105,25 @@ def test_sends_the_key_and_caps_count(
     headers = {name.lower(): value for name, value in request.content.headers.items()}
     assert (headers.pop("accept") or "").lower() == "application/json"
     assert headers == {"x-subscription-token": "test-key", "x-probe": "yes"}
-    assert request.retry.retries == 2
-    assert request.retry.timeout_sec == 2.5
-    assert request.retry.connect_timeout_sec == 1.25
-    assert request.policy.transport == "stdlib"
+    assert request.retry.retries == (1 if defaults else 2)
+    assert request.retry.timeout_sec == (15.0 if defaults else 2.5)
+    assert request.retry.connect_timeout_sec == (3.0 if defaults else 1.25)
+    assert request.policy.transport == ("auto" if defaults else "stdlib")
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [("accept", "Accept"), ("x-subscription-token", "X-Subscription-Token")],
+)
+def test_mixed_case_overrides_keep_the_last_callers_value(
+    first: str,
+    last: str,
+) -> None:
+    with _fetching({"web": {"results": []}}) as fetch_mock:
+        brave("q", headers={first: "first", last: "last"})
+    request = cast(RequestParams, fetch_mock.call_args.kwargs["request"])
+    normalized = merge_headers({}, request.content.headers)
+    assert {name.lower(): value for name, value in normalized.items()}[first] == "last"
 
 
 def test_truncates_to_num_results() -> None:

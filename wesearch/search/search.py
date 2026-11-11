@@ -286,7 +286,7 @@ def _runners(
     headers: dict[str, str] | None,
     categories: SearxngCategory,
     transport: Transport,
-    session: FetchSession | None = None,
+    session: FetchSession | None,
 ) -> Mapping[str, Callable[[], Sequence[SearxngResult]]]:
     """Return one zero-argument call per backend, bound to this query."""
     # A table rather than an if-chain: a chain over a closed ``Literal`` exhausts
