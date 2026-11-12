@@ -97,8 +97,12 @@ def brave(
 def _brave_parse(body: bytes, num_results: int) -> list[SearchResult]:
     """Map Brave's ``web.results`` onto :class:`SearchResult`, dropping malformed rows."""
     tree = json_loads(body, dict[str, object])
-    web = from_plain(tree.get("web"), dict[str, object], default={})
-    rows = from_plain(web.get("results"), list[dict[str, object]], default=[])
+    web = from_plain(tree.get("web"), dict[str, object], default=dict[str, object]())
+    rows = from_plain(
+        web.get("results"),
+        list[dict[str, object]],
+        default=list[dict[str, object]](),
+    )
     results = [
         SearchResult(
             url=from_plain(row.get("url"), str, default=""),

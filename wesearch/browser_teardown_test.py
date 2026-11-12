@@ -21,7 +21,7 @@ import pytest
 from wesearch import conftest as fixtures
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 _CWD: Final = _THIS.parent
 
 

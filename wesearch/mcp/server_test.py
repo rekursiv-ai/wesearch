@@ -719,8 +719,12 @@ def _entries(lines: list[str]) -> dict[str, str]:
 def _enum_values(schema: object) -> set[object]:
     """Return every ``enum`` member of a JSON-Schema property, through ``anyOf``."""
     prop = from_plain(schema, dict[str, object])
-    values = set(from_plain(prop.get("enum"), list[object], default=[]))
-    for branch in from_plain(prop.get("anyOf"), list[dict[str, object]], default=[]):
+    values = set(from_plain(prop.get("enum"), list[object], default=list[object]()))
+    for branch in from_plain(
+        prop.get("anyOf"),
+        list[dict[str, object]],
+        default=list[dict[str, object]](),
+    ):
         values |= _enum_values(branch)
     return values
 
