@@ -17,7 +17,7 @@ from wesearch.fetch.transport.transport_routing import (
 from wesearch.lib.userdirs import state_dir
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_default_path_uses_per_user_state() -> None:

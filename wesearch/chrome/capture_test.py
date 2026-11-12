@@ -26,7 +26,7 @@ from wesearch.chrome.capture import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 # Handles are set in ``__init__``: typeshed gives the mock classes an ``Any`` base,

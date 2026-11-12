@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from wesearch.types.params import HttpMethod
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 @pytest.fixture(autouse=True)
@@ -282,7 +282,11 @@ class _FakeTab:
         # would find every one exhausted by this very inspection.
         self.wire_commands.append(payload)
         request_id = from_plain(
-            from_plain(payload.get("params"), dict[str, object], default={}).get(
+            from_plain(
+                payload.get("params"),
+                dict[str, object],
+                default=dict[str, object](),
+            ).get(
                 "requestId",
             ),
             str,
@@ -1468,9 +1472,13 @@ def _paused_patterns(tab: _FakeTab) -> list[dict[str, str]]:
         if from_plain(c.get("method"), str, default="") == "Fetch.enable"
     )
     return from_plain(
-        from_plain(enable.get("params"), dict[str, object], default={}).get("patterns"),
+        from_plain(
+            enable.get("params"),
+            dict[str, object],
+            default=dict[str, object](),
+        ).get("patterns"),
         list[dict[str, str]],
-        default=[],
+        default=list[dict[str, str]](),
     )
 
 
@@ -1486,9 +1494,13 @@ def _continued_headers(tab: _FakeTab) -> dict[str, str]:
     )
     assert payload is not None, "the request was never continued"
     entries = from_plain(
-        from_plain(payload.get("params"), dict[str, object], default={}).get("headers"),
+        from_plain(
+            payload.get("params"),
+            dict[str, object],
+            default=dict[str, object](),
+        ).get("headers"),
         list[object],
-        default=[],
+        default=list[object](),
     )
     return {
         from_plain(
@@ -1517,7 +1529,11 @@ def _continue_override(tab: _FakeTab) -> dict[str, str] | None:
         None,
     )
     assert payload is not None, "the request was never continued"
-    params = from_plain(payload.get("params"), dict[str, object], default={})
+    params = from_plain(
+        payload.get("params"),
+        dict[str, object],
+        default=dict[str, object](),
+    )
     if "headers" not in params:
         return None
     return _continued_headers(tab)
@@ -1537,9 +1553,13 @@ def _extra_http_headers(tab: _FakeTab) -> dict[str, str]:
     if payload is None:
         return {}
     installed = from_plain(
-        from_plain(payload.get("params"), dict[str, object], default={}).get("headers"),
+        from_plain(
+            payload.get("params"),
+            dict[str, object],
+            default=dict[str, object](),
+        ).get("headers"),
         dict[str, object],
-        default={},
+        default=dict[str, object](),
     )
     return {name.lower(): from_plain(value, str) for name, value in installed.items()}
 
@@ -1710,11 +1730,15 @@ class TestBrowserHonorsPrivateHostsPerHop:
             if from_plain(c.get("method"), str, default="") == "Fetch.continueRequest"
         )
         entries = from_plain(
-            from_plain(payload.get("params"), dict[str, object], default={}).get(
+            from_plain(
+                payload.get("params"),
+                dict[str, object],
+                default=dict[str, object](),
+            ).get(
                 "headers",
             ),
             list[object],
-            default=[],
+            default=list[object](),
         )
         names = [
             from_plain(
