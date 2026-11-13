@@ -361,7 +361,7 @@ def _send(
             {k: v for k, v in headers.items() if v is not None},
             {},
         )
-        # pragma: no mutate start -- cookie_header reads the name in any case.
+        # pragma: no mutate[case-insensitive] start
         under_caller = {"Cookie": f"{cookie_header({}, stored)}; {written}"}
         # pragma: no mutate end
         cookie = cookie_header(under_caller, content.cookies)
