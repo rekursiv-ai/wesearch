@@ -170,8 +170,11 @@ def _snap_confined(launcher: str) -> bool:
     resolved = Path(launcher).resolve()
     if resolved.name in {"snap", "snapd"} or resolved.is_relative_to("/snap"):
         return True
+    # The head alone: a Chrome binary is hundreds of megabytes, and reading one
+    # whole took 66 s on a CI runner (2026-11-19).
     try:
-        head = resolved.read_bytes()[:4096]
+        with resolved.open("rb") as launcher_file:
+            head = launcher_file.read(4096)
     except OSError:
         return False
     return b"snap run" in head or b"/snap/bin/" in head
