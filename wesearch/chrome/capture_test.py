@@ -19,6 +19,7 @@ from wesearch.chrome import capture
 from wesearch.chrome.capture import (
     _kill_group,
     _load_libc,
+    _snap_confined,
     chrome_available,
     chrome_binary,
     die_with_parent,
@@ -401,14 +402,46 @@ class TestChromeAvailable:
             assert _load_libc() is libc
         cdll.assert_called_once_with("libc.so.6", use_errno=True)
 
-    def test_finds_the_debian_chromium_browser_binary(self) -> None:
+    def test_finds_the_debian_chromium_browser_binary(self, tmp_path: Path) -> None:
         # chromium-browser is the binary name Debian/Ubuntu install, so a host
         # carrying only that one skipped the whole parity suite as "no Chrome".
+        # A file of the test's own: the host's /usr/bin/chromium-browser is
+        # whatever the runner installed, and reading it took 66 s on CI.
+        binary = tmp_path / "chromium-browser"
+        binary.write_bytes(b"\x7fELF")
+
         def only_chromium_browser(name: str) -> str | None:
-            return "/usr/bin/chromium-browser" if name == "chromium-browser" else None
+            return str(binary) if name == "chromium-browser" else None
 
         with patch.object(shutil, "which", only_chromium_browser):
             assert chrome_available()
+
+    def test_a_launcher_is_scanned_by_its_head_alone(self, tmp_path: Path) -> None:
+        """A real Chrome binary runs to hundreds of megabytes; only its head is read.
+
+        A FIFO the writer holds open never reaches end of file: reading it whole
+        hangs, and reading only the head returns once those bytes arrive.
+        """
+        fifo = tmp_path / "chrome"
+        os.mkfifo(fifo)
+        writer = subprocess.Popen(  # noqa: S603 -- fixed argv.
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys, time\n"
+                    f"f = open({str(fifo)!r}, 'wb')\n"
+                    "f.write(b'\\x7fELF' + b'\\0' * 8192); f.flush(); time.sleep(30)"
+                ),
+            ],
+        )
+        try:
+            started = time.monotonic()
+            assert not _snap_confined(str(fifo))
+            assert time.monotonic() - started < 5
+        finally:
+            writer.kill()
+            writer.wait()
 
     def test_a_snap_confined_chromium_does_not_count(self, tmp_path: Path) -> None:
         # Ubuntu's ``chromium`` package is a snap wrapper, which cannot use the
