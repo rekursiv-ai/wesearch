@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import asyncio
 import contextlib
+import fcntl
 import inspect
 import os
 import re
@@ -3908,32 +3909,26 @@ def test_shared_chrome_reports_a_missing_chrome(
         zendriver._shared_chrome(tmp_path / "profile", headless=True)
 
 
-@pytest.mark.cli_python_subprocess
 def test_the_launch_lock_serializes_processes(tmp_path: Path) -> None:
     """Two processes arriving together must launch one Chrome, not two."""
-    profile = tmp_path / "profile"
-    marker = tmp_path / "held"
-    script = (
-        "import sys, time\n"
-        "from pathlib import Path\n"
-        "from wesearch.fetch.transport import zendriver\n"
-        f"with zendriver._launch_lock(Path({str(profile)!r})):\n"
-        f"    Path({str(marker)!r}).write_text('x')\n"
-        "    time.sleep(1.0)\n"
-    )
-    holder = subprocess.Popen([sys.executable, "-c", script])  # noqa: S603 -- fixed argv.
+    with zendriver._launch_lock(tmp_path / "profile"):
+        [lock] = tmp_path.glob("*.launch.lock")
+        assert not _lock_is_free(lock), "the lock is not exclusive"
+    assert _lock_is_free(lock), "the lock outlived its block"
+
+
+# ``flock`` binds to an open file, not a process, so this open contends with the lock
+# exactly as a second process's does, without spawning one.
+def _lock_is_free(lock: Path) -> bool:
+    """Whether a fresh open of ``lock`` takes it at once."""
+    descriptor = os.open(lock, os.O_RDWR | os.O_CLOEXEC)
     try:
-        deadline = time.monotonic() + 20
-        while not marker.exists() and time.monotonic() < deadline:
-            # The holder is another process; only its marker file says it locked.
-            time.sleep(0.02)  # house-ignore[sleep] -- See above.
-        assert marker.exists(), "the holder never took the lock"
-        started = time.monotonic()
-        with zendriver._launch_lock(profile):
-            waited = time.monotonic() - started
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
     finally:
-        holder.wait(timeout=20)
-    assert waited > 0.3, f"the lock was not exclusive across processes ({waited:.2f}s)"
+        os.close(descriptor)
+    return True
 
 
 def test_port_answers_reports_whether_the_port_accepts(

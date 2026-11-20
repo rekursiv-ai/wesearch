@@ -132,7 +132,6 @@ def _stops_launched(tree: ast.AST) -> bool:
     )
 
 
-@pytest.mark.compute_large_fixture
 def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
     """With the fixture in place, a per-file Chrome teardown is a trap.
 
@@ -145,12 +144,15 @@ def test_no_test_file_relies_on_its_own_browser_teardown() -> None:
     # real Call node is one.
     # ``BrowserPool``'s own unit tests call the method as their subject, not as
     # teardown.
+    # The keyword must be spelled for the call to match, so only a file naming it
+    # is parsed: parsing every test file was most of this test's cost.
     owner = _CWD / "fetch" / "transport" / "zendriver_test.py"
     offenders = [
         str(path.relative_to(_CWD))
         for path in sorted(_CWD.rglob("*_test.py"))
         if path not in {_THIS, owner}
-        and _stops_launched(ast.parse(path.read_text(encoding="utf-8"), str(path)))
+        and "stop_launched" in (source := path.read_text(encoding="utf-8"))
+        and _stops_launched(ast.parse(source, str(path)))
     ]
 
     assert offenders == [], (
