@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import GeneratorType, MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Final, cast, override
+from typing import TYPE_CHECKING, ClassVar, Final, cast, override
 from unittest.mock import AsyncMock, Mock, patch
 
 import asyncio
@@ -739,7 +739,7 @@ def test_fetch_zendriver_forwards_navigation_policy_and_seeded_cookies(
 class _OwnedPool(_RunningPool):
     """A pool ``fetch_zendriver`` builds itself, for a call with no session."""
 
-    made: list[_OwnedPool] = []  # noqa: RUF012 -- per-test record, reset by the test.
+    made: ClassVar[list[_OwnedPool]] = []
 
     def __init__(self) -> None:
         super().__init__(_FakeBrowser())
@@ -2567,7 +2567,7 @@ def test_load_settle_ignores_child_frame_and_foreign_events() -> None:
             self.ready_states.append(until)
             return True
 
-        ready_states: list[str] = []  # noqa: RUF012 -- per-class record.
+        ready_states: ClassVar[list[str]] = []
 
     tab = _NoisyTab()
     _NoisyTab.ready_states = []

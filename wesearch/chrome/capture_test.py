@@ -277,7 +277,7 @@ def test_a_killed_group_takes_the_forked_grandchild_with_it() -> None:
     try:
         assert process.stdout is not None
         stdout = process.stdout
-        grandchild = int(cast(bytes, stdout.readline()))  # ty: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; ty already infers bytes.
+        grandchild = int(cast(bytes, stdout.readline()))  # ty: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; ty already infers bytes.  # pyrefly: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; pyrefly already infers bytes.
         _kill_group(process)
 
         assert _died_within(grandchild, seconds=10.0), (
@@ -303,7 +303,7 @@ def test_a_child_dies_when_its_parent_is_sigkilled() -> None:
     try:
         assert parent.stdout is not None
         stdout = parent.stdout
-        child_pid = int(cast(bytes, stdout.readline()))  # ty: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; ty already infers bytes.
+        child_pid = int(cast(bytes, stdout.readline()))  # ty: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; ty already infers bytes.  # pyrefly: ignore[redundant-cast] -- basedpyright's typeshed has `Popen.stdout: IO[Any]`; pyrefly already infers bytes.
         os.kill(parent.pid, signal.SIGKILL)
 
         assert _died_within(child_pid, seconds=10.0), (
