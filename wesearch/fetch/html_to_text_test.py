@@ -22,13 +22,13 @@ _MW_PAGE = (
 _PRONUNCIATION = "\u02c8\u0101-j\u0259nt"
 
 
-@pytest.mark.compute_large_fixture
 @pytest.mark.parametrize("extractor", get_args(Extractor))
 def test_every_extractor_returns_text(extractor: Extractor) -> None:
+    # Over trafilatura's 250-character MIN_EXTRACTED_SIZE: a shorter article sends
+    # it to its justext rescue, whose stoplists take 0.1s to load.
+    prose = "This is a paragraph of article prose long enough to be scored as content."
     out = html_to_text(
-        "<html><body><article><p>"
-        "This is a paragraph of article prose long enough to be scored as content."
-        "</p></article></body></html>",
+        f"<html><body><article><p>{prose * 4}</p></article></body></html>",
         extractor=extractor,
         url="https://example.com/article",
     )
