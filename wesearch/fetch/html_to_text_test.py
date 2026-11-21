@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import cast, get_args
 from unittest.mock import Mock
 
+import subprocess
+import sys
+
 import pytest
 
 from wesearch.fetch.html_to_text import html_to_text
@@ -188,6 +191,22 @@ def test_trafilatura_scores_away_content_html2text_keeps() -> None:
     page = _MW_PAGE.read_text(errors="replace")
     assert _PRONUNCIATION in html_to_text(page)
     assert _PRONUNCIATION not in html_to_text(page, extractor="trafilatura")
+
+
+@pytest.mark.cli_python_subprocess
+def test_trafilatura_imports_with_warnings_as_errors() -> None:
+    """Its proxy probe warns without PySocks; a fresh process still imports it."""
+    probe = (
+        "from wesearch.fetch.html_to_text import import_trafilatura\n"
+        "import_trafilatura()\n"
+    )
+    ran = subprocess.run(  # noqa: S603 -- fixed interpreter and program.
+        [sys.executable, "-W", "error", "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ran.returncode == 0, ran.stderr
 
 
 if __name__ == "__main__":
