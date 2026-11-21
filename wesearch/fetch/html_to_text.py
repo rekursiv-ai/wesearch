@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, assert_never
 
+import functools
+import importlib
+import warnings
+
 
 if TYPE_CHECKING:
     import html2text
@@ -21,7 +25,24 @@ else:
     trafilatura = lazy_import("trafilatura")  # 90ms.
 
 
-__all__ = ["html_to_text"]
+__all__ = ["html_to_text", "import_trafilatura"]
+
+
+@functools.cache
+def import_trafilatura() -> None:
+    """Import trafilatura without the warning its proxy probe gives.
+
+    Trafilatura tries ``urllib3.contrib.socks`` and catches only ``ImportError``;
+    without PySocks urllib3 warns first, which ``-W error`` turns into a crash.
+    Courlan before 1.5 silenced every urllib3 warning on import, hiding this.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="SOCKS support in urllib3",
+            module="urllib3.contrib.socks",
+        )
+        importlib.import_module("trafilatura")
 
 
 def html_to_text(
@@ -57,6 +78,7 @@ def html_to_text(
     if extractor == "markdownify":
         return markdownify.markdownify(page)
     if extractor == "trafilatura":
+        import_trafilatura()
         return (
             trafilatura.extract(
                 page,

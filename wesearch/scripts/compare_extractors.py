@@ -51,15 +51,21 @@ import re
 import time
 
 from lxml import html
-from trafilatura.baseline import html2txt
-from trafilatura.external import try_readability
 
 from wesearch.fetch import PolicyParams, RequestParams, Transport, fetch
-from wesearch.fetch.html_to_text import html_to_text
+from wesearch.fetch.html_to_text import html_to_text, import_trafilatura
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from trafilatura.baseline import html2txt
+    from trafilatura.external import try_readability
+else:
+    from wrapt import lazy_import
+
+    html2txt = lazy_import("trafilatura.baseline", "html2txt")
+    try_readability = lazy_import("trafilatura.external", "try_readability")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -229,6 +235,7 @@ def reference_text(html: str) -> str:
       text: Every visible text node; the distortion denominator.
 
     """
+    import_trafilatura()
     return html2txt(html, clean=False) or ""
 
 
@@ -376,6 +383,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 # install; it is the same algorithm behind Firefox Reader View.
 def _readability_markdown(page_html: str) -> str:
     """Extract with readability, then convert -- the common two-step agent recipe."""
+    import_trafilatura()
     article = try_readability(html.fromstring(page_html))
     return html_to_text(html.tostring(article, encoding="unicode"))
 
