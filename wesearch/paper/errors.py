@@ -1,7 +1,7 @@
 """Exception hierarchy for :mod:`wesearch.paper`.
 
 The library raises; call sites (e.g. sagent tools) catch and render. This
-replaces the ``ToolResult``-or-value return union the sagent tools threaded
+replaces the ``ToolMessage``-or-value return union the sagent tools threaded
 through their old shared helpers, keeping the library free of any tool shape.
 """
 
