@@ -92,7 +92,7 @@ def _read(path: Path, *, ttl_sec: float) -> list[SearchResult] | None:
         return None
     except (OSError, ValueError):
         logger.warning(
-            "Ignoring unreadable search cache entry %s.",  # pragma: no mutate[diagnostic-text]
+            "Ignoring unreadable search cache entry %s.",  # pragma: no mutate[diagnostic-text] -- Only an operator reads this warning; no code matches its text.
             path,
         )
         return None

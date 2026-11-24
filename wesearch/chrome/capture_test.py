@@ -338,8 +338,7 @@ def _died_within(pid: int, *, seconds: float) -> bool:
     while time.monotonic() < deadline:
         if not _alive(pid):
             return True
-        # Chrome is not our child; no event marks its exit.
-        time.sleep(0.05)  # house-ignore[sleep] -- See above.
+        time.sleep(0.05)  # house-ignore[sleep] -- Chrome isn't our child.
     return False
 
 
