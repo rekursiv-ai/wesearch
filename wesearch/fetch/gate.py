@@ -488,8 +488,7 @@ def admitted(
         admission = gate.admit(key, policy)
         if not admission.admitted and admission.wait_sec > policy.max_wait_sec:
             raise refuse(admission.reason)
-        # The wait is the rate limit the gate enforces.
-        time.sleep(admission.wait_sec)  # house-ignore[sleep] -- See above.
+        time.sleep(admission.wait_sec)  # house-ignore[sleep] -- It is the rate limit.
         if admission.admitted:
             return
 
@@ -651,8 +650,7 @@ def _read_shared(path: Path) -> GateState:
 
 async def _slept(seconds: float) -> bool:
     """Sleep ``seconds``; return ``False``, for a file wakes no one early."""
-    # A file-backed gate has no waker; the wait is its rate limit.
-    await asyncio.sleep(seconds)  # house-ignore[sleep] -- See above.
+    await asyncio.sleep(seconds)  # house-ignore[sleep] -- A file gate has no waker.
     return False
 
 

@@ -43,13 +43,11 @@ def main() -> int:
     flags = cast(_Flags, parser.parse_args())
 
     if flags.sleep:
-        # This probe hangs by design, to stand in for a stuck child.
-        time.sleep(flags.hang_seconds)  # house-ignore[sleep] -- See above.
+        time.sleep(flags.hang_seconds)  # house-ignore[sleep] -- Models a stuck child.
         return 0
     child = _spawn_child(proofed=flags.proofed, hang_seconds=flags.hang_seconds)
     print(child, flush=True)  # noqa: T201 -- this line IS the tool's output.
-    # This probe hangs by design, to stand in for a stuck child.
-    time.sleep(flags.hang_seconds)  # house-ignore[sleep] -- See above.
+    time.sleep(flags.hang_seconds)  # house-ignore[sleep] -- Models a stuck child.
     return 0
 
 
@@ -90,8 +88,7 @@ def _spawn_child(*, proofed: bool, hang_seconds: float) -> int:
     if not proofed:
         child = os.fork()
         if child == 0:
-            # This probe hangs by design, to stand in for a stuck child.
-            time.sleep(hang_seconds)  # house-ignore[sleep] -- See above.
+            time.sleep(hang_seconds)  # house-ignore[sleep] -- Models a stuck child.
             # ``os._exit``: the child must not run atexit handlers it inherited
             # or re-flush the parent's stdout buffer.
             os._exit(0)
