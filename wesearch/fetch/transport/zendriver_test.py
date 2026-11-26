@@ -42,6 +42,7 @@ from wesearch.fetch.session import default_session
 from wesearch.fetch.transport import zendriver
 from wesearch.fetch.transport.zendriver import BrowserPool, _load
 from wesearch.fetch.types import FetchSession
+from wesearch.lib.testing.clock_fake import FakeClockLoop
 from wesearch.lib.userdirs import data_dir
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.types.params import ignore
@@ -526,6 +527,8 @@ async def _drive(
     )
 
 
+# A load that waits out half a short budget needs ``FakeClockLoop``: on a real clock a
+# loaded host outlasts the other half, and the load times out.
 def _load_page(
     browser: _FakeBrowser,
     url: str = "https://example.com/",
@@ -533,6 +536,7 @@ def _load_page(
     timeout_sec: float = 5.0,
     cookies: dict[str, str] | None = None,
     on_response: Callable[[int, dict[str, str], str], None] = ignore,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
 ) -> bytes:
     """Run :func:`_drive` to completion."""
     return asyncio.run(
@@ -543,6 +547,7 @@ def _load_page(
             cookies=cookies,
             on_response=on_response,
         ),
+        loop_factory=loop_factory,
     )
 
 
@@ -825,7 +830,7 @@ def test_load_classifies_a_challenge_status_page() -> None:
         ],
     )
     with pytest.raises(CloudflareChallengeError):
-        _load_page(browser, timeout_sec=0.02)
+        _load_page(browser, timeout_sec=0.02, loop_factory=FakeClockLoop)
 
 
 def test_load_reports_every_page_response_and_the_landed_cookies_last() -> None:
@@ -1366,7 +1371,7 @@ def test_load_reports_its_own_timeout_when_teardown_also_wedges(
         return time.monotonic() - started
 
     # Outside ``raises``: an unbounded close must fail on the outer deadline.
-    elapsed = asyncio.run(real_timeout_wait(go(), 1.0))
+    elapsed = asyncio.run(real_timeout_wait(go(), 1.0), loop_factory=FakeClockLoop)
     assert elapsed < 0.5, f"teardown outlived its budget: {elapsed:.2f}s"
     assert budgets == [0.01, 5.0]
     assert browser.last_tab is not None
@@ -1407,7 +1412,12 @@ def test_load_returns_a_rendered_widget_page_without_classifying_it() -> None:
     body = '<html><div id="cf_chl_widget"></div></html>'
     # Small: this body IS challenge markup, so the settle poll waits out its
     # budget before giving up.
-    assert _load_page(_FakeBrowser(content=body), timeout_sec=0.02) == body.encode()
+    loaded = _load_page(
+        _FakeBrowser(content=body),
+        timeout_sec=0.02,
+        loop_factory=FakeClockLoop,
+    )
+    assert loaded == body.encode()
 
 
 def test_load_waits_out_a_cloudflare_interstitial() -> None:
@@ -1450,9 +1460,13 @@ def test_load_gives_up_on_an_unclearable_challenge() -> None:
     # A challenge that never clears must return what Chrome rendered, never hang.
     walled = "<html><title>Just a moment...</title></html>"
     browser = _FakeBrowser(content=walled)
-    assert _load_page(browser, "https://walled.example/", timeout_sec=0.02) == (
-        walled.encode()
+    loaded = _load_page(
+        browser,
+        "https://walled.example/",
+        timeout_sec=0.02,
+        loop_factory=FakeClockLoop,
     )
+    assert loaded == walled.encode()
     assert browser.last_tab is not None
     assert browser.last_tab.closed is True
 
@@ -2541,7 +2555,11 @@ def test_load_bounds_a_stalled_document_parse() -> None:
         assert body == wall.encode()
         return time.monotonic() - started
 
-    assert asyncio.run(asyncio.wait_for(go(), timeout=1.0)) < 0.5
+    elapsed = asyncio.run(
+        asyncio.wait_for(go(), timeout=1.0),
+        loop_factory=FakeClockLoop,
+    )
+    assert elapsed < 0.5
 
 
 def test_load_settle_ignores_child_frame_and_foreign_events() -> None:
@@ -2571,7 +2589,12 @@ def test_load_settle_ignores_child_frame_and_foreign_events() -> None:
 
     tab = _NoisyTab()
     _NoisyTab.ready_states = []
-    assert _load_page(_browser_with(tab), timeout_sec=0.04) == wall.encode()
+    loaded = _load_page(
+        _browser_with(tab),
+        timeout_sec=0.04,
+        loop_factory=FakeClockLoop,
+    )
+    assert loaded == wall.encode()
     # Only the initial load: no main-frame navigation reached the settle wait.
     assert _NoisyTab.ready_states == ["complete"]
 
